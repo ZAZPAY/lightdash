@@ -1,0 +1,63 @@
+name: Sync Lightdash into development
+
+on:
+  schedule:
+    - cron: '23 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-lightdash-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'ZAZPAY/lightdash'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check sync credentials
+        env:
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::Set UPSTREAM_SYNC_TOKEN as described in docs/fork-upstream-sync.md."
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: development
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+
+      - name: Fetch upstream main
+        run: |
+          git remote add upstream https://github.com/lightdash/lightdash.git
+          git fetch --no-tags upstream main:refs/remotes/upstream/main
+
+      - name: Update sync branch and open pull request
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if git merge-base --is-ancestor upstream/main origin/development; then
+            echo "development already contains upstream main." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # This branch mirrors upstream history; never force-push or add fork commits.
+          git push origin refs/remotes/upstream/main:refs/heads/sync/lightdash-main
+
+          pr_url="$(gh pr list --base development --head sync/lightdash-main \
+            --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$pr_url" ]; then
+            pr_url="$(gh pr create \
+              --base development \
+              --head sync/lightdash-main \
+              --title 'chore: sync Lightdash main into development' \
+              --body 'Bring upstream Lightdash main into development. Review upstream changes, workflow changes, migrations, and CI results before merging. Use a merge commit to preserve upstream ancestry. After validation in dev, promote development to main through a separate release PR.')"
+          fi
+          echo "Upstream sync PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
