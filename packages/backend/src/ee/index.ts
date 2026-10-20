@@ -162,16 +162,7 @@ type EnterpriseAppArguments = Pick<
 const aiModelCatalog = new AiModelCatalog();
 
 export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArguments> {
-    if (!lightdashConfig.license.licenseKey) {
-        return {};
-    }
-
-    const licenseClient = new LicenseClient({
-        validationProxyEnabled:
-            process.env.LIGHTDASH_LICENSE_VALIDATION_PROXY_ENABLED === 'true',
-        offlineLicenseCertificate:
-            lightdashConfig.license.licenseCertificate ?? undefined,
-    });
+    const licenseClient = new LicenseClient();
 
     const license = await licenseClient.get(lightdashConfig.license.licenseKey);
     if (license.isValid) {

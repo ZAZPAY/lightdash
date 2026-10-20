@@ -614,6 +614,21 @@ describe('mobile push notification config', () => {
 });
 
 describe('license config', () => {
+    it.each([undefined, ''])(
+        'enables EE with an absent or empty key (%s)',
+        (key) => {
+            if (key !== undefined) process.env.LIGHTDASH_LICENSE_KEY = key;
+            process.env.PRE_AGGREGATES_ENABLED = 'true';
+            process.env.PRE_AGGREGATE_RESULTS_S3_BUCKET = 'pre-aggregates';
+            process.env.PRE_AGGREGATE_RESULTS_S3_REGION = 'us-east-1';
+
+            const config = parseConfig();
+            expect(config.license.licenseKey).toBe('self-hosted-enterprise');
+            expect(config.license.licenseCertificate).toBeNull();
+            expect(config.preAggregates.enabled).toBe(true);
+        },
+    );
+
     it('supports an offline license file with a license key', () => {
         process.env.LIGHTDASH_LICENSE_KEY = 'license-key';
         process.env.LIGHTDASH_LICENSE_CERTIFICATE = 'license-certificate';
@@ -624,12 +639,10 @@ describe('license config', () => {
         });
     });
 
-    it('requires a license key with an offline license file', () => {
+    it('enables EE without a key even with a legacy certificate', () => {
         process.env.LIGHTDASH_LICENSE_CERTIFICATE = 'license-certificate';
 
-        expect(() => parseConfig()).toThrow(
-            'LIGHTDASH_LICENSE_KEY is required when LIGHTDASH_LICENSE_CERTIFICATE is set',
-        );
+        expect(parseConfig().license.licenseKey).toBe('self-hosted-enterprise');
     });
 });
 
@@ -3097,10 +3110,10 @@ describe('usage capture infrastructure', () => {
             expect(parseConfig().usageEvents.enabled).toBe(true);
         },
     );
-    it('does not create capture infrastructure without a license', () => {
+    it('creates configured capture infrastructure without a license', () => {
         delete process.env.LIGHTDASH_LICENSE_KEY;
         delete process.env.LIGHTDASH_LICENSE_CERTIFICATE;
-        expect(parseConfig().usageEvents.enabled).toBe(false);
+        expect(parseConfig().usageEvents.enabled).toBe(true);
     });
 });
 

@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+FROM ghcr.io/pnpm/pnpm:12.3.4@sha256:b81d53184f670fe19d1a33f9d5041907d314b31d596838e8133cbd83d45be043 AS pnpm-cli
+FROM node:24-trixie-slim AS node-runtime
+FROM python:3.11-slim-trixie
+COPY --from=node-runtime /usr/local /usr/local
+COPY --from=pnpm-cli /opt/pnpm /opt/pnpm
+COPY --from=pnpm-cli --chmod=755 /pnpm /pnpm
+ENV PNPM_HOME=/pnpm
+ENV PATH=/pnpm/bin:/opt/pnpm:/opt/dbt/bin:$PATH
+ENV NODE_OPTIONS=--max-old-space-size=6144
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git libatomic1 libstdc++6 libgnutls28-dev \
+    libsasl2-modules-gssapi-mit fontconfig fonts-noto-cjk postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g sfw
+RUN python3 -m venv /opt/dbt \
+    && /opt/dbt/bin/pip install --no-cache-dir 'dbt-core==1.12.0' 'dbt-postgres~=1.10.0' \
+    && ln -s /opt/dbt/bin/dbt /opt/dbt/bin/dbt1.12
+WORKDIR /usr/app
+COPY . .
+RUN --mount=type=cache,target=/pnpm/store \
+    sfw pnpm install --network-concurrency=8 --frozen-lockfile --filter backend... --filter @lightdash/frontend... --filter api-tests... --filter @lightdash/mcp-chart-app...
+RUN pnpm -F @lightdash/mcp-chart-app build
+RUN pnpm exec turbo build --concurrency=2 --filter=backend --filter=@lightdash/frontend
+EXPOSE 8080
+CMD ["pnpm", "-F", "backend", "start"]

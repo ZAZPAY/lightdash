@@ -12,7 +12,7 @@ on:
 
 jobs:
   build-and-test:
-    if: ${{ github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    if: ${{ github.repository == 'lightdash/lightdash' && github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
     name: Build & Test
     runs-on: depot-ubuntu-24.04-8
     env:
@@ -38,7 +38,7 @@ jobs:
         run: pnpm build
 
   release:
-    if: ${{ github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    if: ${{ github.repository == 'lightdash/lightdash' && github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
     # Must stay on a GitHub-hosted runner: npm's trusted-publishing provenance
     # rejects self-hosted/Depot runners (422 "Unsupported GitHub Actions runner
     # environment", run 31724064116).
@@ -137,7 +137,7 @@ jobs:
       id-token: write
       contents: read
     needs: release
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release.outputs.new_release_published == 'true') }}
+    if: ${{ github.repository == 'lightdash/lightdash' && !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release.outputs.new_release_published == 'true') }}
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
