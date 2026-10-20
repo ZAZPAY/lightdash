@@ -17,6 +17,7 @@ jobs:
   # Job 1: Build and push Docker images with multiple tags
   # ============================================================================
   build-and-push-images:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Build and Push Images
     outputs:
       image-digest: ${{ steps.build-and-push.outputs.digest }}
@@ -126,7 +127,7 @@ jobs:
   # Asset retention is opt-in until the regional buckets and writer IAM exist.
   push-static-assets:
     name: Retain frontend assets
-    if: vars.STATIC_ASSETS_RETENTION_ENABLED == 'true'
+    if: ${{ github.repository == 'lightdash/lightdash' && (vars.STATIC_ASSETS_RETENTION_ENABLED == 'true') }}
     needs: build-and-push-images
     runs-on: ubuntu-latest
     steps:
@@ -179,6 +180,7 @@ jobs:
   # Job 2: QA Blast Radius
   # ============================================================================
   qa-blast-radius:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Generate QA Blast Radius
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -233,6 +235,7 @@ jobs:
   # Job 3: CLI Release Binaries
   # ============================================================================
   check-cli-changes:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Check if CLI files changed
     runs-on: depot-ubuntu-24.04-4
     outputs:
@@ -276,7 +279,7 @@ jobs:
   build-macos-binaries:
     name: Build macOS CLI Binaries
     needs: check-cli-changes
-    if: needs.check-cli-changes.outputs.should_build == 'true'
+    if: ${{ github.repository == 'lightdash/lightdash' && (needs.check-cli-changes.outputs.should_build == 'true') }}
     runs-on: macos-latest
     permissions:
       contents: write
@@ -424,7 +427,7 @@ jobs:
   build-linux-binary:
     name: Build Linux x64 CLI Binary
     needs: check-cli-changes
-    if: needs.check-cli-changes.outputs.should_build == 'true'
+    if: ${{ github.repository == 'lightdash/lightdash' && (needs.check-cli-changes.outputs.should_build == 'true') }}
     runs-on: depot-ubuntu-24.04-4
     permissions:
       contents: write
@@ -535,6 +538,7 @@ jobs:
             "$version"
 
   update-homebrew-formula:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Update Homebrew Formula
     needs: [build-macos-binaries, build-linux-binary]
     runs-on: depot-ubuntu-24.04-4
@@ -632,6 +636,7 @@ jobs:
   # Job 4: Update Helm chart default version
   # ============================================================================
   update-helm-chart:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Update Helm Chart Version
     needs: build-and-push-images
     runs-on: ubuntu-latest
@@ -714,6 +719,7 @@ jobs:
   # Job 5: Publish versioned E2B templates
   # ============================================================================
   e2b-templates:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Publish ${{ matrix.template.display_name }} (${{ matrix.region }})
     strategy:
       fail-fast: false
@@ -792,6 +798,7 @@ jobs:
   # Job 6: Publish the data-app Cloud Run sandbox gateway image
   # ============================================================================
   data-app-sandbox-cloud-run-image:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Publish data app Cloud Run sandbox image
     runs-on: depot-ubuntu-24.04-4
     env:
@@ -882,6 +889,7 @@ jobs:
   # Job 7: Publish the python-runner Cloud Run sandbox gateway image
   # ============================================================================
   python-sandbox-cloud-run-image:
+    if: ${{ github.repository == 'lightdash/lightdash' }}
     name: Publish python Cloud Run sandbox image
     runs-on: depot-ubuntu-24.04-4
     env:

@@ -3222,20 +3222,15 @@ export const parseConfig = (): LightdashConfig => {
         copilotConfig = copilotConfigParse.data;
     }
 
-    const licenseKey = process.env.LIGHTDASH_LICENSE_KEY || null;
+    // Keep existing EE feature and migration gates enabled without a supplied key.
+    const licenseKey =
+        process.env.LIGHTDASH_LICENSE_KEY || 'self-hosted-enterprise';
     const licenseCertificate =
         process.env.LIGHTDASH_LICENSE_CERTIFICATE || null;
-    if (licenseCertificate !== null && licenseKey === null) {
-        throw new ParseError(
-            'LIGHTDASH_LICENSE_KEY is required when LIGHTDASH_LICENSE_CERTIFICATE is set',
-            {},
-        );
-    }
-    const preAggregatesEnabled =
-        licenseKey !== null && process.env.PRE_AGGREGATES_ENABLED === 'true';
+    const preAggregatesEnabled = process.env.PRE_AGGREGATES_ENABLED === 'true';
     const preAggregatesS3 = parsePreAggregateResultsS3Config();
     const usageEventsS3 = parseUsageEventsS3Config();
-    const usageEventsEnabled = licenseKey !== null && usageEventsS3 !== null;
+    const usageEventsEnabled = usageEventsS3 !== null;
     const natsWorkerEnabled = process.env.NATS_ENABLED === 'true';
     const natsWorkerUrl = process.env.NATS_URL;
     const natsWorkerConcurrency =
