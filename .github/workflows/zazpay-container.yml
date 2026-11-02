@@ -2,9 +2,9 @@ name: Zazpay container
 
 on:
   push:
-    branches: [main]
+    branches: [development]
   pull_request:
-    branches: [main]
+    branches: [development]
   workflow_dispatch:
 
 permissions:
@@ -22,6 +22,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      image: ${{ steps.push.outputs.image }}
     env:
       IMAGE: us-central1-docker.pkg.dev/p-bnpl/lightdash/lightdash
     steps:
@@ -53,7 +55,7 @@ jobs:
             -F backend test src/config/parseConfig.test.ts \
             src/ee/clients/License/LicenseClient.test.ts
       - name: Authenticate publisher
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/development' && github.event_name != 'pull_request'
         id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
@@ -62,7 +64,8 @@ jobs:
           token_format: access_token
           create_credentials_file: false
       - name: Push immutable release
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        id: push
+        if: github.ref == 'refs/heads/development' && github.event_name != 'pull_request'
         env:
           ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
           TAG: sha-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -71,6 +74,7 @@ jobs:
             -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
           docker push "$IMAGE:$TAG"
           DIGEST_REF="$(docker image inspect "$IMAGE:$TAG" --format '{{index .RepoDigests 0}}')"
+          echo "image=$DIGEST_REF" >> "$GITHUB_OUTPUT"
           {
             echo "### Published Lightdash image"
             echo
@@ -78,8 +82,41 @@ jobs:
             echo
             echo "Source commit: \`$GITHUB_SHA\`"
             echo
-            echo "Update the Argo CD GitOps image digest to promote this release."
+            echo "The deploy job bumps it in ZAZPAY/k8-manifests; Argo CD rolls lightdash-dev."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Remove registry login
-        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: always() && github.ref == 'refs/heads/development' && github.event_name != 'pull_request'
         run: docker logout us-central1-docker.pkg.dev
+
+  # Argo CD syncs k8-manifests main, so the digest bump is the deploy. Retries: other services push there too.
+  deploy:
+    needs: container
+    if: needs.container.outputs.image != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OVERLAY: services/lightdash/overlays/development
+      IMAGE: ${{ needs.container.outputs.image }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ZAZPAY/k8-manifests
+          ref: main
+          token: ${{ secrets.GITOPS_TOKEN }}
+      # sed, not kustomize edit: that rewrites the overlay and strips its comments.
+      - name: Bump the development overlay and push to main
+        run: |
+          set -euo pipefail
+          f="$OVERLAY/kustomization.yaml"
+          grep -q '^  digest: sha256:' "$f"
+          sed -i "s|^  digest: sha256:.*|  digest: ${IMAGE#*@}|" "$f"
+          if git diff --quiet; then echo 'no manifest change'; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git commit -am "chore(lightdash): bump dev image to ${GITHUB_SHA::8}"
+          for attempt in 1 2 3; do
+            if git push origin main; then exit 0; fi
+            echo "push rejected (attempt $attempt/3), rebasing"
+            git pull --rebase origin main
+          done
+          exit 1
