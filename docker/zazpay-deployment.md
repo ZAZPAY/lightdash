@@ -7,31 +7,27 @@ repository. Never commit secret values or service-account key files.
 ## Build and publication
 
 The `Zazpay container` workflow builds `docker/Dockerfile.zazpay` for
-`linux/amd64` on pull requests to `main`. It checks the non-root runtime UID and
+`linux/amd64` on pull requests to `development`. It checks the non-root runtime UID and
 runs the focused configuration and keyless EE unit tests before publication.
-Pushes to `main` and manual runs on `main` publish the resulting image to:
+Pushes to `development` and manual runs on it publish the resulting image to:
 
 ```text
 us-central1-docker.pkg.dev/p-bnpl/lightdash/lightdash
 ```
 
 Tags include the full commit SHA, workflow run ID, and attempt. The repository
-uses immutable tags. The workflow summary records the digest for GitOps
-promotion. There is no mutable `latest` release tag.
+uses immutable tags. There is no mutable `latest` release tag.
 
-Configure these GitHub repository variables before merging:
+Repository configuration:
 
-| Variable | Purpose |
-| --- | --- |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full GitHub OIDC provider resource name |
-| `GCP_CONTAINER_PUBLISHER` | Dedicated image publisher service-account email |
-| `LIGHTDASH_BUILD_RUNNER` | Optional runner label; default `ubuntu-24.04` |
+| Name | Kind | Value |
+| --- | --- | --- |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | variable | the org's `github-pool/providers/github-provider` |
+| `GCP_CONTAINER_PUBLISHER` | variable | `lightdash-publisher@p-bnpl.iam.gserviceaccount.com` (writer on the `lightdash` repo only) |
+| `LIGHTDASH_BUILD_RUNNER` | variable | optional runner label; default `ubuntu-24.04` |
+| `GITOPS_TOKEN` | secret | write access to `ZAZPAY/k8-manifests` |
 
-The publisher requires `roles/artifactregistry.writer` on the container
-repository and a federated `roles/iam.workloadIdentityUser` binding. Restrict the
-OIDC provider to this repository, the main branch, and the publishing workflow.
-Prefer stable repository/owner IDs in provider conditions. Runtime identities
-must remain separate from publishing identities.
+The publisher and its Workload Identity binding live in ZAZPAY/terraform `lightdash/dev`.
 
 Use a runner with at least 4 CPUs, 16 GiB RAM, and approximately 50 GiB free disk.
 Check actual GitHub-hosted capacity or configure an approved larger runner.
@@ -46,19 +42,10 @@ the non-root runtime before deployment.
 
 ## Argo CD promotion
 
-Publishing an image does not update the running application. Until the GitOps
-repository and its access mechanism are configured, update the image digest
-through a reviewed infrastructure PR:
-
-1. Merge application changes from `development` into `main`.
-2. Wait for container build, tests, and publication to succeed.
-3. Copy the digest from the workflow summary into the GitOps manifests for the
-   API, worker, and migration Job.
-4. Merge the infrastructure PR; Argo CD reconciles that desired state.
-
-Automate the promotion PR later with the team's existing image-update controller
-or a narrowly scoped GitHub App installation token. The application workflow
-does not have Kubernetes credentials or run `kubectl apply`.
+After a `development` push publishes, the `deploy` job seds the new digest into
+`services/lightdash/overlays/development/kustomization.yaml` on ZAZPAY/k8-manifests
+`main`; Argo CD rolls `lightdash-dev` (migrate hook, then API and scheduler). Roll
+back by reverting that bump commit, only when schema compatibility permits.
 
 ## Runtime prerequisites
 
