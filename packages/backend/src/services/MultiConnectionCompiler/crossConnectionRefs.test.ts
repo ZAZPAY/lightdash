@@ -2,11 +2,13 @@ import {
     DbtError,
     DbtProjectType,
     DimensionType,
+    getDeferredExploreName,
     isExploreError,
     SupportedDbtAdapter,
     SupportedDbtVersions,
     WarehouseTypes,
     type CreateWarehouseCredentials,
+    type DbtExploreIdentity,
     type DbtManifest,
     type DbtRawModelNode,
     type Explore,
@@ -15,6 +17,7 @@ import {
 } from '@lightdash/common';
 import { type DbtProjectScan } from '../../dbt/dbtProjectScan';
 import Logger from '../../logging/logger';
+import { type ExploreNaming } from '../../models/ProjectModel/exploreNameAllocation';
 import {
     type BoundExplore,
     type MultiConnectionCarry,
@@ -249,6 +252,7 @@ const harness = ({
             explores: AsyncIterable<BoundExplore>,
             _carry: MultiConnectionCarry,
             _beforeWrite?: StagedExploreWriteCheck,
+            _naming?: ExploreNaming,
         ) => {
             saved.push(...(await collect(explores)));
             return {
@@ -265,6 +269,7 @@ const harness = ({
         confirm: vi.fn(async () => undefined),
     };
     const projectModel = {
+        countCachedExploresForDbtSource: vi.fn(async () => 2),
         getDbtSourceIdentity: vi.fn(async () => ({
             dbtSourceUuid: 'primary-uuid',
             dbtSourceName: 'primary',
@@ -363,7 +368,6 @@ const harness = ({
             dbtProjectDir: undefined,
         },
         dbtVersion: SupportedDbtVersions.V1_8,
-        includeUnboundSources: true,
         crossSourceRefsEnabled: crossSource,
         mixedWarehouseConnectionsEnabled: mixed,
         concurrency: 2,
@@ -388,18 +392,67 @@ const harness = ({
     };
 };
 
-const warning = (project = 'shared_dimensions') =>
-    `Connection "Trino (tpch)" failed to compile, so its previous explores are kept: dbt source "analytics" references ref('${project}', 'calendar'), but no connected dbt source provides project "${project}".`;
+const primaryOrdersIdentity: DbtExploreIdentity = {
+    sourceUuid: 'primary-uuid',
+    sourceName: 'primary',
+    packageName: 'primary_project',
+    uniqueId: 'model.primary_project.primary_orders',
+    modelName: 'primary_orders',
+};
+const calendarIdentity: DbtExploreIdentity = {
+    sourceUuid: 'shared-uuid',
+    sourceName: 'shared',
+    packageName: 'shared_dimensions',
+    uniqueId: 'model.shared_dimensions.calendar',
+    modelName: 'calendar',
+};
+const singletonPrimaryOrdersIdentity: DbtExploreIdentity = {
+    ...primaryOrdersIdentity,
+    sourceName: null,
+};
+const singletonCalendarIdentity: DbtExploreIdentity = {
+    ...calendarIdentity,
+    sourceName: null,
+};
+const ordersIdentity: DbtExploreIdentity = {
+    sourceUuid: 'analytics-uuid',
+    sourceName: 'analytics',
+    packageName: 'analytics_project',
+    uniqueId: 'model.analytics_project.orders',
+    modelName: 'orders',
+};
+
+const expectExploreIdentities = (
+    explores: (Explore | ExploreError)[],
+    identities: DbtExploreIdentity[],
+) => {
+    expect(explores).toHaveLength(identities.length);
+    expect(explores.filter(isExploreError)).toEqual([]);
+    expect(
+        Object.fromEntries(
+            explores.map((explore) => [explore.name, explore.dbtModelIdentity]),
+        ),
+    ).toEqual(
+        Object.fromEntries(
+            identities.map((identity) => [
+                getDeferredExploreName({
+                    unique_id: identity.uniqueId,
+                    lightdash_source_uuid: identity.sourceUuid ?? undefined,
+                }),
+                identity,
+            ]),
+        ),
+    );
+};
 
 const expectOriginalExplores = async (
     stream: AsyncIterable<Explore | ExploreError>,
 ) => {
     const explores = await collect(stream);
-    expect(explores.map((explore) => explore.name).sort()).toEqual([
-        'calendar',
-        'primary_orders',
+    expectExploreIdentities(explores, [
+        primaryOrdersIdentity,
+        calendarIdentity,
     ]);
-    expect(explores.filter(isExploreError)).toEqual([]);
 };
 
 describe('cross-connection dbt ref diagnostics', () => {
@@ -413,7 +466,9 @@ describe('cross-connection dbt ref diagnostics', () => {
             const failure = new DbtError('leaf_a failed');
             h.input.diskStats = { diskEvictions: 7, diskRecreations: 3 };
             if (failsCompile) {
-                h.fetchSourceManifest.mockRejectedValue(failure);
+                h.input.primary.fetchManifest = vi
+                    .fn()
+                    .mockRejectedValue(failure);
                 await expect(h.compiler.compile(h.input)).rejects.toThrow(
                     'leaf_a failed',
                 );
@@ -449,11 +504,22 @@ describe('cross-connection dbt ref diagnostics', () => {
             'project',
             expect.anything(),
             { kind: 'connections', warehouseConnectionUuids: ['extra'] },
+            undefined,
+            {
+                mode: 'refresh',
+                models: [primaryOrdersIdentity, calendarIdentity],
+                refreshedSourceUuids: [
+                    'primary-uuid',
+                    'primary-uuid',
+                    'shared-uuid',
+                ],
+                warnings: compilation.warnings,
+            },
         );
-        expect(h.saved.map(({ explore }) => explore.name).sort()).toEqual([
-            'calendar',
-            'primary_orders',
-        ]);
+        expectExploreIdentities(
+            h.saved.map(({ explore }) => explore),
+            [primaryOrdersIdentity, calendarIdentity],
+        );
         expect(
             h.saved.map(
                 ({ warehouseConnectionUuid }) => warehouseConnectionUuid,
@@ -478,10 +544,15 @@ describe('cross-connection dbt ref diagnostics', () => {
         await expectOriginalExplores(compilation.exploreStream);
     });
 
-    it('keeps the exact existing warning for an unknown project', async () => {
+    it('carries a source whose ref names an unknown project', async () => {
         const h = harness({ referencedProject: 'not_connected' });
         const compilation = await h.compiler.compile(h.input);
-        expect(compilation.warnings).toEqual([warning('not_connected')]);
+        expect(compilation.warnings).toContainEqual(
+            expect.stringContaining('Source "analytics" failed'),
+        );
+        expect(compilation.carry).toMatchObject({
+            dbtSourceUuids: ['analytics-uuid'],
+        });
         await expectOriginalExplores(compilation.exploreStream);
     });
 
@@ -491,20 +562,34 @@ describe('cross-connection dbt ref diagnostics', () => {
             const h = harness({ providerGroup: 'extra', scanned });
             const compilation = await h.compiler.compile(h.input);
             const explores = await collect(compilation.exploreStream);
-            expect(explores.map((explore) => explore.name).sort()).toEqual([
-                'calendar',
-                'orders',
-                'primary_orders',
+            expectExploreIdentities(explores, [
+                singletonPrimaryOrdersIdentity,
+                calendarIdentity,
+                ordersIdentity,
             ]);
-            expect(explores.filter(isExploreError)).toEqual([]);
-            for (const name of ['calendar', 'orders']) {
-                expect(compilation.bindingOf(name)).toBe('extra');
-                expect(
-                    explores.find((explore) => explore.name === name)
-                        ?.targetDatabase,
-                ).toBe(SupportedDbtAdapter.TRINO);
+            for (const identity of [calendarIdentity, ordersIdentity]) {
+                const explore = explores.find(
+                    (incoming) =>
+                        incoming.dbtModelIdentity?.uniqueId ===
+                        identity.uniqueId,
+                )!;
+                expect(compilation.bindingOf(explore.name)).toBe('extra');
+                expect(explore.targetDatabase).toBe(SupportedDbtAdapter.TRINO);
             }
-            expect(compilation.bindingOf('primary_orders')).toBeNull();
+            const primaryOrders = explores.find(
+                (explore) =>
+                    explore.dbtModelIdentity?.uniqueId ===
+                    primaryOrdersIdentity.uniqueId,
+            )!;
+            expect(compilation.bindingOf(primaryOrders.name)).toBeNull();
+            expect(compilation.naming?.models).toEqual(
+                expect.arrayContaining([
+                    singletonPrimaryOrdersIdentity,
+                    calendarIdentity,
+                    ordersIdentity,
+                ]),
+            );
+            expect(compilation.naming?.models).toHaveLength(3);
             expect(compilation.warnings).toEqual([]);
             const analyticsCalls = h.fetchSourceManifest.mock.calls.filter(
                 ([dbtSource]) => dbtSource.name === 'analytics',
@@ -598,7 +683,17 @@ describe('cross-connection dbt ref diagnostics', () => {
                 'Cross-source refs only work between dbt sources on the same warehouse connection.',
             ),
         ]);
-        expect(compilation.bindingOf('calendar')).toBe('later');
+        const explores = await collect(compilation.exploreStream);
+        expectExploreIdentities(explores, [
+            singletonPrimaryOrdersIdentity,
+            singletonCalendarIdentity,
+        ]);
+        const calendar = explores.find(
+            (explore) =>
+                explore.dbtModelIdentity?.uniqueId ===
+                calendarIdentity.uniqueId,
+        )!;
+        expect(compilation.bindingOf(calendar.name)).toBe('later');
         expect(
             h.prepareSourceManifest.mock.calls.map(
                 ([dbtSource]) => dbtSource.name,
@@ -614,7 +709,17 @@ describe('cross-connection dbt ref diagnostics', () => {
         expect(compilation.warnings).toEqual([
             expect.stringContaining('Earlier extra'),
         ]);
-        expect(compilation.bindingOf('calendar')).toBe('later');
+        const explores = await collect(compilation.exploreStream);
+        expectExploreIdentities(explores, [
+            singletonPrimaryOrdersIdentity,
+            singletonCalendarIdentity,
+        ]);
+        const calendar = explores.find(
+            (explore) =>
+                explore.dbtModelIdentity?.uniqueId ===
+                calendarIdentity.uniqueId,
+        )!;
+        expect(compilation.bindingOf(calendar.name)).toBe('later');
     });
 
     it('keeps successful scans from a partly failed connection group', async () => {
@@ -670,12 +775,15 @@ describe('cross-connection dbt ref diagnostics', () => {
         expect(h.fetchSourceManifest).not.toHaveBeenCalled();
     });
 
-    it('keeps the exact existing hint when cross-source refs are disabled', async () => {
+    it('carries a failing source when cross-source refs are disabled', async () => {
         const h = harness({ crossSource: false });
         const compilation = await h.compiler.compile(h.input);
-        expect(compilation.warnings).toEqual([
-            `Connection "Trino (tpch)" failed to compile, so its previous explores are kept: Failed to load dbt source "analytics": ${missing().message} This model references a model in another dbt project. Connect that project as a dbt source and enable cross-source dbt refs for your organization.`,
-        ]);
+        expect(compilation.warnings).toContainEqual(
+            expect.stringContaining('Source "analytics" failed'),
+        );
+        expect(compilation.carry).toMatchObject({
+            dbtSourceUuids: ['analytics-uuid'],
+        });
         expect(h.prepareSourceManifest).not.toHaveBeenCalled();
         expect(h.dbtSourceRefCatalogModel.get).not.toHaveBeenCalled();
         expect(
@@ -718,18 +826,31 @@ describe('cross-source compile boundaries', () => {
                 );
             const compilation = await h.compiler.compile(h.input);
             await expectOriginalExplores(compilation.exploreStream);
-            expect(compilation.carry).toEqual({
+            expect(compilation.carry).toMatchObject({
                 kind: 'connections',
-                warehouseConnectionUuids: ['extra'],
+                warehouseConnectionUuids: phase === 'clone' ? [] : ['extra'],
             });
-            expect(compilation.warnings).toEqual([
-                `Connection "Trino (tpch)" failed to compile, so its previous explores are kept: ${phase === 'clone' ? 'Failed to load dbt source "analytics": ' : ''}${failure.message}`,
-            ]);
+            if (phase === 'clone') {
+                expect(compilation.carry).toMatchObject({
+                    dbtSourceUuids: ['analytics-uuid'],
+                });
+                expect(compilation.warnings).toContainEqual(
+                    expect.stringContaining('Source "analytics" failed'),
+                );
+                expect(compilation.warnings.join(' ')).not.toContain(
+                    failure.message,
+                );
+            } else {
+                expect(compilation.warnings).toEqual([
+                    `Connection "Trino (tpch)" failed to compile, so its previous explores are kept: ${failure.message}`,
+                ]);
+            }
         },
     );
 
     it('settles cancelled preparations before releasing their warehouse scope', async () => {
         const h = harness({ providerGroup: 'extra' });
+        const context = shutdownContext();
         let siblingStarted!: () => void;
         const started = new Promise<void>((done) => {
             siblingStarted = done;
@@ -741,7 +862,8 @@ describe('cross-source compile boundaries', () => {
             async (dbtSource, _credentials, _connection, options) => {
                 if (dbtSource.name === 'analytics') {
                     await started;
-                    throw new Error('leaf_a clone failed');
+                    context.controller.abort(new CompileInterruptedError());
+                    throw context.controller.signal.reason;
                 }
                 return new Promise((_resolve, reject) => {
                     options!.signal!.addEventListener(
@@ -765,16 +887,15 @@ describe('cross-source compile boundaries', () => {
                 released = true;
             }
         });
-        const work = h.compiler.compile(h.input);
+        const work = compileShutdown.run(context, () =>
+            h.compiler.compile(h.input),
+        );
+        const outcome = work.catch((error: unknown) => error);
         await vi.waitFor(() => expect(aborted).toBe(true));
         expect(released).toBe(false);
         settleSibling();
-        const compilation = await work;
+        expect(await outcome).toBeInstanceOf(CompileInterruptedError);
         expect(released).toBe(true);
-        expect(compilation.carry).toEqual({
-            kind: 'connections',
-            warehouseConnectionUuids: ['extra'],
-        });
     });
 
     it.each(['prepare', 'ls'] as const)(

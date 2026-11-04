@@ -137,6 +137,7 @@ export const lightdashConfigMock: LightdashConfig = {
     dashboard: {
         maxTilesPerTab: 50,
         maxTabsPerDashboard: 20,
+        maxConcurrentTileQueries: null,
         disableSentryTracking: false,
     },
     database: {
@@ -201,6 +202,7 @@ export const lightdashConfigMock: LightdashConfig = {
         },
     },
     staticAssets: {},
+    uploads: { s3: null },
     natsWorker: {
         enabled: false,
         url: undefined,
@@ -231,7 +233,7 @@ export const lightdashConfigMock: LightdashConfig = {
                 retentionDays: 30,
                 batchSize: 1000,
                 delayMs: 100,
-                maxBatches: 100,
+                maxBatches: 300,
                 schedule: '0 2 * * *',
             },
         },
@@ -239,6 +241,16 @@ export const lightdashConfigMock: LightdashConfig = {
             cleanup: {
                 enabled: true,
                 retentionDays: 30,
+                batchSize: 1000,
+                delayMs: 100,
+                maxBatches: 100,
+            },
+        },
+        appStateHistory: {
+            cleanup: {
+                enabled: true,
+                retentionDays: 90,
+                keepVersions: 50,
                 batchSize: 1000,
                 delayMs: 100,
                 maxBatches: 100,
@@ -318,18 +330,10 @@ export const lightdashConfigMock: LightdashConfig = {
     ai: {
         agentResultIdentityCheckEnabled: true,
         decisions: {
-            provider: 'jev',
             apiKey: null,
             model: 'jev-1.13.0',
             timeoutMs: 900,
         },
-        lunaDecisions: {
-            provider: 'luna',
-            apiKey: null,
-            model: 'gpt-6-luna',
-            timeoutMs: 900,
-        },
-        lunaShadowEnabled: false,
         copilot: {
             enabled: false,
             debugLoggingEnabled: false,
@@ -348,6 +352,7 @@ export const lightdashConfigMock: LightdashConfig = {
                     modelName: 'gpt-5.4',
                     embeddingModelName: 'text-embedding-3-small',
                     zeroDataRetention: false,
+                    useChatCompletions: false,
                     customHeaders: {},
                     supportsStreaming: true,
                 },
@@ -394,6 +399,12 @@ export const lightdashConfigMock: LightdashConfig = {
         clientSecret: undefined,
         redirectDomain: 'test',
     },
+    liveSources: {
+        posthog: {
+            oauthClientId: undefined,
+            oauthClientSecret: undefined,
+        },
+    },
     headlessBrowser: {
         internalLightdashHost: 'https://test.lightdash.cloud',
         internalLightdashHostIgnoreHttpsErrors: false,
@@ -407,12 +418,6 @@ export const lightdashConfigMock: LightdashConfig = {
     },
     appearance: {},
     microsoftTeams: {
-        enabled: false,
-    },
-    serviceAccount: {
-        enabled: false,
-    },
-    organizationWarehouseCredentials: {
         enabled: false,
     },
     athenaWarehouseIamRoleAuth: {
@@ -432,16 +437,12 @@ export const lightdashConfigMock: LightdashConfig = {
     },
     aiWriteback: {
         legacyAnthropicApiKey: null,
-        codingAgentMaxRepoSizeMb: 500,
     },
     mcp: {
         enabled: true,
         runSqlMaxLimit: 5000,
     },
     customRoles: {
-        enabled: false,
-    },
-    editYamlInUi: {
         enabled: false,
     },
     funnelBuilder: {
@@ -567,6 +568,8 @@ export const lightdashConfigMock: LightdashConfig = {
         azureSandboxesDataAppDiskImage: null,
         azureSandboxesAiWritebackGroup: null,
         azureSandboxesAiWritebackDiskImage: null,
+        azureSandboxesPythonGroup: null,
+        azureSandboxesPythonDiskImage: null,
         gcpCloudRun: {
             sandboxUrl: null,
             sandboxSecret: null,
@@ -577,8 +580,6 @@ export const lightdashConfigMock: LightdashConfig = {
         },
         e2bAgentOnboardingTemplateName: 'lightdash-agent-onboarding',
         e2bAgentOnboardingTemplateTag: 'test',
-        e2bCodingAgentTemplateName: 'lightdash-ai-coding-agent',
-        e2bCodingAgentTemplateTag: '',
         otel: {
             enabled: false,
             endpoint: '',
@@ -592,7 +593,13 @@ export const lightdashConfigMock: LightdashConfig = {
         // Off in the test fixture (real default is `true`) so tests never make
         // a live OSV call.
         dependencyMalwareCheckEnabled: false,
-        chartRegistry: { url: null, allowInsecure: false, channel: 'stable' },
+        chartRegistry: {
+            url: null,
+            allowInsecure: false,
+            authorizationHeader: null,
+            allowPrivateHosts: false,
+            channel: 'stable',
+        },
     },
     enabledFeatureFlags: new Set<string>(),
     disabledFeatureFlags: new Set<string>(),
@@ -608,5 +615,18 @@ export const lightdashConfigWithGoogleOAuthMock: LightdashConfig = {
             oauth2ClientId: 'test-google-client-id',
             oauth2ClientSecret: 'test-google-client-secret',
         },
+    },
+};
+
+export const lightdashConfigWithAppRuntimeMock: LightdashConfig = {
+    ...lightdashConfigMock,
+    appRuntime: {
+        ...lightdashConfigMock.appRuntime,
+        s3: {
+            region: 'us-east-1',
+            endpoint: 'http://localhost:9000',
+            bucket: 'apps',
+        },
+        sandboxProvider: 'docker',
     },
 };

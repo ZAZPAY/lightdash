@@ -18,6 +18,7 @@ import {
     useState,
 } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import classes from './AppIframePreview.module.css';
 import { type DeliveryCaptureAccumulator } from './deliveryCapture/deliveryCaptureAccumulator';
 import {
     useAppSdkBridge,
@@ -167,6 +168,8 @@ type Props = {
     insights?: DataAppInsightsPayload | null;
     onInsightAction?: (action: DataAppInsightAction) => void;
     onInsightsInUse?: () => void;
+    onInsightInstructionsChange?: (instructions: string | null) => void;
+    onInsightAnalyseOnLoadChange?: (analyseOnLoad: boolean | null) => void;
     onMountedQueriesChange?: (queryUuids: string[]) => void;
 };
 
@@ -236,6 +239,8 @@ const AppIframePreview = forwardRef<AppIframePreviewHandle, Props>(
             insights,
             onInsightAction,
             onInsightsInUse,
+            onInsightInstructionsChange,
+            onInsightAnalyseOnLoadChange,
             onMountedQueriesChange,
         },
         ref,
@@ -386,6 +391,8 @@ const AppIframePreview = forwardRef<AppIframePreviewHandle, Props>(
             insights,
             onInsightAction,
             onInsightsInUse,
+            onInsightInstructionsChange,
+            onInsightAnalyseOnLoadChange,
             onMountedQueriesChange,
         });
         const { captureScreenshot } = useIframeScreenshot(iframeRef);
@@ -469,15 +476,10 @@ const AppIframePreview = forwardRef<AppIframePreviewHandle, Props>(
                 data-tour-docs="data-apps.mdx#choosing-a-template:li1"
                 ref={iframeRef}
                 src={effectiveSrc}
-                style={{
-                    width: '100%',
-                    height: '100%',
-                    border: 'none',
-                    colorScheme,
-                    // Keep the host surface visible until the app applies its theme.
-                    visibility:
-                        loadedSrc === effectiveSrc ? 'visible' : 'hidden',
-                }}
+                className={classes.frame}
+                data-color-scheme={colorScheme}
+                // Keep the host surface visible until the app applies its theme.
+                data-loading={loadedSrc !== effectiveSrc || undefined}
                 title="App preview"
                 sandbox="allow-scripts allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
                 allow=""
