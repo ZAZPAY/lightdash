@@ -20,6 +20,8 @@ import {
     isLockedDashboardFilterRule,
 } from '../../dashboardFilters/lockedFilters';
 import { DashboardStoreContext } from './context';
+import { selectActiveTabUuid } from './dashboardEditSelectors';
+import { selectTemporaryFilterLocks } from './dashboardSourceSelectors';
 import {
     combineDashboardFilters,
     getSafeTemporaryFilters,
@@ -42,10 +44,10 @@ export const useDashboardStore = createStoreHook(
 /** Temporary filters minus those that conflict with a filter locked on the active tab */
 export const useDashboardTemporaryFilters = () => {
     const temporaryFilters = useDashboardSelector(selectRawTemporaryFilters);
-    const temporaryFilterLocks = useDashboardContext(
-        (c) => c.temporaryFilterLocks,
+    const temporaryFilterLocks = useDashboardSelector(
+        selectTemporaryFilterLocks,
     );
-    const activeTabUuid = useDashboardContext((c) => c.activeTab?.uuid);
+    const activeTabUuid = useDashboardSelector(selectActiveTabUuid);
     return useMemo(
         () =>
             getSafeTemporaryFilters(
@@ -59,10 +61,10 @@ export const useDashboardTemporaryFilters = () => {
 
 /** Subscribes to the boolean only, so callers re-render when it flips */
 export const useHasDashboardTemporaryFilters = () => {
-    const temporaryFilterLocks = useDashboardContext(
-        (c) => c.temporaryFilterLocks,
+    const temporaryFilterLocks = useDashboardSelector(
+        selectTemporaryFilterLocks,
     );
-    const activeTabUuid = useDashboardContext((c) => c.activeTab?.uuid);
+    const activeTabUuid = useDashboardSelector(selectActiveTabUuid);
     return useDashboardSelector((state) => {
         const { filters } = getSafeTemporaryFilters(
             selectRawTemporaryFilters(state),
@@ -85,6 +87,7 @@ export const useDashboardAllFilters = () => {
 
 export const useDashboardUnmetFilterRequirements = () => {
     const dashboardFilters = useDashboardSelector(selectDashboardFilters);
+    // Through the context view, so a SettledFilterFields override applies here too
     const filterableFieldsByTileUuid = useDashboardContext(
         (c) => c.filterableFieldsByTileUuid,
     );

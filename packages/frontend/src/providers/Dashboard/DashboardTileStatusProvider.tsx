@@ -27,6 +27,7 @@ import {
     useDashboardDispatch,
     useDashboardSelector,
 } from '../../features/dashboard/store';
+import { type TileQueryRegistration } from '../../features/dashboard/store/dashboardTileStatusReducer';
 import {
     auditResponseToTileStatuses,
     useDashboardPreAggregateAudit,
@@ -65,6 +66,22 @@ const DashboardTileStatusProvider: React.FC<
     const setIsAutoRefresh = useCallback(
         (autoRefresh: boolean) => {
             dispatch(dashboardTileStatusActions.setIsAutoRefresh(autoRefresh));
+        },
+        [dispatch],
+    );
+
+    const registerTileQuery = useCallback(
+        (registration: TileQueryRegistration) => {
+            dispatch(
+                dashboardTileStatusActions.registerTileQuery(registration),
+            );
+        },
+        [dispatch],
+    );
+
+    const unregisterTileQuery = useCallback(
+        (tileUuid: string) => {
+            dispatch(dashboardTileStatusActions.unregisterTileQuery(tileUuid));
         },
         [dispatch],
     );
@@ -151,17 +168,21 @@ const DashboardTileStatusProvider: React.FC<
             visibleEmbedTileUuids,
         ],
     );
+    // In embeds the identity must change with the load cycle, so tiles that
+    // don't re-query re-run their effect and count as settled in the new cycle.
+    // Outside embeds it's unused and stays stable.
+    const embedTileCycleKey = embedToken ? embedLoadCycleKey : undefined;
     const markEmbedTileComplete = useCallback(
         (tileUuid: string) => {
-            if (!embedToken) return;
+            if (embedTileCycleKey === undefined) return;
             dispatch(
                 dashboardTileStatusActions.markEmbedTileComplete({
                     tileUuid,
-                    cycleKey: embedLoadCycleKey,
+                    cycleKey: embedTileCycleKey,
                 }),
             );
         },
-        [dispatch, embedLoadCycleKey, embedToken],
+        [dispatch, embedTileCycleKey],
     );
 
     const addAvailableCustomGranularities = useCallback(
@@ -266,7 +287,15 @@ const DashboardTileStatusProvider: React.FC<
         dispatch(dashboardTileStatusActions.resetScreenshotTiles());
     }, [dispatch, dashboardTiles, activeTab]);
 
-    // Memoized mapping of tile UUIDs to their display names
+    // Tile names keyed by uuid; moving or resizing tiles keeps them (and the
+    // pre-aggregate statuses derived from them) stable
+    const tileNamesKey = JSON.stringify(
+        dashboardTiles?.map((tile) => [
+            tile.uuid,
+            tile.properties.title,
+            isDashboardChartTileType(tile) ? tile.properties.chartName : null,
+        ]) ?? null,
+    );
     const tileNamesById = useMemo(() => {
         if (!dashboardTiles) return {};
 
@@ -285,7 +314,8 @@ const DashboardTileStatusProvider: React.FC<
             acc[tile.uuid] = tileName;
             return acc;
         }, {});
-    }, [dashboardTiles]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tileNamesKey]);
 
     const addResultsCacheTime = useCallback(
         (cacheMetadata?: CacheMetadata) => {
@@ -346,6 +376,8 @@ const DashboardTileStatusProvider: React.FC<
             clearCacheAndFetch,
             updateSqlChartTilesMetadata,
             markTileLoaded,
+            registerTileQuery,
+            unregisterTileQuery,
             markEmbedTileComplete,
             chartTileUuidsToLoad,
             addAvailableCustomGranularities,
@@ -363,6 +395,8 @@ const DashboardTileStatusProvider: React.FC<
             clearCacheAndFetch,
             updateSqlChartTilesMetadata,
             markTileLoaded,
+            registerTileQuery,
+            unregisterTileQuery,
             markEmbedTileComplete,
             chartTileUuidsToLoad,
             addAvailableCustomGranularities,

@@ -10,11 +10,18 @@ import { IconChevronUp } from '@tabler/icons-react';
 import { useState, type FC } from 'react';
 import MantineIcon from '../../../../../components/common/MantineIcon';
 import {
+    selectActiveTabUuid,
+    selectControlSections,
     selectDashboardFilters,
     selectDateZoomGranularity,
     useDashboardSelector,
     useDashboardTemporaryFilters,
 } from '../../../../../features/dashboard/store';
+import { AddControl } from '../../../../../features/dashboardControls/AddControl';
+import { MappingSwap } from '../../../../../features/dashboardControls/ControlsBar';
+import { FilterPills } from '../../../../../features/dashboardControls/FilterPills';
+import { SectionedFilters } from '../../../../../features/dashboardControls/SectionedFilters';
+import { SettledFilterFields } from '../../../../../features/dashboardControls/SettledFilterFields';
 import { DashboardFiltersBarSummary } from '../../../../../features/dashboardFilters/DashboardFiltersBarSummary';
 import { DateZoom } from '../../../../../features/dateZoom';
 import { getDateZoomSummaryLabel } from '../../../../../features/dateZoom/utils';
@@ -22,7 +29,9 @@ import { useActiveTabParameters } from '../../../../../hooks/dashboard/useActive
 import { useUiStrings } from '../../../../providers/Embed/useUiStrings';
 import { embedContractClass } from '../../styles/embedClassContract';
 import styles from './EmbedDashboardFilterBar.module.css';
-import EmbedDashboardFilters from './EmbedDashboardFilters';
+import EmbedDashboardFilters, {
+    EmbedResetFiltersButton,
+} from './EmbedDashboardFilters';
 import EmbedDashboardParameters from './EmbedDashboardParameters';
 
 type Props = {
@@ -31,6 +40,53 @@ type Props = {
     /** Tiles rendered on the active tab */
     activeTiles: DashboardTile[];
     isEditMode?: boolean;
+    /** The filters open in the dashboard's filter rail (default false). */
+    isControlsEnabled?: boolean;
+};
+
+// The filters as the rail's bar has them: "Add filter" and the pills open
+// the rail, and stay on screen while it is open; a dashboard with sections
+// shows them as the app's viewer bar does
+const ControlsFilterArea: FC<{ canAddFilters: boolean }> = ({
+    canAddFilters,
+}) => {
+    const activeTabUuid = useDashboardSelector(selectActiveTabUuid);
+    const hasSections = useDashboardSelector(
+        (state) => selectControlSections(state).length > 0,
+    );
+    const getUiString = useUiStrings();
+    const actions = (
+        <>
+            <AddControl
+                triggerClassName={embedContractClass('ld-dashboard-add-filter')}
+                unsavedFiltersTooltip={getUiString(
+                    'filters.unsavedFiltersTooltip',
+                )}
+            />
+            {!canAddFilters && <EmbedResetFiltersButton />}
+        </>
+    );
+    const triggerClassName = embedContractClass('ld-dashboard-filter');
+    // A tile added or removed keeps the pills, as on the app's bar
+    return (
+        <SettledFilterFields>
+            {hasSections ? (
+                <SectionedFilters
+                    activeTabUuid={activeTabUuid}
+                    viewerActions={actions}
+                    triggerClassName={triggerClassName}
+                />
+            ) : (
+                <>
+                    {actions}
+                    <FilterPills
+                        activeTabUuid={activeTabUuid}
+                        triggerClassName={triggerClassName}
+                    />
+                </>
+            )}
+        </SettledFilterFields>
+    );
 };
 
 const EmbedDashboardFilterBar: FC<Props> = ({
@@ -38,6 +94,7 @@ const EmbedDashboardFilterBar: FC<Props> = ({
     shouldShowFilters,
     activeTiles,
     isEditMode = false,
+    isControlsEnabled = false,
 }) => {
     const [isCollapsed, setIsCollapsed] = useState(false);
 
@@ -95,7 +152,7 @@ const EmbedDashboardFilterBar: FC<Props> = ({
         );
     }
 
-    return (
+    const bar = (
         <Group
             className={embedContractClass(
                 'ld-dashboard-filters',
@@ -114,13 +171,17 @@ const EmbedDashboardFilterBar: FC<Props> = ({
                 gap="xs"
                 flex="1 1 24rem"
                 miw={0}
+                className={isControlsEnabled ? styles.filterArea : undefined}
             >
-                {shouldShowFilters && (
-                    <EmbedDashboardFilters
-                        canAddFilters={canAddFilters}
-                        isEditMode={isEditMode}
-                    />
-                )}
+                {shouldShowFilters &&
+                    (isControlsEnabled ? (
+                        <ControlsFilterArea canAddFilters={canAddFilters} />
+                    ) : (
+                        <EmbedDashboardFilters
+                            canAddFilters={canAddFilters}
+                            isEditMode={isEditMode}
+                        />
+                    ))}
                 {shouldShowFilters && hasVisibleParameters && (
                     <Divider
                         className={styles.filterParameterDivider}
@@ -170,6 +231,8 @@ const EmbedDashboardFilterBar: FC<Props> = ({
             </Group>
         </Group>
     );
+    // Choosing a filter's tiles: the mapping row takes the bar's place
+    return isControlsEnabled ? <MappingSwap>{bar}</MappingSwap> : bar;
 };
 
 export default EmbedDashboardFilterBar;

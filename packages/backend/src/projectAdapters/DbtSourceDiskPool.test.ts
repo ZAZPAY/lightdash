@@ -45,7 +45,7 @@ describe('DbtSourceDiskPool', () => {
                     key: 'leaf_a',
                     context: null,
                     fetch,
-                    prepare: ({ signal } = {}) =>
+                    prepare: ({ signal }: { signal?: AbortSignal } = {}) =>
                         pool.run(
                             'leaf_a',
                             () =>
@@ -382,4 +382,41 @@ describe('DbtSourceDiskPool', () => {
         await Promise.all([first, cleanup]);
         expect(remove).toHaveBeenCalledOnce();
     });
+});
+
+it('keeps an eviction failure fatal even when source failures are isolated', async () => {
+    const pool = new DbtSourceDiskPool(1);
+    const resident = {
+        releaseDisk: vi.fn(async () => {
+            throw new Error('eviction failed');
+        }),
+    } as unknown as ProjectAdapter;
+    await pool.run(
+        'resident',
+        async () => resident,
+        async () => undefined,
+    );
+    const onSourceFailure = vi.fn(async () => true);
+    await expect(
+        resolveCrossSourceManifests({
+            tasks: [
+                {
+                    key: 'next',
+                    context: null,
+                    prepare: (options) =>
+                        pool.run(
+                            'next',
+                            async () => resident,
+                            async () => null,
+                            options?.signal,
+                        ),
+                    fetch: async () => result('next'),
+                },
+            ],
+            enabled: true,
+            concurrency: 1,
+            onSourceFailure,
+        }),
+    ).rejects.toThrow('disk pool');
+    expect(onSourceFailure).not.toHaveBeenCalled();
 });

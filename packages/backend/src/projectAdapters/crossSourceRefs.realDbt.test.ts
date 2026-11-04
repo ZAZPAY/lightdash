@@ -1,12 +1,20 @@
 import {
     combineManifestSources,
+    convertExplores,
     DbtError,
+    DEFAULT_SPOTLIGHT_CONFIG,
+    getCompiledModels,
+    getDbtManifestVersion,
     getExternalModelNodesFromManifest,
+    getModelsFromManifest,
     isExternalDbtNode,
     ParameterError,
+    SupportedDbtAdapter,
     SupportedDbtVersions,
     type DbtRawModelNode,
 } from '@lightdash/common';
+import { ManifestValidator } from '@lightdash/common/dbt/validation';
+import { warehouseClientMock } from '@lightdash/common/src/compiler/exploreCompiler.mock';
 import execa from 'execa';
 import * as fs from 'fs/promises';
 import os from 'os';
@@ -15,6 +23,7 @@ import { DbtCliClient } from '../dbt/dbtCliClient';
 import { scanDbtProject } from '../dbt/dbtProjectScan';
 import {
     resolveCrossSourceManifests,
+    type CrossSourceCatalog,
     type CrossSourceFetchTask,
     type CrossSourceResolution,
 } from './crossSourceRefs';
@@ -226,6 +235,117 @@ describe.skipIf(!executables)('cross-source refs with real dbt', () => {
                     enabled,
                     concurrency: 1,
                 });
+
+            it.each([
+                {
+                    scenario: 'P1',
+                    explicit: true,
+                    usesPrimary: true,
+                    oneArg: true,
+                },
+                {
+                    scenario: 'P2',
+                    explicit: false,
+                    usesPrimary: true,
+                    oneArg: true,
+                },
+                {
+                    scenario: 'P3',
+                    explicit: true,
+                    usesPrimary: false,
+                    oneArg: true,
+                },
+                {
+                    scenario: 'P5',
+                    explicit: true,
+                    usesPrimary: true,
+                    oneArg: false,
+                },
+                {
+                    scenario: 'package kwarg',
+                    explicit: true,
+                    usesPrimary: true,
+                    oneArg: true,
+                },
+            ])(
+                'handles same-named models: $scenario',
+                async ({ scenario, explicit, usesPrimary, oneArg }) => {
+                    const syntheticTask = async (
+                        project: string,
+                        models: Record<string, string>,
+                    ) => {
+                        const source = await task('shared_dimensions');
+                        const copy =
+                            clients[clients.length - 1].dbtProjectDirectory;
+                        await fs.writeFile(
+                            path.join(copy, 'dbt_project.yml'),
+                            `name: ${project}\nversion: '1.0.0'\nconfig-version: 2\nprofile: cross_source_refs\nmodels:\n  ${project}:\n    +access: public\n`,
+                        );
+                        await fs.rm(path.join(copy, 'models'), {
+                            recursive: true,
+                        });
+                        await fs.mkdir(path.join(copy, 'models'));
+                        await Promise.all(
+                            Object.entries(models).map(([name, sql]) =>
+                                fs.writeFile(
+                                    path.join(copy, 'models', `${name}.sql`),
+                                    sql,
+                                ),
+                            ),
+                        );
+                        return { ...source, key: project, context: project };
+                    };
+                    const tasks = [
+                        await syntheticTask('primary', {
+                            m: 'select 1 as id',
+                            other_model: 'select 1 as id',
+                        }),
+                        await syntheticTask('up_one', { m: 'select 2 as id' }),
+                        await syntheticTask('consumer', {
+                            a: `select * from {{ ${oneArg ? "ref('m')" : "ref('up_one', 'm')"} }}`,
+                            ...(explicit
+                                ? {
+                                      b: `select * from {{ ${scenario === 'package kwarg' ? "ref('m', package='up_one')" : "ref('up_one', 'm')"} }}`,
+                                  }
+                                : {}),
+                            ...(usesPrimary
+                                ? {
+                                      c: "select * from {{ ref('primary', 'other_model') }}",
+                                  }
+                                : {}),
+                        }),
+                    ];
+                    const resolution = resolveCrossSourceManifests({
+                        tasks,
+                        enabled: true,
+                        concurrency: 1,
+                    });
+                    if (!explicit) {
+                        await expect(resolution).rejects.toThrow(
+                            "name 'm' is defined by several dbt sources. Use ref('project', 'model')",
+                        );
+                        return;
+                    }
+                    const resolved = await resolution;
+                    expect(resolved.passes).toBe(1);
+                    expect(resolved.contradictions).toBe(0);
+                    expect(
+                        resolved.sources?.map((source) => source.lsRuns),
+                    ).toEqual([1, 1, 1]);
+                    const consumer = resolved.results.find(
+                        (entry) => entry.task.key === 'consumer',
+                    )!;
+                    for (const name of ['a', 'b'])
+                        expect(
+                            (
+                                consumer.result.manifest.nodes[
+                                    `model.consumer.${name}`
+                                ] as DbtRawModelNode
+                            ).depends_on?.nodes,
+                        ).toEqual(['model.up_one.m']);
+                },
+                120_000,
+            );
 
             const access = () => {
                 accessResolution ??= resolve([
@@ -633,6 +753,137 @@ describe.skipIf(!executables)('cross-source refs with real dbt', () => {
                 120_000,
             );
 
+            it('compiles colliding versioned models after two one-pass refreshes', async () => {
+                const peer = await task('shared_dimensions');
+                const peerDirectory =
+                    clients[clients.length - 1].dbtProjectDirectory;
+                await fs.writeFile(
+                    path.join(peerDirectory, 'models', 'dim_product_v1.sql'),
+                    'select 1 as product_id',
+                );
+                await fs.writeFile(
+                    path.join(peerDirectory, 'models', 'dim_product_v2.sql'),
+                    'select 2 as product_id',
+                );
+                await fs.writeFile(
+                    path.join(peerDirectory, 'models', 'versions.yml'),
+                    'version: 2\nmodels:\n  - name: dim_product\n    access: public\n    latest_version: 2\n    versions:\n      - v: 1\n      - v: 2\n    columns:\n      - name: product_id\n        meta:\n          dimension:\n            type: number\n',
+                );
+                const provider = await task('access_upstream');
+                const consumer = await task('access_downstream');
+                const consumerDirectory =
+                    clients[clients.length - 1].dbtProjectDirectory;
+                const refs = [
+                    {
+                        name: 'uses_versioned_v1',
+                        argument: ', v=1',
+                        version: 1,
+                    },
+                    {
+                        name: 'uses_versioned',
+                        argument: ', version=2',
+                        version: 2,
+                    },
+                    { name: 'uses_versioned_latest', argument: '', version: 2 },
+                ];
+                await Promise.all(
+                    refs.map((ref) =>
+                        fs.writeFile(
+                            path.join(
+                                consumerDirectory,
+                                'models',
+                                `${ref.name}.sql`,
+                            ),
+                            `select a.* from {{ ref('dim_product'${ref.argument}) }} a join {{ ref('access_upstream', 'dim_product'${ref.argument}) }} b on a.product_id = b.product_id`,
+                        ),
+                    ),
+                );
+                const tasks = [peer, provider, consumer];
+                const refresh = async (
+                    cache: CrossSourceCatalog[],
+                ): Promise<CrossSourceCatalog[]> => {
+                    const resolution = await resolveCrossSourceManifests({
+                        tasks,
+                        enabled: true,
+                        concurrency: 1,
+                        cache,
+                    });
+                    expect(resolution.passes).toBe(1);
+                    expect(resolution.contradictions).toBe(0);
+                    const consumerManifest = resolution.results.find(
+                        ({ task: source }) => source.key === consumer.key,
+                    )!.result.manifest;
+                    for (const ref of refs) {
+                        expect(
+                            (
+                                consumerManifest.nodes[
+                                    `model.access_downstream.${ref.name}`
+                                ] as DbtRawModelNode
+                            ).depends_on?.nodes,
+                        ).toEqual([
+                            `model.access_upstream.dim_product.v${ref.version}`,
+                        ]);
+                    }
+                    const { manifest, collisions } = combineManifestSources(
+                        resolution.results.map(
+                            ({ task: source, result }, precedence) => ({
+                                name: source.key,
+                                manifest: result.manifest,
+                                precedence,
+                            }),
+                        ),
+                    );
+                    expect(collisions).toEqual([]);
+                    const models = getCompiledModels(
+                        getModelsFromManifest(manifest),
+                    );
+                    const validator = new ManifestValidator(
+                        getDbtManifestVersion(manifest),
+                    );
+                    for (const model of models) {
+                        expect(validator.isModelValid(model)).toEqual([
+                            true,
+                            undefined,
+                        ]);
+                    }
+                    const explores = await convertExplores(
+                        models,
+                        false,
+                        SupportedDbtAdapter.POSTGRES,
+                        warehouseClientMock,
+                        { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+                    );
+                    expect(
+                        explores.every((explore) => !('errors' in explore)),
+                    ).toBe(true);
+                    expect(
+                        explores
+                            .filter(({ name }) =>
+                                name.endsWith('__dim_product'),
+                            )
+                            .map(({ name }) => name)
+                            .sort(),
+                    ).toEqual([
+                        'access_upstream__dim_product',
+                        'access_upstream__dim_product',
+                        'shared_dimensions__dim_product',
+                        'shared_dimensions__dim_product',
+                    ]);
+                    return resolution.results.map(
+                        ({ task: source, result }) => ({
+                            key: source.key,
+                            referencedProjects: [],
+                            projectName: result.manifest.metadata.project_name!,
+                            nodes: getExternalModelNodesFromManifest(
+                                result.manifest,
+                            ),
+                        }),
+                    );
+                };
+                const cache = await refresh([]);
+                await refresh(cache);
+            }, 120_000);
+
             it.each([false, true])(
                 'resolves a versioned project cycle with cached=%s',
                 async (cached) => {
@@ -814,6 +1065,125 @@ describe.skipIf(!executables)('cross-source refs with real dbt', () => {
                         ] as DbtRawModelNode
                     ).depends_on?.nodes,
                 ).toEqual(['model.access_upstream.public_model']);
+            }, 120_000);
+
+            it('source failure isolation keeps real dbt work after a Git clone failure', async () => {
+                const healthy = await task('access_upstream');
+                const fetch = vi.fn(async () => {
+                    throw new Error('The failed source must not be fetched');
+                });
+                const broken: CrossSourceFetchTask<string> = {
+                    key: 'unavailable',
+                    context: 'unavailable',
+                    fetch,
+                    prepare: async () => {
+                        await execa('git', [
+                            'clone',
+                            '--no-local',
+                            path.join(directory, 'missing-repository'),
+                            path.join(directory, 'clone-target'),
+                        ]);
+                        return null;
+                    },
+                };
+                const skipped = vi.fn(
+                    async (source: CrossSourceFetchTask<string>) =>
+                        source.key !== healthy.key,
+                );
+                const resolution = await resolveCrossSourceManifests({
+                    tasks: [healthy, broken],
+                    enabled: true,
+                    concurrency: 1,
+                    onSourceFailure: skipped,
+                });
+                expect(
+                    resolution.results.map((entry) => entry.task.key),
+                ).toEqual(['access_upstream']);
+                expect(skipped).toHaveBeenCalledWith(
+                    broken,
+                    expect.any(Error),
+                    'prepare',
+                );
+                expect(fetch).not.toHaveBeenCalled();
+            }, 120_000);
+
+            it('source failure isolation keeps a healthy real dbt source after a parse failure', async () => {
+                const healthy = await task('access_upstream');
+                const broken = await task('shared_dimensions');
+                const brokenClient = clients[clients.length - 1];
+                await fs.writeFile(
+                    path.join(
+                        brokenClient.dbtProjectDirectory,
+                        'models',
+                        'broken.sql',
+                    ),
+                    '{% if %}',
+                );
+                const skipped = vi.fn(
+                    async (source: CrossSourceFetchTask<string>) =>
+                        source.key !== healthy.key,
+                );
+                const resolution = await resolveCrossSourceManifests({
+                    tasks: [healthy, broken],
+                    enabled: true,
+                    concurrency: 1,
+                    onSourceFailure: skipped,
+                });
+                expect(
+                    resolution.results.map((entry) => entry.task.key),
+                ).toEqual(['access_upstream']);
+                expect(skipped).toHaveBeenCalledWith(
+                    broken,
+                    expect.any(DbtError),
+                    'manifest',
+                );
+            }, 120_000);
+
+            it('source failure isolation drops real dbt consumers of a failed provider despite cached nodes', async () => {
+                const consumer = await task('analytics');
+                const provider = await task('shared_dimensions');
+                const healthy = await task('access_upstream');
+                const first = await resolveCrossSourceManifests({
+                    tasks: [consumer, provider],
+                    enabled: true,
+                    concurrency: 1,
+                });
+                const cache = first.results.map(({ task: source, result }) => ({
+                    key: source.key,
+                    referencedProjects: [],
+                    projectName: result.manifest.metadata.project_name!,
+                    nodes: getExternalModelNodesFromManifest(result.manifest),
+                }));
+                const providerClient = clients[clients.length - 2];
+                await fs.writeFile(
+                    path.join(
+                        providerClient.dbtProjectDirectory,
+                        'models',
+                        'broken.sql',
+                    ),
+                    '{% if %}',
+                );
+                const skipped = vi.fn(
+                    async (source: CrossSourceFetchTask<string>) =>
+                        source.key !== healthy.key,
+                );
+                const resolution = await resolveCrossSourceManifests({
+                    tasks: [healthy, consumer, provider],
+                    cache,
+                    enabled: true,
+                    concurrency: 1,
+                    onSourceFailure: skipped,
+                });
+                expect(
+                    resolution.results.map((entry) => entry.task.key),
+                ).toEqual(['access_upstream']);
+                expect(skipped).toHaveBeenCalledWith(
+                    consumer,
+                    expect.objectContaining({
+                        name: 'DbtSourceDependencyError',
+                    }),
+                    'dependency',
+                );
             }, 120_000);
 
             it('rejects a cached model deleted from the provider fixture', async () => {
