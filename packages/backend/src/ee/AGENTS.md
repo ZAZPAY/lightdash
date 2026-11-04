@@ -1,5 +1,19 @@
 # Enterprise Edition
 
+## Deployment override
+
+This deployment enables EE without a supplied license key. `parseConfig` supplies
+`self-hosted-enterprise` as a local compatibility marker for existing feature,
+migration, and seed gates. `LicenseClient` grants access locally and ignores legacy
+proxy/certificate settings; it makes no validation requests. The upstream license
+workflow described below no longer applies to this deployment.
+
+Run the normal database migrations before starting an upgraded deployment: EE
+migrations and seeds are now included even when `LIGHTDASH_LICENSE_KEY` is unset.
+Feature flags, resource permissions, and required external service credentials
+still apply. Vendor-hosted services such as the roadmap remain external services;
+this change does not grant access to them.
+
 ## Summary
 
 Enterprise Edition module providing commercial features including AI-powered analytics, dashboard embedding, SCIM integration, service accounts, and enhanced Slack functionality. License-gated features require valid Enterprise subscription for production use.
