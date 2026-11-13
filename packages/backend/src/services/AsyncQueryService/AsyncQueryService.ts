@@ -22,6 +22,7 @@ import {
     buildWarehouseRowTotals,
     CalculateSubtotalsFromQuery,
     CalculateTotalFromQuery,
+    canEmbedViewerResolveTileParameters,
     ChartType,
     CompiledDimension,
     CreateWarehouseCredentials,
@@ -33,6 +34,7 @@ import {
     Dimension,
     DimensionType,
     DownloadFileType,
+    DuckdbConnectionType,
     ExpiredQueryError,
     Explore,
     ExploreCompiler,
@@ -52,6 +54,7 @@ import {
     getAccountUserTimezone,
     getAgentConnectionGrantRef,
     getAiExecutionCredentialUuid,
+    getApiSourceQueryIssues,
     getColumnTimezone,
     getDashboardFilterRulesForTables,
     getDateZoomFromRequestParameters,
@@ -59,6 +62,8 @@ import {
     getDimensions,
     getDimensionsWithValidParameters,
     getDocumentRuntimeChartConfig,
+    getEmbedExcludedParameterKeys,
+    getEmbedParameterValues,
     getEmbedWriteSpaceUuids,
     getErrorMessage,
     getExecutableFilterFieldIds,
@@ -72,6 +77,7 @@ import {
     getMetricsWithValidParameters,
     getPivotValueColumnName,
     getQueryCostEstimateSettings,
+    getSubtotalDimensionGroups,
     getUserAttributeQueryTags,
     hasReservedParameterReference,
     isAiAccessQueryContext,
@@ -82,13 +88,13 @@ import {
     isCustomDimension,
     isDashboardChartTileType,
     isDateItem,
+    isDateZoomRefusedOnExplore,
     isExploreError,
     isField,
     isJwtUser,
     isMergeMetricSource,
     isMergeResultSource,
     isMetric,
-    isParameterInteractivityEnabled,
     isValidTimezone,
     isVizTableConfig,
     ItemsMap,
@@ -105,6 +111,8 @@ import {
     NotImplementedError,
     NotSupportedError,
     OrganizationAccessStatus,
+    OTHER_PIVOT_KEY,
+    OTHER_PIVOT_LABEL,
     ParameterError,
     ParseError,
     PersistentDownloadFileAccessMode,
@@ -118,6 +126,8 @@ import {
     QuerySourceType,
     resolveQueryTimezone,
     ResultRow,
+    ResultsCacheMissReason,
+    ResultsCacheStatsContextGroup,
     ResultsExpiredError,
     S3Error,
     SchedulerFormat,
@@ -146,11 +156,14 @@ import {
     type ApiExecuteAsyncSavedChartQueryResults,
     type ApiGetAsyncQueryResults,
     type ApiQueryHistoryListResponse,
+    type ApiSourceExplore,
     type ApiSourcePayload,
+    type ApiSourceQueryIssue,
     type CacheMetadata,
     type CalculateTotalKind,
     type CompiledCustomSqlDimension,
     type CompiledMetric,
+    type ComposerChartRunSource,
     type CustomDimension,
     type DocumentQueryReference,
     type DocumentSqlChart,
@@ -168,8 +181,10 @@ import {
     type ExecuteAsyncUnderlyingDataRequestParams,
     type ExploresResultsCacheInvalidation,
     type ExternalSourceTableReference,
+    type FieldValueSearchResult,
     type Filters,
     type InvalidateExploresResultsCache,
+    type LiveSourceUpstreamErrorCode,
     type MergeQueryChart,
     type MergeQueryExecutionMode,
     type Organization,
@@ -189,6 +204,9 @@ import {
     type RegisteredAccount,
     type ResultColumns,
     type ResultsCacheInvalidation,
+    type ResultsCacheStats,
+    type ResultsCacheStatsDays,
+    type ResultsCacheTtlProjections,
     type RunQueryTags,
     type SavedChartDAO,
     type SavedChartVisualization,
@@ -203,12 +221,15 @@ import {
     type WarehouseSqlBuilder,
 } from '@lightdash/common';
 import {
+    AnalyticsQueryCancelledError,
+    AnalyticsQueryError,
     DuckdbWarehouseClient,
     mapFieldTypeFromDuckdbTypeName,
     warehouseSqlBuilderFromType,
 } from '@lightdash/warehouses';
 import { trace } from '@opentelemetry/api';
 import * as Sentry from '@sentry/node';
+import { omit } from 'es-toolkit/compat';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'stream';
@@ -229,6 +250,7 @@ import { createLocalParquetUploadStream } from '../../clients/ResultsFileStorage
 import { S3ResultsFileStorageClient } from '../../clients/ResultsFileStorageClients/S3ResultsFileStorageClient';
 import { type DbExternalSourceTable } from '../../database/entities/externalSources';
 import type { DbProjectParameter } from '../../database/entities/projectParameters';
+import type { QueryHistoryCacheOutcome } from '../../database/entities/queryHistory';
 import { isAgentScopedQueryContext } from '../../ee/services/ai/utils/scopedSqlContexts';
 import {
     findSqlScopeViolations,
@@ -246,16 +268,19 @@ import { DownloadAuditModel } from '../../models/DownloadAuditModel';
 import {
     mapQueryHistoryRowToListItem,
     QueryHistoryModel,
+    QueryPollingTimeoutError,
     type CachedResultsContent,
 } from '../../models/QueryHistoryModel/QueryHistoryModel';
 import type { SavedSqlModel } from '../../models/SavedSqlModel';
 import type { ConnectionRouteWithOriginal } from '../../models/WarehouseConnectionRouter/WarehouseConnectionRouter';
+import type { AsyncQueryJobPayload } from '../../nats/natsConfig';
 import PrometheusMetrics from '../../prometheus/PrometheusMetrics';
 import {
     compileMetricQuery,
     validateMetricQueryFields,
 } from '../../queryCompiler';
 import type { SchedulerClient } from '../../scheduler/SchedulerClient';
+import { markAlreadyReported } from '../../sentry/aiAgentErrors';
 import { traceSpan, type TraceSpan } from '../../tracing/tracing';
 import { wrapSentryTransaction } from '../../utils';
 import { isAiServiceAccountPermissionError } from '../../utils/aiServiceAccountErrors';
@@ -317,6 +342,7 @@ import {
     personaliseStoredSharedSignInError,
 } from '../../utils/sharedSignInExpiry';
 import { splitJsonlStream } from '../../utils/streamUtils';
+import { type SubtotalExportLevel } from '../../utils/subtotalExport';
 import { SubtotalsCalculator } from '../../utils/SubtotalsCalculator';
 import { copyWarehouseCredentialVersions } from '../../utils/warehouseCredentialVersion';
 import {
@@ -334,9 +360,13 @@ import {
     resolveResultEntitlementScope,
     type TrustedQueryResultParameters,
 } from '../AiAccessService/queryResultLineage';
-import type { ICacheService } from '../CacheService/ICacheService';
-import { CreateCacheResult } from '../CacheService/types';
+import type {
+    CacheServiceUser,
+    ICacheService,
+} from '../CacheService/ICacheService';
+import { cacheMiss, CreateCacheResult } from '../CacheService/types';
 import type { CacheHitCacheResult } from '../CacheService/types';
+import type { ComposerChartService } from '../ComposerChartService/ComposerChartService';
 import { CsvService } from '../CsvService/CsvService';
 import { DocumentQueryContext } from '../DocumentService/DocumentQueryContext';
 import type { DocumentService } from '../DocumentService/DocumentService';
@@ -345,8 +375,15 @@ import { OrganizationAccessService } from '../OrganizationAccessService/Organiza
 import { resolveOrganizationExportLimits } from '../OrganizationSettingsService/resolveExportLimits';
 import { PersistentDownloadFileService } from '../PersistentDownloadFileService/PersistentDownloadFileService';
 import { PivotTableService } from '../PivotTableService/PivotTableService';
+import { getAnalyticsActivityWindow } from '../ProjectService/analyticsProject/getAnalyticsActivityWindow';
+import { developmentView } from '../ProjectService/developmentView';
 import { getFieldValuesMetricQuery } from '../ProjectService/fieldValuesQueryBuilder';
-import { convertDashboardParametersToValuesMap } from '../ProjectService/parameters';
+import {
+    areDashboardControlsEnabled,
+    convertDashboardParametersToValuesMap,
+    getDashboardTileParameterLayer,
+    getEnabledParameterControls,
+} from '../ProjectService/parameters';
 import {
     ProjectService,
     type ProjectServiceArguments,
@@ -363,14 +400,27 @@ import type {
 } from '../QuerySourceService/api/ApiConnector';
 import {
     getApiQueryOutcome,
+    getLiveSourceUpstreamErrorCode,
+    isLiveSourceErrorReportable,
     type ApiQueryOutcome,
 } from '../QuerySourceService/api/apiQueryOutcome';
+import { toApiSourceQueryError } from '../QuerySourceService/api/apiSourceExplore';
 import {
+    assertApiResultComplete,
     compileApiSourceMetricQuery,
     toApiSourceResult,
 } from '../QuerySourceService/api/apiSourceExplores';
 import type { QuerySourceService } from '../QuerySourceService/QuerySourceService';
 import type { ApiConnectorResolver } from '../QuerySourceService/sources/ApiQuerySource';
+import {
+    buildResultsCacheStats,
+    getContextsInGroup,
+    RESULTS_CACHE_RECOMMENDATION_THRESHOLDS,
+} from '../ResultsCacheStats/resultsCacheStats';
+import {
+    buildResultsCacheTtlProjections,
+    TTL_PROJECTION_MAX_RUNS,
+} from '../ResultsCacheStats/ttlProjections';
 import { mergeDraftIntoChart } from '../SavedChartsService/chartDraftOverlay';
 import { assertCanReplaceChartFilters } from '../SchedulerService/chartFilterOverridesAccess';
 import {
@@ -390,6 +440,7 @@ import {
     querySurfaceFromConnectionSurface,
 } from '../WarehouseClientFactory/ConnectionContext';
 import { WarehouseClientFactory } from '../WarehouseClientFactory/WarehouseClientFactory';
+import { captureAiAgentQueryError } from './captureAiAgentQueryError';
 import { discoverColumns } from './columnDiscovery';
 import { type ComposeEngineClient } from './ComposeEngineClient';
 import {
@@ -427,6 +478,7 @@ import {
     getMergeResultSourceCutShortError,
     getMergeSourceLabels,
     planMergeSourceTotalLegs,
+    withBareCalculationItems,
 } from './mergeQueryExecution';
 import {
     buildMergeExecutedEvent,
@@ -462,16 +514,22 @@ import {
     assertAgentQueryWithinEstimateLimit,
     QueryEstimateCache,
 } from './queryCostEstimate';
+import type { QueryPollingSource } from './queryPollingSource';
 import { canReuseApiResult, canReuseQueryResult } from './queryResultReuse';
 import { queryUsageProperties, queryWorkloadOrigin } from './queryUsage';
 import {
     EstimateAsyncMetricQueryArgs,
     EstimateAsyncSqlQueryArgs,
     ExecuteAsyncSqlQueryArgs,
+    getComposerChartSource,
+    getDocumentQueryContext,
     isExecuteAsyncDashboardSqlChartByUuid,
     isExecuteAsyncSqlChartByUuid,
+    REQUEST_AUTHORITY,
     type BoundDuckdbQueryReferences,
     type CommonAsyncQueryArgs,
+    type ComposerAuthority,
+    type DocumentAuthority,
     type DownloadAsyncQueryResultsArgs,
     type DuckdbQueryColumns,
     type DuckdbQueryEngine,
@@ -497,6 +555,7 @@ import {
     type PreAggregateExecutionEngine,
     type PreAggregationRoute,
     type QueryHistoryActor,
+    type RequestAuthority,
     type RunAsyncPreAggregateQueryArgs,
     type RunAsyncWarehouseQueryArgs,
     type RunDuckdbQueryArgs,
@@ -506,8 +565,10 @@ import {
     type WarehouseExecutionSource,
 } from './types';
 
+const COMPOSE_MERGE_JOIN_NODE_ID = 'merge';
+
 /** A compiled merge that can run: no errors, the join core and full metadata. */
-type RunnableCompiledMergeQuery = ApiCompiledMergeQueryResults & {
+export type RunnableCompiledMergeQuery = ApiCompiledMergeQueryResults & {
     coreSql: string;
     terminalWrapper: NonNullable<
         ApiCompiledMergeQueryResults['terminalWrapper']
@@ -515,6 +576,8 @@ type RunnableCompiledMergeQuery = ApiCompiledMergeQueryResults & {
     typedColumns: NonNullable<ApiCompiledMergeQueryResults['typedColumns']>;
     columns: NonNullable<ApiCompiledMergeQueryResults['columns']>;
 };
+
+const SCHEDULED_CHART_DISPATCH_RETRY_MS = 30_000;
 
 const isRunnableCompiledMergeQuery = (
     compiled: ApiCompiledMergeQueryResults,
@@ -543,15 +606,6 @@ type ExecuteMergeQueryInternalArgs = Omit<
         | { type: 'resolved'; configuration: PivotConfiguration };
 };
 
-// Read-only tile queries that are safe to retry when they stall
-const STALL_RECOVERABLE_QUERY_CONTEXTS: ReadonlySet<QueryExecutionContext> =
-    new Set([
-        QueryExecutionContext.DASHBOARD,
-        QueryExecutionContext.AUTOREFRESHED_DASHBOARD,
-        QueryExecutionContext.EMBED,
-        QueryExecutionContext.CHART,
-    ]);
-
 export const QUEUED_QUERY_EXPIRED_MESSAGE =
     'Your query expired while waiting in the queue. Please try again.';
 
@@ -564,6 +618,16 @@ type DownloadAsyncQueryResultsInternal =
     | (ApiDownloadAsyncQueryResults & { s3FileUrl?: string })
     | (ApiDownloadAsyncQueryResultsAsCsv & { s3FileUrl?: string })
     | (ApiDownloadAsyncQueryResultsAsXlsx & { s3FileUrl?: string });
+
+// A source table's ingested file bound as a CTE, or why it cannot be read
+type ExternalSourceBinding =
+    | {
+          cte: string;
+          cacheKeySalt: string;
+          objectScope: string;
+          tableUuid: string;
+      }
+    | { error: string };
 
 type AsyncQueryExecutionPlan =
     | {
@@ -603,6 +667,7 @@ type AsyncQueryExecutionPlan =
 
 type AsyncQueryServiceArguments = ProjectServiceArguments & {
     getDocumentService: () => DocumentService;
+    getComposerChartService: () => Pick<ComposerChartService, 'assertCanView'>;
     contentDraftModel: ContentDraftModel;
     queryHistoryModel: QueryHistoryModel;
     downloadAuditModel: DownloadAuditModel;
@@ -654,6 +719,7 @@ type ExecuteAsyncQueryArgs = Pick<
     resultSource?: NonNullable<
         QueryHistory['requestParameters']['resultSource']
     >;
+    composerChartSource?: ComposerChartRunSource;
     identityEnabled?: boolean;
     // Single SQL seam: metric paths pass a QueryComposer, SQL-chart
     // paths a SqlQueryComposer — getSql() owns pivot wrapping for both.
@@ -856,6 +922,8 @@ export class AsyncQueryService extends ProjectService {
     private readonly getQuerySourceService: () => QuerySourceService;
     private readonly getDocumentService: () => DocumentService;
 
+    private readonly getComposerChartService: AsyncQueryServiceArguments['getComposerChartService'];
+
     protected readonly preAggregateStrategy: PreAggregateStrategy;
 
     private readonly externalSourceTableResolver: AsyncQueryServiceArguments['externalSourceTableResolver'];
@@ -880,6 +948,7 @@ export class AsyncQueryService extends ProjectService {
         this.composeEngineClient = args.composeEngineClient;
         this.getQuerySourceService = args.getQuerySourceService;
         this.getDocumentService = args.getDocumentService;
+        this.getComposerChartService = args.getComposerChartService;
         this.preAggregateStrategy =
             args.preAggregateStrategy ?? new NoOpPreAggregateStrategy();
         this.externalSourceTableResolver = args.externalSourceTableResolver;
@@ -895,33 +964,32 @@ export class AsyncQueryService extends ProjectService {
     private async resolveExternalSourceReference(
         projectUuid: string,
         explore: Explore,
-        featureFlagContext: {
-            userUuid: string;
-            organizationUuid: string;
-        },
-        identityEnabled: boolean,
-    ): Promise<
-        | {
-              cte: string;
-              cacheKeySalt: string;
-              objectScope: string;
-              tableUuid: string;
-          }
-        | { error: string }
-    > {
-        const { enabled } = await this.featureFlagModel.get({
-            user: featureFlagContext,
-            featureFlagId: FeatureFlags.ExternalSources,
-        });
-        if (!enabled) {
-            return { error: 'External sources are not enabled' };
-        }
+        attachmentOwnerUuid: string | null,
+    ): Promise<ExternalSourceBinding> {
         const ref = explore.externalSource;
         if (!ref) {
             return {
                 error: 'External source explore is missing its source reference',
             };
         }
+        return this.bindExternalSourceTable(
+            projectUuid,
+            ref.tableUuid,
+            explore.baseTable,
+            attachmentOwnerUuid,
+        );
+    }
+
+    /**
+     * The file binding for one source table. A worker rebuilds it from the
+     * history row, so the private file URI never has to be stored.
+     */
+    private async bindExternalSourceTable(
+        projectUuid: string,
+        tableUuid: string,
+        baseTable: string,
+        attachmentOwnerUuid: string | null,
+    ): Promise<ExternalSourceBinding> {
         if (!this.externalSourceTableResolver) {
             return {
                 error: 'External source queries need the enterprise DuckDB engine',
@@ -929,13 +997,12 @@ export class AsyncQueryService extends ProjectService {
         }
         const table = await this.externalSourceTableResolver(
             projectUuid,
-            ref.tableUuid,
+            tableUuid,
         );
         if (
-            identityEnabled &&
+            attachmentOwnerUuid !== null &&
             table?.external_source_scope === ExternalSourceScope.ATTACHMENT &&
-            table.external_source_created_by_user_uuid !==
-                featureFlagContext.userUuid
+            table.external_source_created_by_user_uuid !== attachmentOwnerUuid
         ) {
             throw new ForbiddenError('This attachment belongs to another user');
         }
@@ -950,14 +1017,14 @@ export class AsyncQueryService extends ProjectService {
             };
         }
         const cte = `${quoteDuckdbIdentifier(
-            explore.baseTable,
+            baseTable,
         )} AS (SELECT * FROM ${getDuckdbPreAggregateSqlTable(
             table.locator,
             table.columns,
         )})`;
         return {
             cte,
-            cacheKeySalt: `esv:${ref.tableUuid}:${table.version}`,
+            cacheKeySalt: `esv:${tableUuid}:${table.version}`,
             objectScope: table.locator.uri,
             tableUuid: table.external_source_table_uuid,
         };
@@ -971,15 +1038,11 @@ export class AsyncQueryService extends ProjectService {
      */
     private static resolveExternalSourceExecutionPlan(
         query: string,
-        reference:
-            | {
-                  cte: string;
-                  cacheKeySalt: string;
-                  objectScope: string;
-                  tableUuid: string;
-              }
-            | { error: string },
-    ): AsyncQueryExecutionPlan {
+        reference: ExternalSourceBinding,
+    ): Extract<
+        AsyncQueryExecutionPlan,
+        { target: 'external_source' | 'error' }
+    > {
         if ('error' in reference) {
             return { target: 'error', error: reference.error };
         }
@@ -1004,7 +1067,6 @@ export class AsyncQueryService extends ProjectService {
      */
     private async runExternalSourceQuery(
         warehouseArgs: RunAsyncWarehouseQueryArgs,
-        account: Account,
         objectScope: string,
     ): Promise<void> {
         try {
@@ -1024,7 +1086,7 @@ export class AsyncQueryService extends ProjectService {
                     warehouseConnectionUuid:
                         warehouseArgs.warehouseConnectionUuid ?? null,
                     credentialOwner: { kind: 'no_warehouse_data' },
-                    authMethod: account.authentication.type,
+                    authMethod: warehouseArgs.authMethod ?? null,
                     agentIdentity: warehouseArgs.agentIdentity ?? null,
                     entitlementFingerprint:
                         warehouseArgs.resultEntitlementFingerprint ?? null,
@@ -1043,9 +1105,83 @@ export class AsyncQueryService extends ProjectService {
                     ),
                     errored_at: new Date(),
                 },
-                account,
+                {
+                    user: { id: warehouseArgs.userUuid },
+                    isRegisteredUser: () => warehouseArgs.isRegisteredUser,
+                },
             );
         }
+    }
+
+    /** Runs a queued external source explore query from its history row: the worker's entry. */
+    public async runAsyncExternalSourceQueryFromHistory(
+        queryUuid: string,
+        workerLabel: string,
+        queryTagsOverride?: RunQueryTags,
+        onConnectionClaimed?: () => void,
+    ): Promise<boolean> {
+        const canRun = await this.prepareQueuedQueryForExecution(
+            queryUuid,
+            workerLabel,
+            undefined,
+            onConnectionClaimed,
+        );
+        if (!canRun) {
+            return false;
+        }
+        let args: RunAsyncWarehouseQueryArgs;
+        let binding: ExternalSourceBinding;
+        let warehouseConnectionUuid: string | null;
+        try {
+            args = await this.buildWarehouseQueryArgs(
+                queryUuid,
+                queryTagsOverride,
+            );
+            const query = await this.getQueryHistoryFromHistory(queryUuid);
+            // The result producer is matched on it when a later reader reuses the result
+            warehouseConnectionUuid = query.warehouseConnectionUuid ?? null;
+            const [tableUuid] =
+                query.requestParameters.externalSourceReferences ?? [];
+            if (!tableUuid) {
+                throw new NotFoundError(
+                    `External source reference not found in query_history for ${queryUuid}`,
+                );
+            }
+            // Access was checked at submit; this only rebinds the file
+            binding = await this.bindExternalSourceTable(
+                args.projectUuid,
+                tableUuid,
+                query.metricQuery.exploreName,
+                null,
+            );
+        } catch (error) {
+            await this.queryHistoryModel.updateClaimedQueryToError(
+                queryUuid,
+                getErrorMessage(error),
+            );
+            throw error;
+        }
+        const executionPlan =
+            AsyncQueryService.resolveExternalSourceExecutionPlan(
+                args.query,
+                binding,
+            );
+        if (executionPlan.target === 'error') {
+            await this.queryHistoryModel.updateClaimedQueryToError(
+                queryUuid,
+                executionPlan.error,
+            );
+            return true;
+        }
+        await this.runExternalSourceQuery(
+            {
+                ...args,
+                query: executionPlan.warehouseQuery,
+                warehouseConnectionUuid,
+            },
+            executionPlan.objectScope,
+        );
+        return true;
     }
 
     private recordPreAggregateStats(params: {
@@ -1446,54 +1582,95 @@ export class AsyncQueryService extends ProjectService {
         identityEnabled: boolean = false,
         reader: QueryResultReader = buildResultReader(account),
     ): Promise<CreateCacheResult> {
-        if (!invalidateCache) {
-            // CommercialCacheService gates internally on the
-            // ResultsCacheEnabled feature flag (DB → env fallback).
-            const existingCache =
-                await this.cacheService?.findCachedResultsFile(
+        // CommercialCacheService gates internally on the project setting.
+        const lookup = await this.cacheService?.lookupCachedResultsFile(
+            projectUuid,
+            cacheKey,
+            {
+                userUuid: account.user.id,
+                organizationUuid: account.organization.organizationUuid,
+                organizationName: account.organization.name,
+            },
+            requesterProducer,
+            identityEnabled ?? undefined,
+        );
+        if (!lookup) return cacheMiss(ResultsCacheMissReason.CACHE_DISABLED);
+        if (!lookup.cacheHit) return cacheMiss(lookup.missReason);
+        if (identityEnabled) {
+            if (!lookup.queryUuid || !lookup.queryHistory)
+                return cacheMiss(ResultsCacheMissReason.ACCESS_RESTRICTED);
+            try {
+                await this.assertCanReadStoredResultsForQueries(
+                    account,
                     projectUuid,
-                    cacheKey,
-                    {
-                        userUuid: account.user.id,
-                        organizationUuid: account.organization.organizationUuid,
-                        organizationName: account.organization.name,
-                    },
-                    requesterProducer,
-                    identityEnabled ?? undefined,
+                    [lookup.queryHistory],
+                    reader,
+                    identityEnabled,
+                    true,
                 );
-            if (existingCache) {
-                if (identityEnabled) {
-                    if (!existingCache.queryUuid || !existingCache.queryHistory)
-                        return {
-                            cacheHit: false,
-                            updatedAt: undefined,
-                            expiresAt: undefined,
-                        };
-                    try {
-                        await this.assertCanReadStoredResultsForQueries(
-                            account,
-                            projectUuid,
-                            [existingCache.queryHistory],
-                            reader,
-                            identityEnabled,
-                            true,
-                        );
-                    } catch {
-                        return {
-                            cacheHit: false,
-                            updatedAt: undefined,
-                            expiresAt: undefined,
-                        };
-                    }
-                }
-                return existingCache;
+            } catch {
+                return cacheMiss(ResultsCacheMissReason.ACCESS_RESTRICTED);
             }
         }
+        // Probe only: a forced refresh records that it skipped a readable result.
+        if (invalidateCache) return cacheMiss(null);
+        return lookup;
+    }
 
+    // Same outcome semantics as findResultsCache, for paths without a result reader.
+    private async lookupBackgroundResultsCache({
+        projectUuid,
+        cacheKey,
+        user,
+        invalidateCache,
+        bypassResultsCache,
+    }: {
+        projectUuid: string;
+        cacheKey: string;
+        user: CacheServiceUser;
+        invalidateCache: boolean;
+        bypassResultsCache: boolean;
+    }): Promise<{
+        cached: CacheHitCacheResult | null;
+        outcome: QueryHistoryCacheOutcome;
+    }> {
+        if (bypassResultsCache)
+            return {
+                cached: null,
+                outcome: {
+                    missReason: ResultsCacheMissReason.BYPASSED,
+                    refreshRequested: invalidateCache,
+                },
+            };
+        const lookup = await this.cacheService?.lookupCachedResultsFile(
+            projectUuid,
+            cacheKey,
+            user,
+        );
+        if (!lookup)
+            return {
+                cached: null,
+                outcome: {
+                    missReason: ResultsCacheMissReason.CACHE_DISABLED,
+                    refreshRequested: invalidateCache,
+                },
+            };
+        if (!lookup.cacheHit)
+            return {
+                cached: null,
+                outcome: {
+                    missReason: lookup.missReason,
+                    refreshRequested: invalidateCache,
+                },
+            };
+        if (invalidateCache)
+            return {
+                cached: null,
+                outcome: { missReason: null, refreshRequested: true },
+            };
         return {
-            cacheHit: false,
-            updatedAt: undefined,
-            expiresAt: undefined,
+            cached: lookup,
+            outcome: { missReason: null, refreshRequested: false },
         };
     }
 
@@ -1729,17 +1906,6 @@ export class AsyncQueryService extends ProjectService {
             );
         }
 
-        const { enabled: isEndpointEnabled } = await this.featureFlagModel.get({
-            user: {
-                userUuid: account.user.id,
-                organizationUuid,
-            },
-            featureFlagId: FeatureFlags.QueryHistory,
-        });
-        if (!isEndpointEnabled) {
-            throw new ForbiddenError('Query history is not enabled');
-        }
-
         const auditedAbility = this.createAuditedAbility(account);
         if (
             auditedAbility.cannot(
@@ -1924,10 +2090,25 @@ export class AsyncQueryService extends ProjectService {
         const getUnfilteredExplore = (name: string) => {
             let explore = unfilteredExplorePromises.get(name);
             if (!explore) {
-                explore = this.projectModel.getExploreFromCache(
-                    projectUuid,
-                    name,
-                );
+                // A result run in the development view is checked against the same unpublished models it read.
+                explore = (async () => {
+                    const inDevelopment =
+                        (await developmentView
+                            .getStore()
+                            ?.findExplores(
+                                await getCurrentAccount(),
+                                projectUuid,
+                            )) ?? null;
+                    if (!inDevelopment?.has(name)) {
+                        return this.projectModel.getExploreFromCache(
+                            projectUuid,
+                            name,
+                        );
+                    }
+                    const changed = inDevelopment.get(name);
+                    if (!changed) throw new ForbiddenError();
+                    return changed;
+                })();
                 unfilteredExplorePromises.set(name, explore);
             }
             return explore;
@@ -1968,6 +2149,23 @@ export class AsyncQueryService extends ProjectService {
                     );
                     checkedContent.add(key);
                 }
+            }
+            const composerSource = parameters?.composerChartSource;
+            if (
+                composerSource &&
+                !checkedContent.has(
+                    `composer:${composerSource.composerChartUuid}`,
+                )
+            ) {
+                assertRegisteredAccount(fresh);
+                await this.getComposerChartService().assertCanView(
+                    fresh,
+                    projectUuid,
+                    composerSource.composerChartUuid,
+                );
+                checkedContent.add(
+                    `composer:${composerSource.composerChartUuid}`,
+                );
             }
             if (chartUuid && !checkedContent.has(`chart:${chartUuid}`)) {
                 await this.assertSavedChartQuerySourceAccess(
@@ -2038,6 +2236,7 @@ export class AsyncQueryService extends ProjectService {
                         dashboardUuid,
                         { projectUuid },
                     );
+                    let canEditDashboard = false;
                     if (isJwtUser(fresh)) {
                         await this.getJwtDashboardQueryContext(
                             fresh,
@@ -2054,38 +2253,43 @@ export class AsyncQueryService extends ProjectService {
                                     spaceUuid: dashboard.spaceUuid,
                                 },
                             );
-                        if (
-                            this.createAuditedAbility(fresh).cannot(
-                                'view',
-                                subject('Dashboard', {
-                                    organizationUuid:
-                                        dashboard.organizationUuid,
-                                    projectUuid,
-                                    inheritsFromOrgOrProject:
-                                        access.inheritsFromOrgOrProject,
-                                    access: access.access,
-                                    metadata: { dashboardUuid: dashboard.uuid },
-                                }),
-                            )
-                        )
+                        const dashboardSubject = subject('Dashboard', {
+                            organizationUuid: dashboard.organizationUuid,
+                            projectUuid,
+                            inheritsFromOrgOrProject:
+                                access.inheritsFromOrgOrProject,
+                            access: access.access,
+                            metadata: { dashboardUuid: dashboard.uuid },
+                        });
+                        const ability = this.createAuditedAbility(fresh);
+                        if (ability.cannot('view', dashboardSubject))
                             throw new ForbiddenError(
                                 "You don't have access to this dashboard",
                             );
+                        canEditDashboard =
+                            reader.kind === 'person' &&
+                            ability.can('update', dashboardSubject);
                     }
-                    if (
-                        tileUuid &&
-                        !dashboard.tiles.some((tile) => tile.uuid === tileUuid)
-                    )
+                    const tileIsPersisted =
+                        !tileUuid ||
+                        dashboard.tiles.some((tile) => tile.uuid === tileUuid);
+                    // Unsaved editor tiles exist only client-side; a save that removed the tile postdates the result.
+                    const isStagedEditorTile =
+                        !tileIsPersisted &&
+                        canEditDashboard &&
+                        node.createdAt >= dashboard.updatedAt;
+                    if (!tileIsPersisted && !isStagedEditorTile)
                         throw new ForbiddenError(
                             'The source dashboard tile is no longer available',
                         );
-                    checkedContent.add(key);
+                    if (tileIsPersisted) checkedContent.add(key);
                 }
             }
             const nodeKind = getQueryResultNodeKind(parameters);
             switch (nodeKind) {
                 case 'sql':
                 case 'derived':
+                case 'api':
                     break;
                 case 'semantic': {
                     if (!node.metricQuery?.exploreName) break;
@@ -2233,12 +2437,32 @@ export class AsyncQueryService extends ProjectService {
             return;
         }
         checkedQueries.add(queryHistory.queryUuid);
+        if (queryHistory.requestParameters?.dataAppSource) {
+            const appService = this.getAppGenerateService?.();
+            if (!appService) throw new ForbiddenError();
+            await appService.assertCanViewQuerySource({
+                account,
+                projectUuid,
+                appUuid: queryHistory.requestParameters.dataAppSource.appUuid,
+                version: queryHistory.requestParameters.dataAppSource.version,
+            });
+        }
         if (queryHistory.requestParameters?.documentSource) {
             assertRegisteredAccount(account);
             await this.getDocumentService().get(
                 account,
                 projectUuid,
                 queryHistory.requestParameters.documentSource.documentUuid,
+            );
+        }
+        const composerSource =
+            queryHistory.requestParameters?.composerChartSource;
+        if (composerSource) {
+            assertRegisteredAccount(account);
+            await this.getComposerChartService().assertCanView(
+                account,
+                projectUuid,
+                composerSource.composerChartUuid,
             );
         }
         const { chartUuid, references } = getQuerySourceParameters(
@@ -2414,20 +2638,6 @@ export class AsyncQueryService extends ProjectService {
         }
     }
 
-    async bindQueryToResearchRun(
-        account: Account,
-        projectUuid: string,
-        queryUuid: string,
-        runUuid: string,
-    ): Promise<void> {
-        await this.queryHistoryModel.recordResultResearchRun(
-            queryUuid,
-            projectUuid,
-            account.user.id,
-            runUuid,
-        );
-    }
-
     async bindQueryToArtifact(
         account: Account,
         projectUuid: string,
@@ -2504,7 +2714,7 @@ export class AsyncQueryService extends ProjectService {
         if (
             binding.agentUuid !== messageQuery.agentUuid ||
             binding.promptUuid !== messageQuery.promptUuid ||
-            binding.queryUuid !== messageQuery.queryUuid
+            binding.nodeId !== messageQuery.nodeId
         )
             throw new ForbiddenError('Query results are unavailable');
         return this.getAsyncQueryResults(args);
@@ -3152,6 +3362,80 @@ export class AsyncQueryService extends ProjectService {
         }
     }
 
+    // Subtotal rows are regrouped in memory, so larger exports go without them
+    private static readonly SUBTOTALS_EXPORT_MAX_ROWS = 100_000;
+
+    /**
+     * Subtotals for an unpivoted table export: one `calculate-total` query per
+     * group level, like the table chart runs. A level whose query fails is
+     * left out so the export still succeeds.
+     */
+    private async getExportSubtotalLevels({
+        account,
+        projectUuid,
+        queryHistory,
+        columnOrder,
+        hiddenFields,
+    }: {
+        account: Account;
+        projectUuid: string;
+        queryHistory: QueryHistory;
+        columnOrder: string[];
+        hiddenFields: string[];
+    }): Promise<SubtotalExportLevel[]> {
+        const { queryUuid: sourceQueryUuid, metricQuery } = queryHistory;
+        if (
+            metricQuery.exploreName === SQL_QUERY_MOCK_EXPLORER_NAME ||
+            'mergeQuery' in queryHistory.requestParameters
+        ) {
+            return [];
+        }
+        const dimensionGroups = getSubtotalDimensionGroups(
+            metricQuery.dimensions.filter((id) => !hiddenFields.includes(id)),
+            columnOrder,
+            [],
+        );
+        if (dimensionGroups.length === 0) {
+            return [];
+        }
+        if (
+            (queryHistory.totalRowCount ?? 0) >
+            AsyncQueryService.SUBTOTALS_EXPORT_MAX_ROWS
+        ) {
+            this.logger.warn('Too many rows to export with subtotals', {
+                projectUuid,
+                sourceQueryUuid,
+                totalRowCount: queryHistory.totalRowCount,
+            });
+            return [];
+        }
+
+        const levels = await Promise.all(
+            dimensionGroups.map(async (dimensions) => {
+                try {
+                    const { rows } =
+                        await this.executeCalculateTotalAndGetResults({
+                            account,
+                            projectUuid,
+                            queryUuid: sourceQueryUuid,
+                            kind: 'columnSubtotal',
+                            subtotalDimensions: dimensions,
+                        });
+                    return { dimensions, rows };
+                } catch (error) {
+                    this.logger.warn('Failed to compute subtotals for export', {
+                        projectUuid,
+                        sourceQueryUuid,
+                        dimensions,
+                        error: getErrorMessage(error),
+                    });
+                    return undefined;
+                }
+            }),
+        );
+        return levels.filter((level) => level !== undefined);
+    }
+
     /**
      * Pivot totals are exclusively warehouse-computed — the export renderer has
      * no client-side fallback, so without this they come out blank. Mirrors the
@@ -3267,6 +3551,7 @@ export class AsyncQueryService extends ProjectService {
         expirationSecondsOverride,
         conditionalFormattings,
         showColumnTotals = false,
+        showSubtotals = false,
         accessMode,
     }: DownloadAsyncQueryResultsArgs): Promise<DownloadAsyncQueryResultsInternal> {
         assertIsAccountWithOrg(account);
@@ -3630,6 +3915,16 @@ export class AsyncQueryService extends ProjectService {
                                             : 'columnTotal',
                                     })
                                   : undefined,
+                              subtotalLevels:
+                                  showSubtotals && !pivotDetails
+                                      ? await this.getExportSubtotalLevels({
+                                            account,
+                                            projectUuid,
+                                            queryHistory,
+                                            columnOrder: validColumnOrder,
+                                            hiddenFields,
+                                        })
+                                      : undefined,
                           },
                           displayTimezone ?? undefined,
                       );
@@ -3849,6 +4144,7 @@ export class AsyncQueryService extends ProjectService {
         dataTimezone,
         displayTimezone,
         recoverStalledQuery,
+        isQueuedQueryCancelled,
     }: {
         warehouseClient: WarehouseClient;
         query: string;
@@ -3860,6 +4156,7 @@ export class AsyncQueryService extends ProjectService {
         dataTimezone?: string;
         displayTimezone: string | null;
         recoverStalledQuery: boolean;
+        isQueuedQueryCancelled?: () => Promise<boolean>;
     }): Promise<{
         columns: ResultColumns;
         /** Pre-pivot columns, so pivoted queries keep a record of the
@@ -3982,7 +4279,20 @@ export class AsyncQueryService extends ProjectService {
                       // with the same row_index carries a different value
                       // for the same passthrough dim, the dim isn't
                       // 1-to-1 with the visible row/pivot dims.
-                      if (passthroughDimensions && currentTransformedRow) {
+                      // The row that carries the summed values of the groups
+                      // past the column limit (foldOverflowGroups). Its
+                      // group-by and passthrough values belong to one of the
+                      // folded groups, so they are not used.
+                      const isOtherGroup =
+                          Number(
+                              row[PivotQueryBuilder.IS_OTHER_GROUP_COLUMN],
+                          ) === 1;
+
+                      if (
+                          passthroughDimensions &&
+                          currentTransformedRow &&
+                          !isOtherGroup
+                      ) {
                           for (const dim of passthroughDimensions) {
                               const incoming = row[dim.reference];
                               const existing =
@@ -4041,6 +4351,13 @@ export class AsyncQueryService extends ProjectService {
 
                       const pivotValues =
                           groupByColumns?.map((c) => {
+                              if (isOtherGroup) {
+                                  return {
+                                      referenceField: c.reference,
+                                      value: OTHER_PIVOT_KEY,
+                                      formatted: OTHER_PIVOT_LABEL,
+                                  };
+                              }
                               const field = itemsMap[c.reference];
                               const rawValue = formatRawValue(
                                   field,
@@ -4086,6 +4403,7 @@ export class AsyncQueryService extends ProjectService {
                               aggregation: col.aggregation,
                               pivotValues,
                               columnIndex: row.column_index,
+                              ...(isOtherGroup && { isOtherGroup: true }),
                           });
 
                           currentTransformedRow = currentTransformedRow ?? {};
@@ -4124,6 +4442,9 @@ export class AsyncQueryService extends ProjectService {
                         tags: queryTags,
                         timezone: dataTimezone,
                         recoverStalledQuery,
+                        ...(isQueuedQueryCancelled && {
+                            isQueuedQueryCancelled,
+                        }),
                     },
                     transformRows,
                 ),
@@ -4546,7 +4867,11 @@ export class AsyncQueryService extends ProjectService {
             dashboardTileId:
                 'tileUuid' in history.requestParameters
                     ? (history.requestParameters.tileUuid ?? null)
-                    : null,
+                    : (trustedResultParameters.composerChartSource?.tileUuid ??
+                      null),
+            ...(trustedResultParameters.composerChartSource
+                ? { chartKind: 'composer_chart' as const }
+                : {}),
         };
         const enriched = {
             ...history,
@@ -5005,6 +5330,7 @@ export class AsyncQueryService extends ProjectService {
      * Runs the query the warehouse and updates the query history and cache (if cache is enabled and cache is not hit) when complete
      */
     private async runAsyncWarehouseQueryInScope({
+        analyticsActivityWindow,
         userUuid,
         organizationUuid,
         isPreviewProject,
@@ -5095,6 +5421,7 @@ export class AsyncQueryService extends ProjectService {
 
         type WarehouseQueryAttempt =
             | { kind: 'complete' }
+            | { kind: 'cancelled' }
             | {
                   kind: 'retry';
                   execute: (warehouseClient: WarehouseClient) => Promise<void>;
@@ -5103,6 +5430,7 @@ export class AsyncQueryService extends ProjectService {
         const withWarehouseAttempt = (
             execute: (
                 warehouseClient: WarehouseClient,
+                isQueuedQueryCancelled?: () => Promise<boolean>,
             ) => Promise<WarehouseQueryAttempt>,
         ) =>
             this.warehouseClientFactory.withWarehouseClient(
@@ -5110,7 +5438,12 @@ export class AsyncQueryService extends ProjectService {
                     kind: 'binding',
                     projectUuid,
                     binding: { kind: 'query', queryUuid },
-                    overrides: warehouseCredentialsOverrides,
+                    overrides: analyticsActivityWindow
+                        ? {
+                              ...warehouseCredentialsOverrides,
+                              analyticsActivityWindow,
+                          }
+                        : warehouseCredentialsOverrides,
                 },
                 connectionContextFromUser(
                     {
@@ -5215,7 +5548,16 @@ export class AsyncQueryService extends ProjectService {
                         ? warehouseCredentials
                         : null;
                     warehouseCredentialsType ??= warehouseCredentials.type;
-                    const result = await execute(warehouseClient);
+                    const isAnalytics =
+                        warehouseCredentials.type === WarehouseTypes.DUCKDB &&
+                        warehouseCredentials.connectionType ===
+                            DuckdbConnectionType.ANALYTICS;
+                    const result = await execute(
+                        warehouseClient,
+                        isAnalytics
+                            ? () => this.isQueryCancelled(queryUuid)
+                            : undefined,
+                    );
                     warehouseQueryCompletedBeforeCleanup =
                         result.kind === 'complete';
                     return result;
@@ -5224,6 +5566,7 @@ export class AsyncQueryService extends ProjectService {
 
         const executeWithWarehouseClient = async (
             warehouseClient: WarehouseClient,
+            isQueuedQueryCancelled?: () => Promise<boolean>,
         ): Promise<WarehouseQueryAttempt> => {
             const credentialsType = warehouseCredentialsType;
             if (credentialsType === undefined) {
@@ -5239,16 +5582,10 @@ export class AsyncQueryService extends ProjectService {
             const resolvedDataTimezone = isTimezoneSupportEnabled
                 ? warehouseClient.credentials.dataTimezone
                 : undefined;
+            // Safe for any query: only a query that Redshift has no record
+            // of is re-sent, so nothing can run twice
             const recoverStalledQuery =
-                credentialsType === WarehouseTypes.REDSHIFT &&
-                STALL_RECOVERABLE_QUERY_CONTEXTS.has(queryTags.query_context) &&
-                (
-                    await this.featureFlagModel.get({
-                        featureFlagId:
-                            FeatureFlags.RedshiftStalledQueryRecovery,
-                        user: { userUuid, organizationUuid },
-                    })
-                ).enabled;
+                credentialsType === WarehouseTypes.REDSHIFT;
 
             const t0 = Date.now();
 
@@ -5383,6 +5720,9 @@ export class AsyncQueryService extends ProjectService {
                                 dataTimezone: resolvedDataTimezone,
                                 displayTimezone,
                                 recoverStalledQuery,
+                                ...(isQueuedQueryCancelled && {
+                                    isQueuedQueryCancelled,
+                                }),
                             });
                         setPhaseTimingAttributes(
                             span,
@@ -5634,6 +5974,9 @@ export class AsyncQueryService extends ProjectService {
             try {
                 queryResults = await runWarehouseQuery(warehouseClient);
             } catch (e) {
+                if (e instanceof AnalyticsQueryCancelledError) {
+                    return { kind: 'cancelled' };
+                }
                 const canRetry =
                     !hasWrittenRows &&
                     projectCredentials !== null &&
@@ -5715,12 +6058,15 @@ export class AsyncQueryService extends ProjectService {
                         e instanceof WarehouseQueryTimeoutError
                             ? e.data
                             : undefined,
-                    // Surface every queryTag (chart_uuid, dashboard_uuid,
-                    // saved_sql_uuid, scheduler_uuid, scheduler_name, job_id,
-                    // explore_name, query_context, …) onto the error log so a
-                    // single Cloud Logging filter maps a warehouse failure
-                    // back to the originating chart / scheduled sync.
-                    ...queryTags,
+                    // Keep user attribute tags out of Analytics error logs.
+                    ...(e instanceof AnalyticsQueryError
+                        ? {
+                              storageStatus: e.storageStatus ?? undefined,
+                              query_context: queryTags.query_context,
+                              chart_uuid: queryTags.chart_uuid,
+                              dashboard_uuid: queryTags.dashboard_uuid,
+                          }
+                        : queryTags),
                 },
             );
 
@@ -5734,6 +6080,13 @@ export class AsyncQueryService extends ProjectService {
                 throw e;
             }
 
+            if (!(e instanceof AiAccessRefusedError)) {
+                captureAiAgentQueryError({
+                    error: e,
+                    queryTags,
+                    querySource: 'warehouse',
+                });
+            }
             await this.markAsyncQueryErrored({
                 inheritedFromProjectUuid:
                     inheritedFromProjectUuid ??
@@ -5877,6 +6230,8 @@ export class AsyncQueryService extends ProjectService {
                 query.requestParameters.resultEntitlementFingerprint ?? null,
             query: query.compiledSql,
             displayTimezone,
+            analyticsActivityWindow:
+                query.requestParameters.analyticsActivityWindow,
         };
     }
 
@@ -6198,6 +6553,7 @@ export class AsyncQueryService extends ProjectService {
         switch (kind) {
             case 'derived':
             case 'sql':
+            case 'api':
                 return undefined;
             case 'semantic':
                 break;
@@ -6423,6 +6779,38 @@ export class AsyncQueryService extends ProjectService {
         }
     }
 
+    private scheduleUnclaimedChartQueryRetry(payload: AsyncQueryJobPayload) {
+        const { queryUuid } = payload;
+        const { queueTimeoutMs } = this.lightdashConfig.natsWorker;
+        if (queueTimeoutMs <= SCHEDULED_CHART_DISPATCH_RETRY_MS) return;
+
+        setTimeout(() => {
+            void this.queryHistoryModel
+                .getByQueryUuid(queryUuid)
+                .then(async (query) => {
+                    if (
+                        query?.status !== QueryHistoryStatus.QUEUED ||
+                        Date.now() - query.createdAt.getTime() >= queueTimeoutMs
+                    ) {
+                        return;
+                    }
+
+                    // Reuse the query UUID so the worker's atomic claim protects against duplicate execution.
+                    const { jobId } =
+                        await this.natsClient.enqueueWarehouseQuery(payload);
+                    this.logger.info(
+                        `Re-enqueued unclaimed scheduled chart query ${queryUuid} on NATS with job ${jobId}`,
+                    );
+                })
+                .catch((error) => {
+                    this.logger.warn(
+                        `Failed to re-enqueue unclaimed scheduled chart query ${queryUuid}`,
+                        { error },
+                    );
+                });
+        }, SCHEDULED_CHART_DISPATCH_RETRY_MS).unref();
+    }
+
     private async executePreparedAsyncQuery(
         args: PreparedAsyncQueryArgs,
         requestParameters: ExecuteAsyncQueryRequestParams,
@@ -6472,6 +6860,13 @@ export class AsyncQueryService extends ProjectService {
                     const displayTimezone = queryComposer.getDisplayTimezone();
 
                     const warehouseCredentialsType = warehouseCredentials.type;
+                    const analyticsActivityWindow =
+                        warehouseCredentials.type === WarehouseTypes.DUCKDB &&
+                        warehouseCredentials.connectionType ===
+                            DuckdbConnectionType.ANALYTICS &&
+                        !dateZoom
+                            ? getAnalyticsActivityWindow(metricQuery, timezone)
+                            : undefined;
                     const warehouseCredentialsOverrides: RunAsyncWarehouseQueryArgs['warehouseCredentialsOverrides'] =
                         {
                             snowflakeVirtualWarehouse: explore.warehouse,
@@ -6514,29 +6909,11 @@ export class AsyncQueryService extends ProjectService {
                         userUuid: account.user.id,
                         organizationUuid: account.organization.organizationUuid,
                     });
-                    const onboardingRecord =
-                        await this.onboardingModel.getByOrganizationUuid(
-                            account.organization.organizationUuid,
-                        );
-
-                    if (!onboardingRecord.ranQueryAt) {
-                        await this.onboardingModel.update(
-                            account.organization.organizationUuid,
-                            {
-                                ranQueryAt: new Date(),
-                            },
-                        );
-                        this.analytics.trackAccount(account, {
-                            event: 'onboarding.step_completed',
-                            properties: {
-                                step: 'first_query',
-                                stepIndex: 5,
-                                onboardingFlow,
-                                organizationId:
-                                    account.organization.organizationUuid,
-                            },
-                        });
-                    }
+                    await this.trackFirstQuery(
+                        account,
+                        account.organization.organizationUuid,
+                        onboardingFlow,
+                    );
 
                     // Mirrors runAsyncWarehouseQuery's resolvedDataTimezone:
                     // the session (data) timezone changes results without
@@ -6571,11 +6948,7 @@ export class AsyncQueryService extends ProjectService {
                             ? await this.resolveExternalSourceReference(
                                   projectUuid,
                                   explore,
-                                  {
-                                      userUuid: account.user.id,
-                                      organizationUuid,
-                                  },
-                                  identityEnabled,
+                                  identityEnabled ? account.user.id : null,
                               )
                             : undefined;
 
@@ -6647,6 +7020,8 @@ export class AsyncQueryService extends ProjectService {
                                                   resultEffectiveParameters,
                                                   resultSource:
                                                       args.resultSource,
+                                                  composerChartSource:
+                                                      args.composerChartSource,
                                               },
                                           ),
                                       controls,
@@ -6740,19 +7115,17 @@ export class AsyncQueryService extends ProjectService {
                         : sharedCacheKey;
 
                     const cacheCheckStart = Date.now();
+                    const refreshRequested =
+                        requestParameters.invalidateCache ??
+                        args.invalidateCache ??
+                        false;
                     const resultsCache = bypassResultsCache
-                        ? {
-                              cacheHit: false as const,
-                              updatedAt: undefined,
-                              expiresAt: undefined,
-                          }
+                        ? cacheMiss(ResultsCacheMissReason.BYPASSED)
                         : await this.findResultsCache(
                               projectUuid,
                               cacheKey,
                               account,
-                              requestParameters.invalidateCache ??
-                                  args.invalidateCache ??
-                                  false,
+                              refreshRequested,
                               ...((identityEnabled
                                   ? [
                                         requesterProducer,
@@ -6793,6 +7166,12 @@ export class AsyncQueryService extends ProjectService {
                             timezone: displayTimezone ?? undefined,
                         },
                         cacheKey,
+                        cacheOutcome: resultsCache.cacheHit
+                            ? { missReason: null, refreshRequested: false }
+                            : {
+                                  missReason: resultsCache.missReason,
+                                  refreshRequested,
+                              },
                         pivotConfiguration: pivotConfiguration ?? null,
                         originalColumns: originalColumns ?? null,
                     };
@@ -6811,6 +7190,7 @@ export class AsyncQueryService extends ProjectService {
                             {
                                 resultEffectiveParameters,
                                 resultSource: args.resultSource,
+                                composerChartSource: args.composerChartSource,
                                 externalSourceReferences:
                                     externalSourceReference &&
                                     'tableUuid' in externalSourceReference
@@ -6818,6 +7198,7 @@ export class AsyncQueryService extends ProjectService {
                                         : undefined,
                                 resultEntitlementFingerprint:
                                     entitlementFingerprint,
+                                analyticsActivityWindow,
                                 cacheSourceQueryUuid:
                                     resultsCache.cacheHit && identityEnabled
                                         ? resultsCache.queryUuid
@@ -6845,6 +7226,8 @@ export class AsyncQueryService extends ProjectService {
                         onboardingFlow,
                         queryId: queryHistoryUuid,
                         warehouseType: warehouseCredentialsType,
+                        resolvedQueryTimezone: displayTimezone,
+                        dataTimezone: resolvedDataTimezone ?? null,
                         ...ProjectService.getMetricQueryExecutionProperties({
                             metricQuery,
                             queryTags,
@@ -7144,6 +7527,7 @@ export class AsyncQueryService extends ProjectService {
                     trackQueryExecuted(executedSource);
 
                     const warehouseArgs: RunAsyncWarehouseQueryArgs = {
+                        analyticsActivityWindow,
                         authMethod: account.authentication.type,
                         agentIdentity: agentIdentity ?? null,
                         resultEntitlementFingerprint: entitlementFingerprint,
@@ -7192,7 +7576,84 @@ export class AsyncQueryService extends ProjectService {
                         );
                     }
 
+                    const runInMainLoop = () => {
+                        this.logger.info(
+                            `Executing query ${queryHistoryUuid} in the main loop`,
+                        );
+                        this.prometheusMetrics?.trackQueryStateTransition(
+                            QueryHistoryStatus.PENDING,
+                            QueryHistoryStatus.EXECUTING,
+                            context,
+                        );
+                        this.prometheusMetrics?.observeQueueWaitDuration(
+                            0,
+                            context,
+                        );
+
+                        const { query: warehouseSql, ...sharedAsyncQueryArgs } =
+                            warehouseArgs;
+                        const getRunQueryPromise = () => {
+                            switch (executionPlan.target) {
+                                case 'pre_aggregate':
+                                    return this.runAsyncPreAggregateQuery({
+                                        ...sharedAsyncQueryArgs,
+                                        resultProducer:
+                                            executionPlan.resultProducer,
+                                        preAggregateQuery:
+                                            executionPlan.preAggregateQuery,
+                                        warehouseQuery:
+                                            executionPlan.warehouseQuery,
+                                        preAggregateExecution:
+                                            executionPlan.preAggregateExecution,
+                                    });
+                                case 'external_source':
+                                    return this.runExternalSourceQuery(
+                                        warehouseArgs,
+                                        executionPlan.objectScope,
+                                    );
+                                case 'materialization':
+                                case 'warehouse':
+                                    return this.runAsyncWarehouseQuery(
+                                        warehouseArgs,
+                                    );
+                                default:
+                                    return assertUnreachable(
+                                        executionPlan,
+                                        `Unknown execution target`,
+                                    );
+                            }
+                        };
+                        const runQueryPromise = getRunQueryPromise();
+
+                        void runQueryPromise.catch((e) => {
+                            this.logger.error(
+                                `Async query ${queryHistoryUuid} failed: ${getErrorMessage(e)}`,
+                            );
+                            span.setStatus({
+                                code: 2, // ERROR
+                                message: getErrorMessage(e),
+                            });
+                        });
+                    };
+
                     if (
+                        this.lightdashConfig.natsWorker.enabled &&
+                        executionPlan.target === 'external_source'
+                    ) {
+                        await this.enqueueOnDuckdbWorker({
+                            queryUuid: queryHistoryUuid,
+                            projectUuid,
+                            account,
+                            queryTags,
+                            queryCreatedAt,
+                            context,
+                            enqueue: (payload) =>
+                                this.natsClient.enqueueExternalSourceQuery(
+                                    payload,
+                                ),
+                            runInProcess: runInMainLoop,
+                        });
+                    } else if (
                         this.lightdashConfig.natsWorker.enabled &&
                         executionPlan.target !== 'external_source'
                     ) {
@@ -7233,9 +7694,26 @@ export class AsyncQueryService extends ProjectService {
                                 `Enqueued query ${queryHistoryUuid} on NATS with job ${jobId}`,
                             );
 
-                            await this.queryHistoryModel.updateStatusToQueued(
-                                queryHistoryUuid,
-                            );
+                            const queued =
+                                await this.queryHistoryModel.updateStatusToQueued(
+                                    queryHistoryUuid,
+                                );
+                            if (
+                                queued > 0 &&
+                                executionPlan.target === 'warehouse' &&
+                                warehouseCredentialsType ===
+                                    WarehouseTypes.SNOWFLAKE &&
+                                (context ===
+                                    QueryExecutionContext.SCHEDULED_CHART ||
+                                    context ===
+                                        QueryExecutionContext.SCHEDULED_DELIVERY) &&
+                                'chartUuid' in requestParameters &&
+                                !('dashboardUuid' in requestParameters)
+                            ) {
+                                this.scheduleUnclaimedChartQueryRetry(
+                                    natsPayload,
+                                );
+                            }
                             this.prometheusMetrics?.trackQueryStateTransition(
                                 QueryHistoryStatus.PENDING,
                                 QueryHistoryStatus.QUEUED,
@@ -7274,64 +7752,7 @@ export class AsyncQueryService extends ProjectService {
                             } satisfies ExecuteAsyncQueryReturn;
                         }
                     } else {
-                        this.logger.info(
-                            `Executing query ${queryHistoryUuid} in the main loop`,
-                        );
-                        this.prometheusMetrics?.trackQueryStateTransition(
-                            QueryHistoryStatus.PENDING,
-                            QueryHistoryStatus.EXECUTING,
-                            context,
-                        );
-                        this.prometheusMetrics?.observeQueueWaitDuration(
-                            0,
-                            context,
-                        );
-
-                        const { query: warehouseSql, ...sharedAsyncQueryArgs } =
-                            warehouseArgs;
-                        const getRunQueryPromise = () => {
-                            switch (executionPlan.target) {
-                                case 'pre_aggregate':
-                                    return this.runAsyncPreAggregateQuery({
-                                        ...sharedAsyncQueryArgs,
-                                        resultProducer:
-                                            executionPlan.resultProducer,
-                                        preAggregateQuery:
-                                            executionPlan.preAggregateQuery,
-                                        warehouseQuery:
-                                            executionPlan.warehouseQuery,
-                                        preAggregateExecution:
-                                            executionPlan.preAggregateExecution,
-                                    });
-                                case 'external_source':
-                                    return this.runExternalSourceQuery(
-                                        warehouseArgs,
-                                        account,
-                                        executionPlan.objectScope,
-                                    );
-                                case 'materialization':
-                                case 'warehouse':
-                                    return this.runAsyncWarehouseQuery(
-                                        warehouseArgs,
-                                    );
-                                default:
-                                    return assertUnreachable(
-                                        executionPlan,
-                                        `Unknown execution target`,
-                                    );
-                            }
-                        };
-                        const runQueryPromise = getRunQueryPromise();
-
-                        void runQueryPromise.catch((e) => {
-                            this.logger.error(
-                                `Async query ${queryHistoryUuid} failed: ${getErrorMessage(e)}`,
-                            );
-                            span.setStatus({
-                                code: 2, // ERROR
-                                message: getErrorMessage(e),
-                            });
-                        });
+                        runInMainLoop();
                     }
 
                     return {
@@ -7465,7 +7886,7 @@ export class AsyncQueryService extends ProjectService {
                 mergeQuery: documentQueryContext.mergeQuery,
                 parameters: chart.parameters,
                 userAttributeOverrides: {},
-                documentQueryContext,
+                authority: { kind: 'document', context: documentQueryContext },
                 mode: { type: 'interactive' },
                 chart: {
                     chartConfig: getDocumentRuntimeChartConfig(
@@ -7483,7 +7904,7 @@ export class AsyncQueryService extends ProjectService {
             metricQuery: documentQueryContext.metricQuery,
             parameters: chart.parameters,
             userAttributeOverrides: {},
-            documentQueryContext,
+            authority: { kind: 'document', context: documentQueryContext },
         });
     }
 
@@ -7566,9 +7987,17 @@ export class AsyncQueryService extends ProjectService {
     }
 
     async executeAsyncMetricQuery(
-        args: ExecuteAsyncMetricQueryArgs,
+        requestArgs: ExecuteAsyncMetricQueryArgs,
         reuseQueryUuid?: string,
     ): Promise<ApiExecuteAsyncMetricQueryResults> {
+        // Explore and data app tiles reach this with a dashboard embed token; its fixed values must hold
+        const args = {
+            ...requestArgs,
+            parameters: AsyncQueryService.lockEmbedParameterValues(
+                requestArgs.account,
+                requestArgs.parameters,
+            ),
+        };
         const {
             account,
             projectUuid,
@@ -7599,17 +8028,30 @@ export class AsyncQueryService extends ProjectService {
         // We only check `exploreName` for chart embeds. Otherwise, CASL doesn't match
         // on condition checks that aren't set. If no `exploreName` is set in conditions,
         // CASL ignores it.
-        if (args.documentQueryContext) {
-            args.documentQueryContext.assertMetricQuery(
-                account,
-                projectUuid,
-                inputMetricQuery,
-                args.parameters,
-            );
-            return this.runAsyncMetricQueryWithoutPermissionCheck(
-                args,
-                organizationUuid,
-            );
+        const authority = args.authority ?? REQUEST_AUTHORITY;
+        switch (authority.kind) {
+            case 'composer':
+                // Its author's checks ran at save; the explore still loads under the viewer's attributes
+                authority.binding.assertExecution(account, projectUuid);
+                return this.runAsyncMetricQueryWithoutPermissionCheck(
+                    args,
+                    organizationUuid,
+                );
+            case 'document':
+                authority.context.assertMetricQuery(
+                    account,
+                    projectUuid,
+                    inputMetricQuery,
+                    args.parameters,
+                );
+                return this.runAsyncMetricQueryWithoutPermissionCheck(
+                    args,
+                    organizationUuid,
+                );
+            case 'request':
+                break;
+            default:
+                return assertUnreachable(authority, 'Unknown query authority');
         }
         const auditedAbility = this.createAuditedAbility(account);
         const isForbidden = auditedAbility.cannot(
@@ -7623,8 +8065,29 @@ export class AsyncQueryService extends ProjectService {
                 },
             }),
         );
+        let dataAppSource: ExecuteAsyncQueryRequestParams['dataAppSource'];
         if (isForbidden) {
-            throw new ForbiddenError();
+            const appService = this.getAppGenerateService?.();
+            // Materialization skips model-required filters; an app token must
+            // never authorize it.
+            if (
+                !appService ||
+                !args.dataAppPreviewToken ||
+                context === QueryExecutionContext.PRE_AGGREGATE_MATERIALIZATION
+            ) {
+                throw new ForbiddenError();
+            }
+            dataAppSource = await appService.authorizeConsumerQuery({
+                account,
+                projectUuid,
+                organizationUuid,
+                previewToken: args.dataAppPreviewToken,
+                metricQuery: inputMetricQuery,
+                parameters: args.parameters,
+                dashboardFilters: args.dashboardFilters,
+                dateZoom: args.dateZoom,
+                pivotConfiguration: args.pivotConfiguration,
+            });
         }
 
         await this.assertCustomSqlAuthorizedForQuery({
@@ -7642,6 +8105,7 @@ export class AsyncQueryService extends ProjectService {
             organizationUuid,
             undefined,
             reuseQueryUuid,
+            dataAppSource,
         );
     }
 
@@ -7663,13 +8127,15 @@ export class AsyncQueryService extends ProjectService {
             materializationRole,
             dashboardFilters,
             totalConfiguration,
-            documentQueryContext,
+            authority = REQUEST_AUTHORITY,
         }: ExecuteAsyncMetricQueryArgs,
         organizationUuid: string,
         sourceQueryHistory?: QueryHistory,
         reuseQueryUuid?: string,
+        dataAppSource?: ExecuteAsyncQueryRequestParams['dataAppSource'],
     ): Promise<ApiExecuteAsyncMetricQueryResults> {
         assertIsAccountWithOrg(account);
+        const documentQueryContext = getDocumentQueryContext(authority);
 
         const queryTags: RunQueryTags = withAgentMarkerTag({
             ...this.getUserQueryTags(account),
@@ -7848,10 +8314,12 @@ export class AsyncQueryService extends ProjectService {
         const references =
             sourceQueryHistory &&
             (sourceParameters.chartUuid ||
-                sourceQueryHistory.requestParameters?.documentSource)
+                sourceQueryHistory.requestParameters?.documentSource ||
+                sourceQueryHistory.requestParameters?.dataAppSource)
                 ? { source: sourceQueryHistory.queryUuid }
                 : sourceParameters.references;
         const requestParameters: ExecuteAsyncQueryRequestParams = {
+            ...(dataAppSource ? { dataAppSource } : {}),
             ...(documentQueryContext
                 ? { documentSource: documentQueryContext.reference }
                 : {}),
@@ -7967,6 +8435,7 @@ export class AsyncQueryService extends ProjectService {
                 warehouseConnectionUuid,
                 connectionRoute,
                 routingTarget: routingDecision.target,
+                composerChartSource: getComposerChartSource(authority),
                 identityEnabled,
                 ...(routingDecision.target === 'pre_aggregate' && {
                     preAggregationRoute: routingDecision.route,
@@ -8260,6 +8729,7 @@ export class AsyncQueryService extends ProjectService {
             userAttributeOverrides: {},
             invalidateCache: invalidateCache ?? false,
             plans: { [totalsNodeId]: plan },
+            authority: REQUEST_AUTHORITY,
             aiAttribution: null,
         });
         const totals = queries.find((query) => query.nodeId === totalsNodeId);
@@ -8340,12 +8810,10 @@ export class AsyncQueryService extends ProjectService {
                 savedChartUuids,
             );
         const explores = await Promise.all(
-            [...new Set(savedCharts.map((chart) => chart.tableName))].map(
-                (tableName) =>
-                    this.projectModel.getExploreFromCache(
-                        projectUuid,
-                        tableName,
-                    ),
+            [
+                ...new Set(savedCharts.flatMap((chart) => chart.exploreNames)),
+            ].map((exploreName) =>
+                this.projectModel.getExploreFromCache(projectUuid, exploreName),
             ),
         );
         const isFieldInDashboardExplores = explores.some(
@@ -8412,11 +8880,10 @@ export class AsyncQueryService extends ProjectService {
             // Viewer-supplied parameters are only trusted when the JWT
             // grants parameter interactivity — parity with the embed
             // search endpoint.
-            acceptedParameters = isParameterInteractivityEnabled(
+            acceptedParameters = getEmbedParameterValues(
                 account.access.parameters,
-            )
-                ? parameters
-                : {};
+                parameters,
+            );
         }
 
         const context = QueryExecutionContext.FILTER_AUTOCOMPLETE;
@@ -8729,6 +9196,41 @@ export class AsyncQueryService extends ProjectService {
         };
     }
 
+    /** Field values for callers that cannot poll, like agent tools on live sources */
+    async searchFieldValuesAndWait(
+        args: ExecuteAsyncFieldValueSearchArgs,
+    ): Promise<FieldValueSearchResult> {
+        const { queryUuid, cacheMetadata, valueFieldId } =
+            await this.executeAsyncFieldValueSearch(args);
+        await this.pollForQueryCompletion({
+            account: args.account,
+            projectUuid: args.projectUuid,
+            queryUuid,
+        });
+        const page = await this.getAsyncQueryResults({
+            account: args.account,
+            projectUuid: args.projectUuid,
+            queryUuid,
+            pageSize: args.limit,
+            reader: buildResultReader(
+                args.account,
+                args.context,
+                args.querySurface ?? null,
+            ),
+        });
+        if (page.status !== QueryHistoryStatus.READY) {
+            throw new UnexpectedServerError(
+                `Field value search ended with status ${page.status}`,
+            );
+        }
+        return {
+            search: args.search,
+            results: page.rows.map((row) => row[valueFieldId]?.value.raw),
+            cached: cacheMetadata.cacheHit,
+            refreshedAt: new Date(),
+        };
+    }
+
     async invalidateSavedChartResultsCache(
         user: SessionUser,
         chartUuid: string,
@@ -8837,13 +9339,20 @@ export class AsyncQueryService extends ProjectService {
         };
     }
 
-    // Wide enough that a later TTL increase cannot revive older results
-    private getResultsCacheInvalidationWindowStart(invalidatedAt: Date): Date {
-        const maxTtlSeconds = Math.max(
+    // Longest TTL any project can have: the per-project cap or the instance default, whichever is larger.
+    private getMaxResultsCacheTtlSeconds(): number {
+        return Math.max(
             this.lightdashConfig.results.cacheStateTimeSeconds,
             MAX_RESULTS_CACHE_TTL_SECONDS,
         );
-        return new Date(invalidatedAt.getTime() - maxTtlSeconds * 1000);
+    }
+
+    // Wide enough that a later TTL increase cannot revive older results
+    private getResultsCacheInvalidationWindowStart(invalidatedAt: Date): Date {
+        return new Date(
+            invalidatedAt.getTime() -
+                this.getMaxResultsCacheTtlSeconds() * 1000,
+        );
     }
 
     private async invalidateContentResultsCache(
@@ -9602,6 +10111,100 @@ export class AsyncQueryService extends ProjectService {
         return AsyncQueryService.assertSavedMergeStarted(outcome);
     }
 
+    private async getDashboardTileParameterLayer({
+        dashboardUuid,
+        projectUuid,
+        organizationUuid,
+        flagUser,
+        appResolved,
+        ...tile
+    }: Omit<
+        Parameters<typeof getDashboardTileParameterLayer>[0],
+        'parameterControls' | 'dashboardParameters' | 'userParameterNames'
+    > & {
+        dashboardUuid: string;
+        projectUuid: string;
+        organizationUuid: string;
+        flagUser: Parameters<typeof getEnabledParameterControls>[0]['user'];
+        /** The app resolved this tile's controls (signed-in users, and embeds with parameter interactivity): its values stand as sent */
+        appResolved: {
+            account: Account;
+            parameters: ParametersValuesMap | undefined;
+            excludedParameterKeys: string[] | undefined;
+        };
+    }) {
+        const { parameters, spaceUuid, ...config } =
+            await this.dashboardModel.getDashboardParameterStateByIdOrSlug(
+                dashboardUuid,
+                projectUuid,
+            );
+        const parameterControls = await getEnabledParameterControls({
+            featureFlagModel: this.featureFlagModel,
+            user: flagUser,
+            config,
+        });
+        const controlsEnabled =
+            parameterControls !== null ||
+            (config.parameterControls === undefined &&
+                appResolved.excludedParameterKeys !== undefined &&
+                (await areDashboardControlsEnabled({
+                    featureFlagModel: this.featureFlagModel,
+                    user: flagUser,
+                })));
+        // Controls require dashboard access; embeds are scoped by their token.
+        if (controlsEnabled && appResolved.account.isRegisteredUser()) {
+            const ctx = await this.spacePermissionService.resolveAccess(
+                appResolved.account.user.id,
+                { type: 'dashboard', dashboardUuid, spaceUuid },
+            );
+            if (
+                this.createAuditedAbility(appResolved.account).cannot(
+                    'view',
+                    subject('Dashboard', {
+                        organizationUuid,
+                        projectUuid,
+                        inheritsFromOrgOrProject: ctx.inheritsFromOrgOrProject,
+                        access: ctx.access,
+                        metadata: { dashboardUuid },
+                    }),
+                )
+            ) {
+                throw new ForbiddenError(
+                    "You don't have access to the space this dashboard belongs to",
+                );
+            }
+        }
+        if (
+            controlsEnabled &&
+            appResolved.excludedParameterKeys !== undefined &&
+            (appResolved.account.isRegisteredUser() ||
+                (isJwtUser(appResolved.account) &&
+                    canEmbedViewerResolveTileParameters(
+                        appResolved.account.access.parameters,
+                    )))
+        ) {
+            return {
+                dashboardValues: appResolved.parameters ?? {},
+                excludedKeys: appResolved.excludedParameterKeys,
+            };
+        }
+        return getDashboardTileParameterLayer({
+            ...tile,
+            requestParameters:
+                parameterControls === null
+                    ? tile.requestParameters
+                    : appResolved.parameters,
+            dashboardParameters: parameters,
+            parameterControls,
+            userParameterNames:
+                parameterControls === null
+                    ? []
+                    : (await this.projectParametersModel.find(projectUuid)).map(
+                          ({ name }) => name,
+                      ),
+        });
+    }
+
     /**
      * A merged chart on a dashboard tile: the tile's dashboard filters are
      * pushed into each source before the join and the chart's own sort rides
@@ -9623,6 +10226,7 @@ export class AsyncQueryService extends ProjectService {
         invalidateCache,
         limit,
         parameters,
+        excludedParameterKeys,
         pivotResults,
         userAttributeOverrides,
     }: Pick<
@@ -9637,6 +10241,7 @@ export class AsyncQueryService extends ProjectService {
         | 'invalidateCache'
         | 'limit'
         | 'parameters'
+        | 'excludedParameterKeys'
         | 'pivotResults'
         | 'userAttributeOverrides'
     > & {
@@ -9671,22 +10276,26 @@ export class AsyncQueryService extends ProjectService {
                 formatRefusedMergeDashboardFilters(refusedDashboardFilters),
             );
         }
-        const rawDashboardParameters =
-            await this.dashboardModel.getDashboardParametersByIdOrSlug(
-                dashboardUuid,
-                projectUuid,
-            );
+        const chartSavedValues = savedChart.parameters ?? {};
         const tileParameters = await this.getDashboardTileParameterOverrides({
             projectUuid,
             explores: Object.values(exploreBySourceId),
-            dashboardValues: {
-                ...convertDashboardParametersToValuesMap(
-                    rawDashboardParameters,
-                ),
-                ...parameters,
-            },
-            chartSavedValues: savedChart.parameters ?? {},
-            excludedKeys: [],
+            ...(await this.getDashboardTileParameterLayer({
+                dashboardUuid,
+                projectUuid,
+                organizationUuid: savedChart.organizationUuid,
+                flagUser: {
+                    organizationUuid: savedChart.organizationUuid,
+                    userUuid: account.isRegisteredUser()
+                        ? account.user.id
+                        : undefined,
+                },
+                tileUuid,
+                chartSavedValues,
+                requestParameters: parameters,
+                appResolved: { account, parameters, excludedParameterKeys },
+            })),
+            chartSavedValues,
         });
         const outcome = await this.executeAsyncMergeQuery({
             account,
@@ -9726,6 +10335,41 @@ export class AsyncQueryService extends ProjectService {
         };
     }
 
+    /** A viewer's parameter values and per-tile exclusions, as an embed token allows them */
+    static getAccountParameterInputs(
+        account: Account,
+        parameters: ParametersValuesMap | undefined,
+        excludedParameterKeys: string[] | undefined,
+    ): {
+        parameters: ParametersValuesMap | undefined;
+        excludedParameterKeys: string[] | undefined;
+    } {
+        if (!isJwtUser(account)) return { parameters, excludedParameterKeys };
+        return {
+            parameters: getEmbedParameterValues(
+                account.access.parameters,
+                parameters,
+            ),
+            excludedParameterKeys: getEmbedExcludedParameterKeys(
+                account.access.parameters,
+                excludedParameterKeys,
+            ),
+        };
+    }
+
+    // Keeps the given values but a dashboard embed token's fixed values win, unless the viewer may change them
+    static lockEmbedParameterValues(
+        account: Account,
+        parameters: ParametersValuesMap | undefined,
+    ): ParametersValuesMap | undefined {
+        if (!isJwtUser(account) || account.access.content.type !== 'dashboard')
+            return parameters;
+        return {
+            ...parameters,
+            ...getEmbedParameterValues(account.access.parameters, parameters),
+        };
+    }
+
     async executeAsyncDashboardChartQuery({
         account,
         projectUuid,
@@ -9734,12 +10378,13 @@ export class AsyncQueryService extends ProjectService {
         dashboardUuid,
         dashboardFilters,
         dashboardSorts,
-        dateZoom,
+        dateZoom: requestedDateZoom,
         context,
         querySurface,
         invalidateCache,
         limit,
-        parameters,
+        parameters: requestedParameters,
+        excludedParameterKeys: requestedExcludedParameterKeys,
         pivotResults,
         includeUnpublishedDraft,
         sessionTimezone,
@@ -9748,6 +10393,13 @@ export class AsyncQueryService extends ProjectService {
         userAttributeOverrides,
     }: ExecuteAsyncDashboardChartQueryArgs): Promise<ApiExecuteAsyncDashboardChartQueryResults> {
         assertIsAccountWithOrg(account);
+        // An embed token can call this route directly, so its parameter rules apply here too
+        const { parameters, excludedParameterKeys } =
+            AsyncQueryService.getAccountParameterInputs(
+                account,
+                requestedParameters,
+                requestedExcludedParameterKeys,
+            );
 
         const publishedChart =
             preloadedSavedChart ??
@@ -9773,6 +10425,13 @@ export class AsyncQueryService extends ProjectService {
                 organizationUuid,
             ),
         ]);
+
+        // A live data source whose integration refuses date zoom keeps its
+        // saved grain, so one zoom never fails its tiles. Direct metric
+        // queries still refuse the zoom.
+        const dateZoom = isDateZoomRefusedOnExplore(explore)
+            ? undefined
+            : requestedDateZoom;
 
         let effectiveDashboardUuid: string | undefined = dashboardUuid;
 
@@ -9844,6 +10503,7 @@ export class AsyncQueryService extends ProjectService {
                 invalidateCache,
                 limit,
                 parameters,
+                excludedParameterKeys,
                 pivotResults,
                 userAttributeOverrides,
             });
@@ -9937,7 +10597,7 @@ export class AsyncQueryService extends ProjectService {
                 connectionRoute,
                 aiPlan,
             },
-            rawDashboardParameters,
+            tileParameterLayer,
             projectParameters,
         ] = await Promise.all([
             this.getWarehouseCredentialsWithConnection({
@@ -9950,10 +10610,21 @@ export class AsyncQueryService extends ProjectService {
                 isServiceAccount: account.isServiceAccount(),
                 ...getAccountAgentIdentityFacts(account),
             }),
-            this.dashboardModel.getDashboardParametersByIdOrSlug(
-                resolvedDashboardUuid,
+            this.getDashboardTileParameterLayer({
+                dashboardUuid: resolvedDashboardUuid,
                 projectUuid,
-            ),
+                organizationUuid: savedChart.organizationUuid,
+                flagUser: {
+                    organizationUuid: savedChart.organizationUuid,
+                    userUuid: account.isRegisteredUser()
+                        ? account.user.id
+                        : undefined,
+                },
+                tileUuid,
+                chartSavedValues: savedChart.parameters ?? {},
+                requestParameters: parameters,
+                appResolved: { account, parameters, excludedParameterKeys },
+            }),
             preloadedProjectParameters ??
                 this.projectParametersModel.find(projectUuid),
         ]);
@@ -9966,14 +10637,8 @@ export class AsyncQueryService extends ProjectService {
         const combinedParameters = await this.resolveDashboardTileParameters({
             projectUuid,
             explore,
-            dashboardValues: {
-                ...convertDashboardParametersToValuesMap(
-                    rawDashboardParameters,
-                ),
-                ...parameters,
-            },
+            ...tileParameterLayer,
             chartSavedValues: savedChart.parameters ?? {},
-            excludedKeys: [],
             preloadedProjectParameters: projectParameters,
         });
 
@@ -10136,7 +10801,7 @@ export class AsyncQueryService extends ProjectService {
         invalidateCache,
         dateZoom,
         limit,
-        parameters,
+        parameters: requestedParameters,
         sorts,
     }: ExecuteAsyncUnderlyingDataQueryArgs): Promise<ApiExecuteAsyncMetricQueryResults> {
         assertIsAccountWithOrg(account);
@@ -10171,6 +10836,15 @@ export class AsyncQueryService extends ProjectService {
             projectUuid,
             source,
         );
+        // A dashboard embed drill-down runs with its source query's values, under the token's fixed values
+        const parameters =
+            isJwtUser(account) && account.access.content.type === 'dashboard'
+                ? AsyncQueryService.lockEmbedParameterValues(
+                      account,
+                      source.requestParameters?.parameters ??
+                          requestedParameters,
+                  )
+                : requestedParameters;
 
         const {
             warehouseCredentials,
@@ -10463,21 +11137,31 @@ export class AsyncQueryService extends ProjectService {
         parameters,
         userAttributeOverrides,
         warehouseConnectionUuid: requestedConnectionUuid,
+        authority = REQUEST_AUTHORITY,
     }: ExecuteAsyncSqlQueryArgs): Promise<ApiExecuteAsyncSqlQueryResults> {
         const { organizationUuid, provisioningSource } =
             await this.projectModel.getSummary(projectUuid);
 
-        const auditedAbility = this.createAuditedAbility(account);
-        if (
-            auditedAbility.cannot(
-                'manage',
-                subject('SqlRunner', {
-                    organizationUuid,
-                    projectUuid,
-                }),
-            )
-        ) {
-            throw new ForbiddenError();
+        switch (authority.kind) {
+            case 'composer':
+                // Runs its author's stored SQL, as a saved SQL chart tile does
+                authority.binding.assertExecution(account, projectUuid);
+                break;
+            case 'request':
+                if (
+                    this.createAuditedAbility(account).cannot(
+                        'manage',
+                        subject('SqlRunner', {
+                            organizationUuid,
+                            projectUuid,
+                        }),
+                    )
+                ) {
+                    throw new ForbiddenError();
+                }
+                break;
+            default:
+                return assertUnreachable(authority, 'Unknown query authority');
         }
 
         if (provisioningSource === 'analytics') {
@@ -10569,6 +11253,7 @@ export class AsyncQueryService extends ProjectService {
                 aiPrincipalUuid: getAiExecutionCredentialUuid(aiPlan ?? null),
                 warehouseConnectionUuid,
                 connectionRoute,
+                composerChartSource: getComposerChartSource(authority),
             },
             {
                 sql,
@@ -11041,11 +11726,14 @@ export class AsyncQueryService extends ProjectService {
                             e,
                         )}`,
                     );
-                    throw new ParameterError(
+                    const error = new ParameterError(
                         `${
                             label ?? `Referenced query "${tableName}"`
                         } did not complete: ${getErrorMessage(e)}`,
                     );
+                    error.cause = e;
+                    // The referenced query's own failure is the one to report
+                    throw markAlreadyReported(error);
                 }
             }),
         );
@@ -11153,37 +11841,14 @@ export class AsyncQueryService extends ProjectService {
         references,
         parameters,
         pivotConfiguration,
+        authority = REQUEST_AUTHORITY,
     }: ExecuteAsyncComposeSqlQueryArgs): Promise<ApiExecuteAsyncSqlQueryResults> {
-        assertIsAccountWithOrg(account);
-
-        const { enabled: isEndpointEnabled } = await this.featureFlagModel.get({
-            user: {
-                userUuid: account.user.id,
-                organizationUuid: account.organization.organizationUuid,
-            },
-            featureFlagId: FeatureFlags.ComposeSqlRunner,
-        });
-        if (!isEndpointEnabled) {
-            throw new ForbiddenError('Compose SQL queries are not enabled');
-        }
-
-        const projectSummary = await this.projectModel.getSummary(projectUuid);
-        const { organizationUuid } = projectSummary;
-
-        // Same ability that gates running a metric query from the explorer:
-        // interactive viewers and up, but not plain viewers.
-        const auditedAbility = this.createAuditedAbility(account);
-        if (
-            auditedAbility.cannot(
-                'manage',
-                subject('Explore', {
-                    organizationUuid,
-                    projectUuid,
-                }),
-            )
-        ) {
-            throw new ForbiddenError();
-        }
+        await this.assertCanRunComposeQueries(
+            account,
+            projectUuid,
+            authority,
+            'Compose SQL queries are not enabled',
+        );
 
         // User SQL runs on a session whose credentials reach only the results
         // it references, so a query that references nothing has nothing to
@@ -11204,6 +11869,7 @@ export class AsyncQueryService extends ProjectService {
             references,
             parameters,
             pivotConfiguration,
+            authority,
             plan: {
                 columns: { mode: 'discover' },
                 engine: 'scopedToReferencedResults',
@@ -11219,6 +11885,47 @@ export class AsyncQueryService extends ProjectService {
             usedParametersValues: {},
             resolvedTimezone: null,
         };
+    }
+
+    /** The compose flag, and the ability that gates running a metric query from the explorer. */
+    private async assertCanRunComposeQueries(
+        account: Account,
+        projectUuid: string,
+        authority: RequestAuthority | ComposerAuthority,
+        disabledMessage: string,
+    ): Promise<void> {
+        assertIsAccountWithOrg(account);
+        switch (authority.kind) {
+            case 'composer':
+                // The author's Explore access was checked at save; per-source switches still apply
+                authority.binding.assertExecution(account, projectUuid);
+                return;
+            case 'request':
+                break;
+            default:
+                assertUnreachable(authority, 'Unknown query authority');
+        }
+        const { enabled } = await this.featureFlagModel.get({
+            user: {
+                userUuid: account.user.id,
+                organizationUuid: account.organization.organizationUuid,
+            },
+            featureFlagId: FeatureFlags.ComposeSqlRunner,
+        });
+        if (!enabled) {
+            throw new ForbiddenError(disabledMessage);
+        }
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        // Interactive viewers and up, but not plain viewers
+        if (
+            this.createAuditedAbility(account).cannot(
+                'manage',
+                subject('Explore', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
     }
 
     /** Python queries run for at most this long inside the sandbox. */
@@ -11268,35 +11975,18 @@ export class AsyncQueryService extends ProjectService {
         references,
         parameters,
         invalidateCache,
+        authority = REQUEST_AUTHORITY,
     }: ExecuteAsyncPythonQueryArgs): Promise<ApiExecuteAsyncSqlQueryResults> {
         assertIsAccountWithOrg(account);
 
-        const { enabled: isEndpointEnabled } = await this.featureFlagModel.get({
-            user: {
-                userUuid: account.user.id,
-                organizationUuid: account.organization.organizationUuid,
-            },
-            featureFlagId: FeatureFlags.ComposeSqlRunner,
-        });
-        if (!isEndpointEnabled) {
-            throw new ForbiddenError('Python queries are not enabled');
-        }
-
-        const projectSummary = await this.projectModel.getSummary(projectUuid);
-        const { organizationUuid } = projectSummary;
-
-        const auditedAbility = this.createAuditedAbility(account);
-        if (
-            auditedAbility.cannot(
-                'manage',
-                subject('Explore', {
-                    organizationUuid,
-                    projectUuid,
-                }),
-            )
-        ) {
-            throw new ForbiddenError();
-        }
+        await this.assertCanRunComposeQueries(
+            account,
+            projectUuid,
+            authority,
+            'Python queries are not enabled',
+        );
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
 
         if (Object.keys(references).length === 0) {
             throw new ParameterError(
@@ -11407,7 +12097,10 @@ export class AsyncQueryService extends ProjectService {
             undefined,
             undefined,
             querySurface,
-            { resultEntitlementFingerprint },
+            {
+                resultEntitlementFingerprint,
+                composerChartSource: getComposerChartSource(authority),
+            },
         );
         await this.queryHistoryModel.recordResultProducer(
             queryUuid,
@@ -11575,18 +12268,18 @@ export class AsyncQueryService extends ProjectService {
                     const resultsKey = bypassResultsCache
                         ? `${sharedResultsKey}.${queryUuid}`
                         : sharedResultsKey;
-                    const cached =
-                        invalidateCache || bypassResultsCache
-                            ? null
-                            : ((await this.cacheService?.findCachedResultsFile(
-                                  projectUuid,
-                                  resultsKey,
-                                  {
-                                      userUuid: account.user.id,
-                                      organizationUuid,
-                                      organizationName: undefined,
-                                  },
-                              )) ?? null);
+                    const { cached, outcome } =
+                        await this.lookupBackgroundResultsCache({
+                            projectUuid,
+                            cacheKey: resultsKey,
+                            user: {
+                                userUuid: account.user.id,
+                                organizationUuid,
+                                organizationName: undefined,
+                            },
+                            invalidateCache,
+                            bypassResultsCache,
+                        });
                     this.prometheusMetrics?.incrementQueryCacheHit(
                         cached !== null,
                         context,
@@ -11605,6 +12298,11 @@ export class AsyncQueryService extends ProjectService {
                         });
                         return;
                     }
+                    await this.queryHistoryModel.recordCacheOutcome(
+                        queryUuid,
+                        projectUuid,
+                        outcome,
+                    );
 
                     const inputMeta: PythonInputMeta = {
                         inputs: {},
@@ -11786,6 +12484,11 @@ export class AsyncQueryService extends ProjectService {
                     this.logger.warn(
                         `Python query ${queryUuid} failed: ${message}`,
                     );
+                    captureAiAgentQueryError({
+                        error: e,
+                        queryTags,
+                        querySource: 'python',
+                    });
                     await this.queryHistoryModel.updateStatusToError(
                         queryUuid,
                         projectUuid,
@@ -11836,6 +12539,7 @@ export class AsyncQueryService extends ProjectService {
         if (effectiveLimit > maxLimit) {
             throw new ParameterError(`limit must be at most ${maxLimit} rows`);
         }
+        await this.trackFirstQueryForAccount(account);
         const requestParameters: ExecuteAsyncApiQueryRequestParams = {
             connectionUuid,
             payload,
@@ -11871,6 +12575,7 @@ export class AsyncQueryService extends ProjectService {
                     tableCalculations: [],
                     additionalMetrics: [],
                 },
+                explore: null,
             },
             toResult: (result) => ({
                 rows: result.rows,
@@ -11903,6 +12608,70 @@ export class AsyncQueryService extends ProjectService {
      * Answers a metric query on a live data source explore with one call to
      * its integration. Callers MUST authorize the account for the explore.
      */
+    private async trackFirstQueryForAccount(account: Account): Promise<void> {
+        assertIsAccountWithOrg(account);
+        const { organizationUuid } = account.organization;
+        // Analytics only: never fail the query
+        try {
+            await this.trackFirstQuery(
+                account,
+                organizationUuid,
+                await this.getOnboardingFlow({
+                    userUuid: account.user.id,
+                    organizationUuid,
+                }),
+            );
+        } catch (error) {
+            this.logger.warn(
+                `Failed to track first query for organization ${organizationUuid}: ${getErrorMessage(error)}`,
+            );
+        }
+    }
+
+    /**
+     * Logs every refusal of a live data source query by code, so the team
+     * sees which limits users hit. Never fails the query it describes.
+     */
+    private trackApiSourceRefusals({
+        account,
+        organizationUuid,
+        projectUuid,
+        exploreName,
+        apiSource,
+        issues,
+        context,
+        querySurface,
+    }: {
+        account: Account;
+        organizationUuid: string;
+        projectUuid: string;
+        exploreName: string;
+        apiSource: ApiSourceExplore;
+        issues: ApiSourceQueryIssue[];
+        context: QueryExecutionContext;
+        querySurface: QuerySurface | undefined;
+    }): void {
+        issues.forEach(({ code, fieldId }) => {
+            this.logger.info(
+                `Live source query refused: code=${code} integration=${apiSource.integration} connection=${apiSource.connectionUuid} explore=${exploreName} field=${fieldId ?? '-'} surface=${querySurface ?? '-'} context=${context}`,
+            );
+            this.analytics.trackAccount(account, {
+                event: 'live_source.query_refused',
+                properties: {
+                    organizationId: organizationUuid,
+                    projectId: projectUuid,
+                    externalConnectionUuid: apiSource.connectionUuid,
+                    integration: apiSource.integration,
+                    exploreName,
+                    code,
+                    fieldId,
+                    querySurface: querySurface ?? null,
+                    context,
+                },
+            });
+        });
+    }
+
     private async executePreparedApiSourceQuery(
         args: PreparedAsyncQueryArgs,
         requestParameters: ExecuteAsyncQueryRequestParams,
@@ -11923,20 +12692,34 @@ export class AsyncQueryService extends ProjectService {
             );
         }
         assertRegisteredAccount(account);
-        if (queryComposer.getPivotConfiguration()) {
-            throw new ParameterError(
-                "Pivoted results aren't available from live data sources yet. Remove the pivot to run this query.",
-            );
-        }
-        if (queryComposer.getDateZoom()?.granularity) {
-            throw new ParameterError(
-                "Date zoom isn't available on live data sources yet.",
-            );
+        // The shared check, with what only the composer knows: the same
+        // refusals as the Explore controls, before any call or flag lookup
+        const issues = getApiSourceQueryIssues(
+            apiSource,
+            queryComposer.getMetricQuery(),
+            {
+                isPivoted: !!queryComposer.getPivotConfiguration(),
+                dateZoomGranularity: queryComposer.getDateZoom()?.granularity,
+            },
+        );
+        if (issues.length > 0) {
+            this.trackApiSourceRefusals({
+                account,
+                organizationUuid,
+                projectUuid,
+                exploreName: explore.name,
+                apiSource,
+                issues,
+                context,
+                querySurface,
+            });
+            throw toApiSourceQueryError(issues);
         }
         if (!this.getApiSourceConnector) {
             throw new ForbiddenError('Live data sources are not enabled');
         }
         await this.assertApiQuerySourcesEnabled(account);
+        await this.trackFirstQueryForAccount(account);
 
         const metricQuery = queryComposer.getMetricQuery();
         const fields = queryComposer.getFields();
@@ -11970,9 +12753,21 @@ export class AsyncQueryService extends ProjectService {
                 requestParameters.invalidateCache ??
                 args.invalidateCache ??
                 false,
-            history: { fields, requestParameters, metricQuery },
-            toResult: (result) =>
-                toApiSourceResult({ compiled, rows: result.rows, fields }),
+            history: { fields, requestParameters, metricQuery, explore },
+            toResult: (result) => {
+                const { label, maxRows } = connector.describe();
+                assertApiResultComplete({
+                    compiled,
+                    hasMoreRows: result.hasMoreRows,
+                    label,
+                    maxRows,
+                });
+                return toApiSourceResult({
+                    compiled,
+                    rows: result.rows,
+                    fields,
+                });
+            },
         });
         return {
             queryUuid,
@@ -12017,6 +12812,8 @@ export class AsyncQueryService extends ProjectService {
             fields: ItemsMap | null;
             requestParameters: ExecuteAsyncQueryRequestParams;
             metricQuery: MetricQuery;
+            /** The live explore a metric query reads; null for a raw api query. */
+            explore: Explore | null;
         };
         toResult: ApiResultShaper;
     }): Promise<{
@@ -12027,14 +12824,17 @@ export class AsyncQueryService extends ProjectService {
     }> {
         assertIsAccountWithOrg(account);
         const identityEnabled = await this.isResultIdentityEnabled(account);
+        // Same inputs as the result read check, which fingerprints a live
+        // explore's results with the explore and its scope.
         const resultEntitlementFingerprint = identityEnabled
-            ? getQueryResultEntitlementFingerprint({
+            ? await this.getCurrentResultEntitlementFingerprint({
+                  projectUuid,
                   parameters: getQueryResultRequestParameters(
                       history.requestParameters,
                       {},
                   ),
                   controls: await this.getUserAttributes({ account }),
-                  explore: null,
+                  explore: history.explore,
                   metricQuery: history.metricQuery,
               })
             : null;
@@ -12174,6 +12974,7 @@ export class AsyncQueryService extends ProjectService {
             context,
             queryCreatedAt,
             fields: history.fields,
+            exploreName: history.explore?.name ?? null,
             toResult,
         }).catch((e) => {
             this.logger.error(
@@ -12198,6 +12999,7 @@ export class AsyncQueryService extends ProjectService {
         context,
         queryCreatedAt,
         fields,
+        exploreName,
         toResult,
     }: {
         account: Account;
@@ -12211,6 +13013,8 @@ export class AsyncQueryService extends ProjectService {
         context: QueryExecutionContext;
         queryCreatedAt: Date;
         fields: ItemsMap | null;
+        /** The live explore a compiled metric query reads; null for a raw api query. */
+        exploreName: string | null;
         toResult: ApiResultShaper;
     }): Promise<void> {
         const { connector: connectorType } = connector.describe();
@@ -12267,7 +13071,7 @@ export class AsyncQueryService extends ProjectService {
                     executeMs = Date.now() - startedAt;
                     span.setAttributes({
                         'lightdash.rowCount': result.rows.length,
-                        'lightdash.truncated': result.truncated,
+                        'lightdash.truncated': result.hasMoreRows,
                         'lightdash.apiCalls': connector.usage().apiCalls,
                         ...(result.bytesRead !== null
                             ? { 'lightdash.bytesRead': result.bytesRead }
@@ -12351,27 +13155,65 @@ export class AsyncQueryService extends ProjectService {
                         errorMessage: null,
                         totalRowCount: shaped.rows.length,
                         columnsCount: Object.keys(shaped.columns).length,
-                        truncated: result.truncated,
+                        truncated: result.hasMoreRows,
                     });
                     logCall({
                         outcome: 'ok',
                         errorMessage: null,
                         rowCount: shaped.rows.length,
                         columnCount: Object.keys(shaped.columns).length,
-                        truncated: result.truncated,
+                        truncated: result.hasMoreRows,
                     });
                     this.logger.info(
                         `Api query ${queryUuid} ready: ${shaped.rows.length} rows${
-                            result.truncated ? ' (truncated)' : ''
+                            result.hasMoreRows
+                                ? ' (more rows past the limit)'
+                                : ''
                         } from ${connectorType} in ${Date.now() - startedAt}ms`,
                     );
                 } catch (e) {
                     const message = getErrorMessage(e);
                     const outcome = getApiQueryOutcome(e);
-                    span.setAttributes({ 'lightdash.error': message });
+                    const errorCode = getLiveSourceUpstreamErrorCode(outcome);
+                    span.setAttributes({
+                        'lightdash.error': message,
+                        ...(errorCode
+                            ? { 'lightdash.liveSourceErrorCode': errorCode }
+                            : {}),
+                    });
                     this.logger.warn(
-                        `Api query ${queryUuid} failed: ${message}`,
+                        `Api query ${queryUuid} failed: code=${errorCode ?? '-'} integration=${connectorType} explore=${exploreName ?? '-'} context=${context}: ${message}`,
                     );
+                    // Only compiled queries: a request the agent wrote itself
+                    // failing is the agent's to fix, not ours
+                    if (
+                        exploreName !== null &&
+                        errorCode !== null &&
+                        isLiveSourceErrorReportable(errorCode)
+                    ) {
+                        Sentry.withScope((scope) => {
+                            scope.setTag(
+                                'lightdash.apiConnector',
+                                connectorType,
+                            );
+                            scope.setTag(
+                                'lightdash.liveSourceErrorCode',
+                                errorCode,
+                            );
+                            scope.setFingerprint([
+                                'live-source-upstream',
+                                connectorType,
+                                errorCode,
+                            ]);
+                            scope.setContext('live_source', {
+                                queryUuid,
+                                projectUuid,
+                                exploreName,
+                                context,
+                            });
+                            Sentry.captureException(e);
+                        });
+                    }
                     await this.queryHistoryModel.updateStatusToError(
                         queryUuid,
                         projectUuid,
@@ -12397,6 +13239,7 @@ export class AsyncQueryService extends ProjectService {
                         connector: connectorType,
                         queryCreatedAt,
                         outcome,
+                        liveSourceErrorCode: errorCode,
                         errorMessage: message,
                         totalRowCount: null,
                         columnsCount: null,
@@ -12451,7 +13294,7 @@ export class AsyncQueryService extends ProjectService {
                 'ok',
                 Date.now() - startedAt,
             );
-            if (result.truncated) {
+            if (result.hasMoreRows) {
                 this.prometheusMetrics?.incrementApiSourceTruncated(
                     connectorType,
                 );
@@ -12479,6 +13322,7 @@ export class AsyncQueryService extends ProjectService {
         connector,
         queryCreatedAt,
         outcome,
+        liveSourceErrorCode = null,
         errorMessage,
         totalRowCount,
         columnsCount,
@@ -12493,6 +13337,7 @@ export class AsyncQueryService extends ProjectService {
         connector: ApiConnectorType;
         queryCreatedAt: Date;
         outcome: ApiQueryOutcome;
+        liveSourceErrorCode?: LiveSourceUpstreamErrorCode | null;
         errorMessage: string | null;
         totalRowCount: number | null;
         columnsCount: number | null;
@@ -12539,6 +13384,7 @@ export class AsyncQueryService extends ProjectService {
                         columnsCount,
                         apiConnector: connector,
                         apiQueryOutcome: outcome,
+                        ...(liveSourceErrorCode ? { liveSourceErrorCode } : {}),
                         ...(truncated !== null ? { truncated } : {}),
                     },
                 });
@@ -12571,8 +13417,19 @@ export class AsyncQueryService extends ProjectService {
         pivotConfiguration,
         plan,
         invalidateCache,
+        authority = REQUEST_AUTHORITY,
     }: ExecuteAsyncDuckdbSourceQueryArgs): Promise<{ queryUuid: string }> {
         assertIsAccountWithOrg(account);
+        switch (authority.kind) {
+            case 'composer':
+                authority.binding.assertExecution(account, projectUuid);
+                break;
+            case 'request':
+                // Callers gate their own entry; the duckdb engine trusts what it is handed
+                break;
+            default:
+                return assertUnreachable(authority, 'Unknown query authority');
+        }
 
         const projectSummary = await this.projectModel.getSummary(projectUuid);
         const { organizationUuid } = projectSummary;
@@ -12654,6 +13511,8 @@ export class AsyncQueryService extends ProjectService {
             throw new ParameterError(getErrorMessage(e));
         }
 
+        await this.trackFirstQueryForAccount(account);
+
         // Parameter values change the executed SQL without changing its text
         const sharedCacheKey = QueryHistoryModel.getCacheKey(projectUuid, {
             sql: JSON.stringify({
@@ -12693,7 +13552,10 @@ export class AsyncQueryService extends ProjectService {
             undefined,
             undefined,
             querySurface,
-            { resultEntitlementFingerprint },
+            {
+                resultEntitlementFingerprint,
+                composerChartSource: getComposerChartSource(authority),
+            },
         );
         this.prometheusMetrics?.trackQueryStateTransition(
             'new',
@@ -12723,13 +13585,17 @@ export class AsyncQueryService extends ProjectService {
         });
 
         if (this.lightdashConfig.natsWorker.enabled) {
-            await this.enqueueDuckdbQuery({
+            await this.enqueueOnDuckdbWorker({
                 queryUuid,
                 projectUuid,
                 account,
                 queryTags,
                 queryCreatedAt,
                 context,
+                enqueue: (payload) =>
+                    this.natsClient.enqueueDuckdbQuery(payload),
+                runInProcess: () =>
+                    this.runDuckdbQueryInProcess(queryUuid, queryTags),
             });
         } else {
             this.runDuckdbQueryInProcess(queryUuid, queryTags);
@@ -12761,13 +13627,15 @@ export class AsyncQueryService extends ProjectService {
      * deployment whose workers do not take the subject yet runs it here
      * instead, so a merge never waits on a worker that will not come.
      */
-    private async enqueueDuckdbQuery({
+    private async enqueueOnDuckdbWorker({
         queryUuid,
         projectUuid,
         account,
         queryTags,
         queryCreatedAt,
         context,
+        enqueue,
+        runInProcess,
     }: {
         queryUuid: string;
         projectUuid: string;
@@ -12775,9 +13643,14 @@ export class AsyncQueryService extends ProjectService {
         queryTags: RunQueryTags;
         queryCreatedAt: Date;
         context: QueryExecutionContext;
+        enqueue: (payload: {
+            queryUuid: string;
+            queryTags: RunQueryTags;
+        }) => Promise<{ jobId: string }>;
+        runInProcess: () => void;
     }): Promise<void> {
         try {
-            const { jobId } = await this.natsClient.enqueueDuckdbQuery({
+            const { jobId } = await enqueue({
                 queryUuid,
                 queryTags,
             });
@@ -12795,7 +13668,7 @@ export class AsyncQueryService extends ProjectService {
                 this.logger.warn(
                     `No NATS worker takes DuckDB source query ${queryUuid} on ${e.subject}; running it in this process`,
                 );
-                this.runDuckdbQueryInProcess(queryUuid, queryTags);
+                runInProcess();
                 return;
             }
             const errorMessage = getErrorMessage(e);
@@ -12881,7 +13754,7 @@ export class AsyncQueryService extends ProjectService {
         return true;
     }
 
-    private async markClaimedQueryAsErrored(
+    public async markClaimedQueryAsErrored(
         queryUuid: string,
         error: string,
     ): Promise<void> {
@@ -13239,19 +14112,10 @@ export class AsyncQueryService extends ProjectService {
             userUuid: account.user.id,
             organizationUuid: account.organization.organizationUuid,
         };
-        const [externalSourcesFlag, composeSqlFlag] = await Promise.all([
-            this.featureFlagModel.get({
-                user,
-                featureFlagId: FeatureFlags.ExternalSources,
-            }),
-            this.featureFlagModel.get({
-                user,
-                featureFlagId: FeatureFlags.ComposeSqlRunner,
-            }),
-        ]);
-        if (!externalSourcesFlag.enabled) {
-            throw new ForbiddenError('External sources are not enabled');
-        }
+        const composeSqlFlag = await this.featureFlagModel.get({
+            user,
+            featureFlagId: FeatureFlags.ComposeSqlRunner,
+        });
         if (!composeSqlFlag.enabled) {
             throw new ForbiddenError('Compose SQL queries are not enabled');
         }
@@ -13340,6 +14204,8 @@ export class AsyncQueryService extends ProjectService {
             undefined,
             parameters,
         );
+
+        await this.trackFirstQueryForAccount(account);
 
         // Table versions invalidate cached SQL results after refresh.
         const externalSourceSalt = resolvedTables
@@ -13695,18 +14561,18 @@ export class AsyncQueryService extends ProjectService {
                 ? `${sharedResultsKey}.${queryUuid}`
                 : sharedResultsKey;
             if (references.kind === 'queries') {
-                const cached =
-                    invalidateCache || bypassResultsCache
-                        ? null
-                        : ((await this.cacheService?.findCachedResultsFile(
-                              projectUuid,
-                              resultsKey,
-                              {
-                                  userUuid: actor.userUuid,
-                                  organizationUuid,
-                                  organizationName: undefined,
-                              },
-                          )) ?? null);
+                const { cached, outcome } =
+                    await this.lookupBackgroundResultsCache({
+                        projectUuid,
+                        cacheKey: resultsKey,
+                        user: {
+                            userUuid: actor.userUuid,
+                            organizationUuid,
+                            organizationName: undefined,
+                        },
+                        invalidateCache,
+                        bypassResultsCache,
+                    });
                 this.prometheusMetrics?.incrementQueryCacheHit(
                     cached !== null,
                     context,
@@ -13735,6 +14601,11 @@ export class AsyncQueryService extends ProjectService {
                     });
                     return;
                 }
+                await this.queryHistoryModel.recordCacheOutcome(
+                    queryUuid,
+                    projectUuid,
+                    outcome,
+                );
             }
             const execution = await this.traceComposerQueryStage(
                 'duckdb',
@@ -13824,6 +14695,11 @@ export class AsyncQueryService extends ProjectService {
                 );
                 return;
             }
+            captureAiAgentQueryError({
+                error: e,
+                queryTags,
+                querySource: 'duckdb',
+            });
             await this.queryHistoryModel.update(
                 queryUuid,
                 projectUuid,
@@ -14344,7 +15220,9 @@ export class AsyncQueryService extends ProjectService {
         } catch (e) {
             // The DuckDB client throws raw errors (validation + engine)
             if (e instanceof LightdashError) throw e;
-            throw new WarehouseQueryError(getErrorMessage(e));
+            const error = new WarehouseQueryError(getErrorMessage(e));
+            error.cause = e;
+            throw error;
         }
         return Object.values(
             Object.fromEntries(columns.map((column) => [column.name, column])),
@@ -14522,7 +15400,7 @@ export class AsyncQueryService extends ProjectService {
         mode,
         pivotInput,
         userAttributeOverrides,
-        documentQueryContext,
+        authority = REQUEST_AUTHORITY,
     }: ExecuteMergeQueryInternalArgs): Promise<ApiExecuteAsyncMergeQueryResults> {
         assertIsAccountWithOrg(account);
         const { organizationUuid } =
@@ -14542,7 +15420,7 @@ export class AsyncQueryService extends ProjectService {
                   })
                 : mergeQuery;
         const compiledMerge = await this.compileMergeQuery({
-            documentQueryContext,
+            authority,
             account,
             projectUuid,
             mergeQuery: effectiveMergeQuery,
@@ -14579,7 +15457,7 @@ export class AsyncQueryService extends ProjectService {
         })();
 
         const query = await this.submitMergeDag({
-            documentQueryContext,
+            authority,
             account,
             projectUuid,
             organizationUuid,
@@ -14620,9 +15498,9 @@ export class AsyncQueryService extends ProjectService {
         userAttributeOverrides,
         pivotConfiguration,
         compiledMerge,
-        documentQueryContext,
+        authority,
     }: {
-        documentQueryContext?: DocumentQueryContext;
+        authority: RequestAuthority | DocumentAuthority;
         account: Account;
         projectUuid: string;
         organizationUuid: string;
@@ -14672,50 +15550,9 @@ export class AsyncQueryService extends ProjectService {
             ]),
         );
 
-        const columnOrder = Object.values(compiledMerge.fieldIdByColumn);
-        const referenceTableBySourceId = Object.fromEntries(
-            mergeQuery.sources.map((source, index) => [
-                source.id,
-                composeMergeReferenceTable(index),
-            ]),
-        );
-
-        // Each reference table binds to a leg node, or to an existing result
-        const references = Object.fromEntries(
-            Object.entries(referenceTableBySourceId).map(
-                ([sourceId, tableName]) => [
-                    tableName,
-                    legReferenceBySourceId[sourceId],
-                ],
-            ),
-        );
-        const labelBySourceId = getMergeSourceLabels({
-            sources: mergeQuery.sources,
-            typedColumns: compiledMerge.typedColumns,
-            itemsMap: compiledMerge.itemsMap,
-        });
-        // Only the legs this merge ran are checked against the cap; a
-        // referenced result's row count is its own query's concern
-        const legLabelByReferenceTable = Object.fromEntries(
-            mergeQuery.sources
-                .filter(isMergeMetricSource)
-                .map((source) => [
-                    referenceTableBySourceId[source.id],
-                    labelBySourceId[source.id],
-                ]),
-        );
-        const originalColumns: ResultColumns = buildComposeMergeOriginalColumns(
-            {
-                typedColumns: compiledMerge.typedColumns,
-                itemsMap: compiledMerge.itemsMap,
-                usedParametersValues: compiledMerge.usedParametersValues,
-                legReferenceBySourceId,
-            },
-        );
-
         const requestParameters: ExecuteAsyncQueryRequestParams = {
-            ...(documentQueryContext
-                ? { documentSource: documentQueryContext.reference }
+            ...(authority.kind === 'document'
+                ? { documentSource: authority.context.reference }
                 : {}),
             context,
             invalidateCache,
@@ -14723,71 +15560,23 @@ export class AsyncQueryService extends ProjectService {
             parameters,
             pivotConfiguration,
         };
-        // The join node carries the compile's core and its own pivot; the
-        // node composes the pivot stage and terminal wrapper for the engine,
-        // so nothing here knows whether the merge is pivoted
-        const joinNodeId = 'merge';
-        const joinNode: DuckdbSourceQuery = {
-            sourceType: QuerySourceType.DUCKDB,
+        const joinNodeId = COMPOSE_MERGE_JOIN_NODE_ID;
+        const { joinNode, plan } = this.buildMergeJoin({
             nodeId: joinNodeId,
-            sql: compiledMerge.coreSql,
-            references,
-            pivotConfiguration,
-        };
-        const compose: DuckdbQueryPlanComposer = ({
-            warehouseClient,
-            pivotConfiguration: pivot,
-        }) =>
-            new MergeQueryComposer({
-                coreSql: compiledMerge.coreSql,
-                terminalWrapper: compiledMerge.terminalWrapper,
-                itemsMap: compiledMerge.itemsMap,
+            mergeQuery,
+            compiledMerge,
+            legReferenceBySourceId,
+            labelBySourceId: getMergeSourceLabels({
+                sources: mergeQuery.sources,
                 typedColumns: compiledMerge.typedColumns,
-                columnOrder,
-                sorts: compiledMerge.sorts,
-                limit: mergeQuery.limit,
-                parameterReferences: compiledMerge.parameterReferences,
-                usedParametersValues: compiledMerge.usedParametersValues,
-                warehouseClient,
-                pivotConfiguration: pivot,
-            });
-        // A pivot the composer refuses fails here, before any leg runs; the
-        // join node composes again with the same inputs when it executes
-        compose({
-            warehouseClient:
-                this.composeEngineClient.createExecutionWarehouseClient({
-                    storage: 'results',
-                    scope: null,
-                }),
+                itemsMap: compiledMerge.itemsMap,
+            }),
+            legsRunAtOwnLimit: false,
+            requestParameters,
             pivotConfiguration,
-        }).getSql({
-            columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
         });
-        const plan: DuckdbQueryPlan = {
-            columns: {
-                mode: 'supplied',
-                compose,
-                originalColumns,
-                requestParameters,
-            },
-            // A merge calculation is user SQL: it runs on a session that
-            // reaches only the leg files it joins
-            engine: 'scopedToReferencedResults',
-            // Only the legs this merge ran are checked against the cap; a
-            // referenced result's row count is its own query's concern
-            guard: { legLabelByReferenceTable, sourceRowCap },
-            referenceLabels: legLabelByReferenceTable,
-        };
 
-        // A statement that reads files is refused before any leg runs; the
-        // join node checks it again when it submits
-        try {
-            DuckdbWarehouseClient.validateUserSqlFileAccess(
-                compiledMerge.coreSql,
-            );
-        } catch (e) {
-            throw new ParameterError(getErrorMessage(e));
-        }
+        const columnOrder = Object.values(compiledMerge.fieldIdByColumn);
 
         // The DAG submits the legs, then the join with its references
         // rewritten to their queryUuids; the join waits for the legs itself
@@ -14804,7 +15593,7 @@ export class AsyncQueryService extends ProjectService {
             },
             () =>
                 this.getQuerySourceService().submitQueries({
-                    documentQueryContext,
+                    authority,
                     account,
                     projectUuid,
                     context,
@@ -14864,6 +15653,248 @@ export class AsyncQueryService extends ProjectService {
             usedParametersValues: compiledMerge.usedParametersValues,
             resolvedTimezone: null,
         };
+    }
+
+    /** Compiles a composer merge node; a refusal throws with every reason. */
+    async compileComposerMerge({
+        account,
+        projectUuid,
+        nodeId,
+        mergeQuery,
+        parameters,
+        userAttributeOverrides,
+        sourceTitleById,
+        authority,
+    }: {
+        authority: RequestAuthority | ComposerAuthority;
+        account: Account;
+        projectUuid: string;
+        nodeId: string | null;
+        mergeQuery: MergeQuery;
+        parameters: ParametersValuesMap;
+        userAttributeOverrides: UserAttributeValueMap;
+        sourceTitleById: Record<string, string>;
+    }): Promise<RunnableCompiledMergeQuery> {
+        const compiled = await this.compileMergeQuery({
+            account,
+            projectUuid,
+            mergeQuery,
+            parameters,
+            userAttributeOverrides,
+            sourceTitleById,
+            authority,
+        });
+        if (!isRunnableCompiledMergeQuery(compiled)) {
+            throw new ParameterError(
+                `Merge node${nodeId ? ` "${nodeId}"` : ''} cannot run: ${compiled.errors
+                    .map((error) => error.message)
+                    .join(' ')}`,
+            );
+        }
+        return {
+            ...compiled,
+            itemsMap: withBareCalculationItems(compiled.itemsMap, mergeQuery),
+        };
+    }
+
+    /** Submits a composer merge node's join over its already-submitted source nodes. */
+    async submitComposerMergeJoin({
+        account,
+        projectUuid,
+        context,
+        querySurface,
+        mergeQuery,
+        compiledMerge,
+        legQueryUuidBySourceId,
+        labelBySourceId,
+        parameters,
+        invalidateCache,
+        authority,
+    }: {
+        account: Account;
+        projectUuid: string;
+        context: QueryExecutionContext;
+        querySurface?: QuerySurface;
+        mergeQuery: MergeQuery;
+        compiledMerge: RunnableCompiledMergeQuery;
+        legQueryUuidBySourceId: Record<string, string>;
+        labelBySourceId: Record<string, string>;
+        parameters: ParametersValuesMap;
+        invalidateCache: boolean;
+        authority: RequestAuthority | ComposerAuthority;
+    }): Promise<{ queryUuid: string }> {
+        const { joinNode, references, plan } = this.buildMergeJoin({
+            nodeId: COMPOSE_MERGE_JOIN_NODE_ID,
+            mergeQuery,
+            compiledMerge,
+            legReferenceBySourceId: legQueryUuidBySourceId,
+            labelBySourceId,
+            requestParameters: {
+                context,
+                invalidateCache,
+                mergeQuery,
+                parameters,
+            },
+            legsRunAtOwnLimit: true,
+            pivotConfiguration: undefined,
+        });
+        return this.executeAsyncDuckdbSourceQuery({
+            account,
+            projectUuid,
+            sql: joinNode.sql,
+            references,
+            context,
+            querySurface,
+            parameters,
+            invalidateCache,
+            plan,
+            authority,
+        });
+    }
+
+    /** A compiled merge's join as a duckdb node and its supplied-columns plan; the caller submits the legs. */
+    private buildMergeJoin({
+        nodeId,
+        mergeQuery,
+        compiledMerge,
+        legReferenceBySourceId,
+        labelBySourceId,
+        legsRunAtOwnLimit,
+        requestParameters,
+        pivotConfiguration,
+    }: {
+        nodeId: string;
+        mergeQuery: MergeQuery;
+        compiledMerge: RunnableCompiledMergeQuery;
+        legReferenceBySourceId: Record<string, string>;
+        labelBySourceId: Record<string, string>;
+        /** Composer legs run at their node's limit; the Explorer's at the cap. */
+        legsRunAtOwnLimit: boolean;
+        requestParameters: ExecuteAsyncQueryRequestParams;
+        pivotConfiguration: PivotConfiguration | undefined;
+    }): {
+        joinNode: DuckdbSourceQuery;
+        references: Record<string, string>;
+        plan: DuckdbQueryPlan;
+    } {
+        const sourceRowCap = this.lightdashConfig.query.maxLimit;
+        const columnOrder = Object.values(compiledMerge.fieldIdByColumn);
+        const referenceTableBySourceId = Object.fromEntries(
+            mergeQuery.sources.map((source, index) => [
+                source.id,
+                composeMergeReferenceTable(index),
+            ]),
+        );
+
+        // Each reference table binds to a leg node, or to an existing result
+        const references = Object.fromEntries(
+            Object.entries(referenceTableBySourceId).map(
+                ([sourceId, tableName]) => [
+                    tableName,
+                    legReferenceBySourceId[sourceId],
+                ],
+            ),
+        );
+        // Only the legs this merge ran are checked against the cap; a
+        // referenced result's row count is its own query's concern
+        const legLabelByReferenceTable = Object.fromEntries(
+            mergeQuery.sources
+                .filter(isMergeMetricSource)
+                .map((source) => [
+                    referenceTableBySourceId[source.id],
+                    labelBySourceId[source.id],
+                ]),
+        );
+        const originalColumns: ResultColumns = buildComposeMergeOriginalColumns(
+            {
+                typedColumns: compiledMerge.typedColumns,
+                itemsMap: compiledMerge.itemsMap,
+                usedParametersValues: compiledMerge.usedParametersValues,
+                legReferenceBySourceId,
+            },
+        );
+
+        // The join node carries the compile's core and its own pivot; the
+        // node composes the pivot stage and terminal wrapper for the engine,
+        // so nothing here knows whether the merge is pivoted
+        const joinNode: DuckdbSourceQuery = {
+            sourceType: QuerySourceType.DUCKDB,
+            nodeId,
+            sql: compiledMerge.coreSql,
+            references,
+            pivotConfiguration,
+        };
+        const compose: DuckdbQueryPlanComposer = ({
+            warehouseClient,
+            pivotConfiguration: pivot,
+        }) =>
+            new MergeQueryComposer({
+                coreSql: compiledMerge.coreSql,
+                terminalWrapper: compiledMerge.terminalWrapper,
+                itemsMap: compiledMerge.itemsMap,
+                typedColumns: compiledMerge.typedColumns,
+                columnOrder,
+                sorts: compiledMerge.sorts,
+                limit: mergeQuery.limit,
+                parameterReferences: compiledMerge.parameterReferences,
+                usedParametersValues: compiledMerge.usedParametersValues,
+                warehouseClient,
+                pivotConfiguration: pivot,
+            });
+        // A pivot the composer refuses fails here, before any leg runs; the
+        // join node composes again with the same inputs when it executes
+        compose({
+            warehouseClient:
+                this.composeEngineClient.createExecutionWarehouseClient({
+                    storage: 'results',
+                    scope: null,
+                }),
+            pivotConfiguration,
+        }).getSql({
+            columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
+        });
+        const plan: DuckdbQueryPlan = {
+            columns: {
+                mode: 'supplied',
+                compose,
+                originalColumns,
+                requestParameters,
+            },
+            // A merge calculation is user SQL: it runs on a session that
+            // reaches only the leg files it joins
+            engine: 'scopedToReferencedResults',
+            // Only the legs this merge ran are checked against the cap; a
+            // referenced result's row count is its own query's concern
+            guard: {
+                legLabelByReferenceTable,
+                sourceRowCap,
+                ...(legsRunAtOwnLimit
+                    ? {
+                          legLimitByReferenceTable: Object.fromEntries(
+                              mergeQuery.sources
+                                  .filter(isMergeMetricSource)
+                                  .map((source) => [
+                                      referenceTableBySourceId[source.id],
+                                      source.metricQuery.limit,
+                                  ]),
+                          ),
+                      }
+                    : {}),
+            },
+            referenceLabels: legLabelByReferenceTable,
+        };
+
+        // A statement that reads files is refused before any leg runs; the
+        // join node checks it again when it submits
+        try {
+            DuckdbWarehouseClient.validateUserSqlFileAccess(
+                compiledMerge.coreSql,
+            );
+        } catch (e) {
+            throw new ParameterError(getErrorMessage(e));
+        }
+
+        return { joinNode, references, plan };
     }
 
     /**
@@ -15363,6 +16394,13 @@ export class AsyncQueryService extends ProjectService {
     async executeAsyncDashboardSqlChartQuery(
         args: ExecuteAsyncDashboardSqlChartArgs,
     ): Promise<ApiExecuteAsyncDashboardSqlChartQueryResults> {
+        // An embed token can call this route directly, so its parameter rules apply here too
+        const { parameters, excludedParameterKeys } =
+            AsyncQueryService.getAccountParameterInputs(
+                args.account,
+                args.parameters,
+                args.excludedParameterKeys,
+            );
         const savedChart = isExecuteAsyncDashboardSqlChartByUuid(args)
             ? await this.savedSqlModel.getByUuid(args.savedSqlUuid, {
                   projectUuid: args.projectUuid,
@@ -15432,24 +16470,35 @@ export class AsyncQueryService extends ProjectService {
             await this.assertSavedChartAccess(account, 'view', savedChart);
         }
 
-        const [rawDashboardParameters, projectParameters] = await Promise.all([
-            this.dashboardModel.getDashboardParametersByIdOrSlug(
-                resolvedDashboardUuid,
+        const [tileParameterLayer, projectParameters] = await Promise.all([
+            this.getDashboardTileParameterLayer({
+                dashboardUuid: resolvedDashboardUuid,
                 projectUuid,
-            ),
+                organizationUuid: savedChart.organization.organizationUuid,
+                flagUser: {
+                    organizationUuid: savedChart.organization.organizationUuid,
+                    userUuid: account.isRegisteredUser()
+                        ? account.user.id
+                        : undefined,
+                },
+                tileUuid,
+                chartSavedValues: {},
+                requestParameters: undefined,
+                appResolved: {
+                    account,
+                    parameters,
+                    excludedParameterKeys,
+                },
+            }),
             this.projectParametersModel.find(projectUuid),
         ]);
-
-        const dashboardParameters = convertDashboardParametersToValuesMap(
-            rawDashboardParameters,
-        );
 
         // Combine default parameter values, dashboard parameters, and request parameters first
         const combinedParameters = await this.combineParameters(
             projectUuid,
             undefined,
-            args.parameters,
-            dashboardParameters,
+            omit(parameters, tileParameterLayer.excludedKeys),
+            tileParameterLayer.dashboardValues,
             projectParameters,
         );
 
@@ -15540,7 +16589,8 @@ export class AsyncQueryService extends ProjectService {
 
     /**
      * Poll for query completion with exponential backoff.
-     * Throws on CANCELLED, ERROR, or timeout.
+     * Throws on CANCELLED, ERROR, or timeout. A timeout cancels the query
+     * if it is still running.
      */
     async pollForQueryCompletion({
         account,
@@ -15550,6 +16600,7 @@ export class AsyncQueryService extends ProjectService {
         maxBackoffMs = 2000,
         timeoutMs = 5 * 60 * 1000, // 5 min default
         abortSignal,
+        source = 'other',
     }: {
         account: Account;
         projectUuid: string;
@@ -15558,16 +16609,66 @@ export class AsyncQueryService extends ProjectService {
         maxBackoffMs?: number;
         timeoutMs?: number;
         abortSignal?: AbortSignal;
+        source?: QueryPollingSource;
     }): Promise<void> {
-        await this.queryHistoryModel.pollForQueryCompletion({
-            queryUuid,
-            account,
-            projectUuid,
-            initialBackoffMs,
-            maxBackoffMs,
-            timeoutMs,
-            abortSignal,
-        });
+        try {
+            await this.queryHistoryModel.pollForQueryCompletion({
+                queryUuid,
+                account,
+                projectUuid,
+                initialBackoffMs,
+                maxBackoffMs,
+                timeoutMs,
+                abortSignal,
+            });
+        } catch (error) {
+            if (error instanceof QueryPollingTimeoutError) {
+                this.prometheusMetrics?.incrementQueryPollingTimeout(source);
+                await this.cancelTimedOutQuery({
+                    account,
+                    projectUuid,
+                    queryUuid,
+                });
+            }
+            throw error;
+        }
+    }
+
+    private async cancelTimedOutQuery({
+        account,
+        projectUuid,
+        queryUuid,
+    }: {
+        account: Account;
+        projectUuid: string;
+        queryUuid: string;
+    }): Promise<void> {
+        try {
+            const history = await this.queryHistoryModel.get(
+                queryUuid,
+                projectUuid,
+                account,
+            );
+            if (
+                [
+                    QueryHistoryStatus.PENDING,
+                    QueryHistoryStatus.QUEUED,
+                    QueryHistoryStatus.EXECUTING,
+                ].includes(history.status)
+            ) {
+                await this.cancelAsyncQuery({
+                    account,
+                    projectUuid,
+                    queryUuid,
+                });
+            }
+        } catch (error) {
+            this.logger.warn(
+                `Failed to cancel query ${queryUuid} after polling timed out: ${getErrorMessage(
+                    error,
+                )}`,
+            );
+        }
     }
 
     async pollQueryHistoryUntilDeadline({
@@ -16780,6 +17881,84 @@ export class AsyncQueryService extends ProjectService {
             paginateArgs,
             filters,
         );
+    }
+
+    private async assertCanViewResultsCacheStats(
+        account: Account,
+        projectUuid: string,
+    ): Promise<{ organizationUuid: string }> {
+        assertIsAccountWithOrg(account);
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        if (
+            this.createAuditedAbility(account).cannot(
+                'manage',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        return { organizationUuid };
+    }
+
+    async getResultsCacheStats(
+        account: Account,
+        projectUuid: string,
+        days: ResultsCacheStatsDays,
+    ): Promise<ResultsCacheStats> {
+        const { organizationUuid } = await this.assertCanViewResultsCacheStats(
+            account,
+            projectUuid,
+        );
+        const { contextRows, recommendationRows } =
+            await this.queryHistoryModel.getResultsCacheStatsRows(
+                projectUuid,
+                days,
+                {
+                    scheduledContexts: getContextsInGroup(
+                        ResultsCacheStatsContextGroup.SCHEDULED,
+                    ),
+                    ...RESULTS_CACHE_RECOMMENDATION_THRESHOLDS,
+                    maxTtlSeconds: this.getMaxResultsCacheTtlSeconds(),
+                },
+            );
+        const stats = buildResultsCacheStats({
+            days,
+            contextRows,
+            recommendationRows,
+        });
+        this.analytics.trackAccount(account, {
+            event: 'results_cache.stats_viewed',
+            properties: {
+                organizationId: organizationUuid,
+                projectId: projectUuid,
+                days,
+            },
+        });
+        return stats;
+    }
+
+    async getResultsCacheTtlProjections(
+        account: Account,
+        projectUuid: string,
+        days: ResultsCacheStatsDays,
+    ): Promise<ResultsCacheTtlProjections> {
+        await this.assertCanViewResultsCacheStats(account, projectUuid);
+        const currentTtlSeconds =
+            await this.projectModel.getEffectiveResultsCacheTtlSeconds(
+                projectUuid,
+            );
+        const { totals, runs } =
+            await this.queryHistoryModel.getResultsCacheTtlReplayRows(
+                projectUuid,
+                days,
+                TTL_PROJECTION_MAX_RUNS + 1,
+            );
+        return buildResultsCacheTtlProjections({
+            currentTtlSeconds,
+            totals,
+            replayRuns: runs,
+        });
     }
 
     async getDashboardPreAggregateAudit(

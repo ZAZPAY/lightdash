@@ -5,7 +5,6 @@ import {
     Button,
     Divider,
     Group,
-    Paper,
     Text,
     Tooltip,
 } from '@mantine/core';
@@ -18,6 +17,7 @@ import { useUiStrings } from '../../ee/providers/Embed/useUiStrings';
 import { selectActiveTabUuid, useDashboardSelector } from '../dashboard/store';
 import { formatTileCount, formatTilesOf } from './fieldLabels';
 import classes from './FieldTilesBar.module.css';
+import { FloatingBar } from './FloatingBar';
 import {
     fieldBarMarker,
     findFieldBarStart,
@@ -26,9 +26,9 @@ import {
 import { getChangeCount, type FieldScope } from './peers';
 import { useBarHost } from './useBarHost';
 import {
-    useControlsSidebarSelector,
+    useControlsEditorSelector,
     type FieldApply,
-} from './useControlsSidebar';
+} from './useControlsEditor';
 import {
     nameReplacedFields,
     useFieldTileActions,
@@ -66,9 +66,19 @@ const getReplacesTooltip = (
               tiles: formatTileCount(getUiString, scope.replaced),
           });
 
+/** The bar's words for what fills (`{count}`, `{field}`, `{tiles}`); default: filtering. */
+export type FieldBarCopy = {
+    fillMore: string;
+    fillOnOtherTabs: string;
+    fillMoreNone: string;
+    region: string;
+    undoFillName: string;
+    noTile: string;
+};
+
 // One field's bar: the count over every tab, Filter and Clear over the tab in
 // view first, then the other tabs; disabled when they would change nothing
-const Bar: FC<{
+export const FieldBar: FC<{
     fieldTiles: FieldTiles;
     // The last change to this field Undo can take back
     undo: FieldApply | null;
@@ -77,7 +87,8 @@ const Bar: FC<{
     isOnlyRow: boolean;
     /** Shown for a new chip selection, not moved to another tab's grid. */
     isArriving: boolean;
-}> = ({ fieldTiles, undo, onUndo, isOnlyRow, isArriving }) => {
+    copy?: FieldBarCopy;
+}> = ({ fieldTiles, undo, onUndo, isOnlyRow, isArriving, copy }) => {
     // Kept from mount: a later render must not cut the slide short
     const [arrives] = useState(isArriving);
     const {
@@ -93,6 +104,14 @@ const Bar: FC<{
         clear,
     } = fieldTiles;
     const getUiString = useUiStrings();
+    const words = copy ?? {
+        fillMore: getUiString('filters.fieldBar.filterMore'),
+        fillOnOtherTabs: getUiString('filters.fieldBar.filterOnOtherTabs'),
+        fillMoreNone: getUiString('filters.fieldBar.filterMoreNone'),
+        region: getUiString('filters.fieldBar.region'),
+        undoFillName: getUiString('filters.fieldBar.undoFilterName'),
+        noTile: getUiString('filters.fieldBar.noTile'),
+    };
     const { applied, possible } = everyTabScope;
     const tilesOf = formatTilesOf(getUiString, applied, possible);
     // Without tabs the tab in view is every tile
@@ -107,13 +126,11 @@ const Bar: FC<{
     const canClear = canAct && emptying !== null && !isOnlyRow;
     const fillLabel =
         fill === null
-            ? getUiString('filters.fieldBar.filterMoreNone')
+            ? words.fillMoreNone
             : interpolateUiString(
-                  getUiString(
-                      fill.tileScope === 'other-tabs'
-                          ? 'filters.fieldBar.filterOnOtherTabs'
-                          : 'filters.fieldBar.filterMore',
-                  ),
+                  fill.tileScope === 'other-tabs'
+                      ? words.fillOnOtherTabs
+                      : words.fillMore,
                   { count: getChangeCount(fill.scope) },
               );
     // A Clear that cannot act carries no count: it would read as available
@@ -158,16 +175,11 @@ const Bar: FC<{
     };
 
     return (
-        <Paper
+        <FloatingBar
             ref={regionRef}
             role="region"
             tabIndex={-1}
-            aria-label={interpolateUiString(
-                getUiString('filters.fieldBar.region'),
-                { field: label },
-            )}
-            shadow="md"
-            radius="md"
+            aria-label={interpolateUiString(words.region, { field: label })}
             className={classes.bar}
             data-arrive={arrives || undefined}
             data-controls-editor
@@ -187,7 +199,7 @@ const Bar: FC<{
                 chip.focus();
             }}
         >
-            <Group gap="md" justify="center">
+            <Group gap="sm" justify="center">
                 <Group gap={6} wrap="nowrap">
                     {field !== null && (
                         <FieldIcon item={field} size={16} aria-hidden />
@@ -203,11 +215,14 @@ const Bar: FC<{
                         {name}
                     </Text>
                 </Group>
-                <Divider orientation="vertical" />
+                <Divider
+                    orientation="vertical"
+                    color="var(--mantine-color-default-border)"
+                />
                 <Group gap="sm">
                     <Text fz="sm" aria-live="polite">
                         {possible === 0 ? (
-                            getUiString('filters.fieldBar.noTile')
+                            words.noTile
                         ) : (
                             <>
                                 <Text span fw={600} className={classes.count}>
@@ -261,13 +276,16 @@ const Bar: FC<{
                     </Tooltip>
                     {undo !== null && (
                         <>
-                            <Divider orientation="vertical" />
+                            <Divider
+                                orientation="vertical"
+                                color="var(--mantine-color-default-border)"
+                            />
                             <Tooltip
                                 fz="xs"
                                 label={getUiString('filters.fieldBar.undo')}
                             >
                                 <ActionIcon
-                                    size="sm"
+                                    size="md"
                                     // Right after a field is added, its Undo is the one step to take
                                     variant={
                                         undo.kind === 'add'
@@ -275,11 +293,11 @@ const Bar: FC<{
                                             : 'subtle'
                                     }
                                     aria-label={interpolateUiString(
-                                        getUiString(
-                                            undo.kind === 'clear'
-                                                ? 'filters.fieldBar.undoClearName'
-                                                : 'filters.fieldBar.undoFilterName',
-                                        ),
+                                        undo.kind === 'clear'
+                                            ? getUiString(
+                                                  'filters.fieldBar.undoClearName',
+                                              )
+                                            : words.undoFillName,
                                         {
                                             field: label,
                                             tiles: formatTileCount(
@@ -297,22 +315,22 @@ const Bar: FC<{
                     )}
                 </Group>
             </Group>
-        </Paper>
+        </FloatingBar>
     );
 };
 
 // Floats over the tiles while a chip is selected in mapping: that one
 // field's count and actions. Never for the hovered field
 export const FieldTilesBar: FC = () => {
-    const isMapping = useControlsSidebarSelector((c) => c.isMapping);
-    const editingRule = useControlsSidebarSelector((c) =>
+    const isMapping = useControlsEditorSelector((c) => c.isMapping);
+    const editingRule = useControlsEditorSelector((c) =>
         c.isMapping ? c.editingRule : null,
     );
-    const highlightedFieldId = useControlsSidebarSelector(
+    const highlightedFieldId = useControlsEditorSelector(
         (c) => c.highlightedFieldId,
     );
-    const fieldUndo = useControlsSidebarSelector((c) => c.fieldUndo);
-    const undoApply = useControlsSidebarSelector((c) => c.undoApply);
+    const fieldUndo = useControlsEditorSelector((c) => c.fieldUndo);
+    const undoApply = useControlsEditorSelector((c) => c.undoApply);
     const sqlColumnsByTile = useSqlColumnsByTile(editingRule);
     const fieldTileActions = useFieldTileActions(sqlColumnsByTile);
     const activeTabUuid = useDashboardSelector(selectActiveTabUuid);
@@ -334,7 +352,7 @@ export const FieldTilesBar: FC = () => {
     if (fieldTileActions === null || fieldId === null || host === null)
         return null;
     return createPortal(
-        <Bar
+        <FieldBar
             // A new field draws a new bar, which slides in again
             key={fieldId}
             fieldTiles={fieldTileActions.forField(fieldId)}

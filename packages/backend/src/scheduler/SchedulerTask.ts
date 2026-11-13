@@ -6,6 +6,7 @@ import {
     applyDimensionOverrides,
     assertUnreachable,
     BackfillDefaultUserSpacesPayload,
+    canEmbedViewerResolveTileParameters,
     CompileProjectPayload,
     convertReplaceableFieldMatchMapToReplaceCustomFields,
     CreateProject,
@@ -37,6 +38,7 @@ import {
     getCustomLabelsFromVizTableConfig,
     getDownloadPivotConfig,
     getDownloadPivotOptions,
+    getEmbedParameterValues,
     getErrorMessage,
     getHiddenFieldsFromVizTableConfig,
     getHiddenTableFields,
@@ -47,6 +49,7 @@ import {
     getSchedulerResourceTypeAndId,
     getSchedulerUuid,
     getShowColumnTotalsFromChartConfig,
+    getShowSubtotalsFromChartConfig,
     getSourceSchedulerUuid,
     GoogleSheetsQuotaError,
     GoogleSheetsTransientError,
@@ -63,6 +66,7 @@ import {
     isDashboardSqlChartTile,
     isDashboardValidationError,
     isDataAppValidationError,
+    isJwtUser,
     isSchedulerCsvOptions,
     isSchedulerGsheetsOptions,
     isSchedulerImageOptions,
@@ -190,6 +194,8 @@ import type { ExecutionContextInfo } from '../logging/winston';
 import { AgentConnectionApprovalRequestModel } from '../models/AgentConnectionApprovalRequestModel';
 import { AiUsageLedgerModel } from '../models/AiUsageLedgerModel';
 import type { FeatureFlagModel } from '../models/FeatureFlagModel/FeatureFlagModel';
+import { MobileAppLinkModel } from '../models/MobileAppLinkModel';
+import { MobileSignInCodeModel } from '../models/MobileSignInCodeModel';
 import { OrganizationSettingsModel } from '../models/OrganizationSettingsModel';
 import { WarehouseConnectCodeModel } from '../models/WarehouseConnectCodeModel';
 import {
@@ -198,7 +204,10 @@ import {
 } from '../services/AgentPermissionService/agentWorkAuthority';
 import { agentExecutionContext } from '../services/AiAccessService/agentExecutionContext';
 import { AsyncQueryService } from '../services/AsyncQueryService/AsyncQueryService';
-import { SCHEDULER_POLLING_OPTIONS } from '../services/AsyncQueryService/types';
+import {
+    getSchedulerPollingOptions,
+    type PollingOptions,
+} from '../services/AsyncQueryService/types';
 import type { CatalogService } from '../services/CatalogService/CatalogService';
 import { ContentAsCodeWritebackService } from '../services/ContentAsCodeWritebackService/ContentAsCodeWritebackService';
 import {
@@ -213,7 +222,12 @@ import { WorkbookExportHelper } from '../services/ExcelService/WorkbookExportHel
 import { LearnSandboxService } from '../services/LearnSandboxService/LearnSandboxService';
 import { resolveOrganizationExportLimits } from '../services/OrganizationSettingsService/resolveExportLimits';
 import { PersistentDownloadFileService } from '../services/PersistentDownloadFileService/PersistentDownloadFileService';
-import { getDashboardParametersValuesMap } from '../services/ProjectService/parameters';
+import {
+    areDashboardControlsEnabled,
+    getDashboardParametersValuesMap,
+    getDashboardTileParameterLayer,
+    getEnabledParameterControls,
+} from '../services/ProjectService/parameters';
 import { ProjectService } from '../services/ProjectService/ProjectService';
 import { RenameService } from '../services/RenameService/RenameService';
 import { SchedulerService } from '../services/SchedulerService/SchedulerService';
@@ -296,7 +310,9 @@ export type SchedulerTaskArguments = {
     featureFlagModel: FeatureFlagModel;
     organizationSettingsModel: OrganizationSettingsModel;
     emailWhitelabelService: EmailWhitelabelService;
+    mobileAppLinkModel: MobileAppLinkModel;
     warehouseConnectCodeModel: WarehouseConnectCodeModel;
+    mobileSignInCodeModel: MobileSignInCodeModel;
     agentConnectionApprovalRequestModel: AgentConnectionApprovalRequestModel;
     aiUsageLedgerModel: AiUsageLedgerModel;
     learnSandboxService: LearnSandboxService;
@@ -595,7 +611,11 @@ export default class SchedulerTask {
 
     protected readonly emailWhitelabelService: EmailWhitelabelService;
 
+    protected readonly mobileAppLinkModel: MobileAppLinkModel;
+
     protected readonly warehouseConnectCodeModel: WarehouseConnectCodeModel;
+
+    protected readonly mobileSignInCodeModel: MobileSignInCodeModel;
 
     protected readonly agentConnectionApprovalRequestModel: AgentConnectionApprovalRequestModel;
 
@@ -638,11 +658,17 @@ export default class SchedulerTask {
         this.featureFlagModel = args.featureFlagModel;
         this.organizationSettingsModel = args.organizationSettingsModel;
         this.emailWhitelabelService = args.emailWhitelabelService;
+        this.mobileAppLinkModel = args.mobileAppLinkModel;
         this.warehouseConnectCodeModel = args.warehouseConnectCodeModel;
+        this.mobileSignInCodeModel = args.mobileSignInCodeModel;
         this.agentConnectionApprovalRequestModel =
             args.agentConnectionApprovalRequestModel;
         this.aiUsageLedgerModel = args.aiUsageLedgerModel;
         this.learnSandboxService = args.learnSandboxService;
+    }
+
+    protected get schedulerPollingOptions(): PollingOptions {
+        return getSchedulerPollingOptions(this.lightdashConfig);
     }
 
     /**
@@ -870,6 +896,7 @@ export default class SchedulerTask {
             dashboardFilters?: ExportContentPayload['dashboardFilters'];
             dateZoomGranularity?: ExportContentPayload['dateZoomGranularity'];
             parameters?: ExportContentPayload['parameters'];
+            tileParameters?: ExportContentPayload['tileParameters'];
         },
         // Captured once per job by captureAppDeliveryQueries — never rendered here,
         // so the per-channel fan-out can't trigger a second app render.
@@ -960,6 +987,18 @@ export default class SchedulerTask {
             appUuid,
         );
 
+        const tileParameters =
+            dashboardUuid &&
+            exportOptions?.tileParameters !== undefined &&
+            (format === SchedulerFormat.IMAGE ||
+                format === SchedulerFormat.PDF) &&
+            (await areDashboardControlsEnabled({
+                featureFlagModel: this.featureFlagModel,
+                user: { organizationUuid, userUuid },
+            }))
+                ? exportOptions.tileParameters
+                : undefined;
+
         let deliveryUrl: string;
         if (appUuid) {
             deliveryUrl = `${this.lightdashConfig.siteUrl}/projects/${projectUuid}/apps/${appUuid}/view`;
@@ -1031,6 +1070,7 @@ export default class SchedulerTask {
                         sendNowSchedulerFilters,
                         sendNowSchedulerChartFilters,
                         sendNowSchedulerParameters,
+                        tileParameters,
                     });
                     if (unfurlImage.imageUrl === undefined) {
                         throw new Error('Unable to unfurl image');
@@ -1058,6 +1098,7 @@ export default class SchedulerTask {
                                     exportOptions?.dashboardFilters,
                                 sendNowSchedulerFilters,
                                 sendNowSchedulerParameters,
+                                tileParameters,
                             });
                         pdfFile = perTabResult.pdfFile;
                         pdfPageCount = perTabResult.pdfPageCount;
@@ -1105,7 +1146,18 @@ export default class SchedulerTask {
                         'pagePerTab' in options &&
                         options.pagePerTab === true;
 
-                    if (pagePerTab && dashboardUuid) {
+                    if (appUuid) {
+                        // The app builds its own PDF (the Download PDF
+                        // builder); the headless render just carries it out.
+                        const appPdf = await this.unfurlService.unfurlAppPdf({
+                            minimalUrl: minimalRenderUrl.href,
+                            appName: details.name,
+                            authUserUuid: userUuid,
+                            imageId: pdfId,
+                            contextId: jobId,
+                        });
+                        pdfFile = appPdf.pdfFile;
+                    } else if (pagePerTab && dashboardUuid) {
                         const perTabResult =
                             await this.unfurlService.unfurlPdfCssPaged({
                                 minimalUrl: minimalRenderUrl.href,
@@ -1124,6 +1176,7 @@ export default class SchedulerTask {
                                     exportOptions?.dashboardFilters,
                                 sendNowSchedulerFilters,
                                 sendNowSchedulerParameters,
+                                tileParameters,
                             });
                         pdfFile = perTabResult.pdfFile;
                         pdfPageCount = perTabResult.pdfPageCount;
@@ -1147,6 +1200,7 @@ export default class SchedulerTask {
                             sendNowSchedulerFilters,
                             sendNowSchedulerChartFilters,
                             sendNowSchedulerParameters,
+                            tileParameters,
                         });
                         if (!unfurlPdf.pdfFile) {
                             throw new UnexpectedServerError(
@@ -1334,7 +1388,7 @@ export default class SchedulerTask {
                                     onlyRaw: csvOptions?.formatted === false,
                                     expirationSecondsOverride,
                                 },
-                                SCHEDULER_POLLING_OPTIONS,
+                                this.schedulerPollingOptions,
                             );
 
                         // Downloads the rerun replacement when one exists,
@@ -1620,9 +1674,13 @@ export default class SchedulerTask {
                                         getShowColumnTotalsFromChartConfig(
                                             chart.chartConfig.config,
                                         ),
+                                    showSubtotals:
+                                        getShowSubtotalsFromChartConfig(
+                                            chart.chartConfig.config,
+                                        ),
                                     expirationSecondsOverride,
                                 },
-                                SCHEDULER_POLLING_OPTIONS,
+                                this.schedulerPollingOptions,
                             );
                         csvUrl = {
                             filename:
@@ -1693,14 +1751,82 @@ export default class SchedulerTask {
                                 ),
                             );
 
+                        // An embed export runs with its token's values and only
+                        // the viewer's values it allows, over the saved ones.
+                        const requestedParameters = isJwtUser(account)
+                            ? getEmbedParameterValues(
+                                  account.access.parameters,
+                                  exportOptions?.parameters,
+                              )
+                            : exportOptions?.parameters;
+
                         // Ad-hoc exports send the parameter values currently
                         // applied on the dashboard, which replace the saved
                         // defaults the same way exported filters do.
-                        const finalParameters: ParametersValuesMap =
-                            exportOptions?.parameters ?? {
-                                ...convertedDashboardParameters,
-                                ...schedulerParameters,
-                            };
+                        const finalParameters: ParametersValuesMap = isJwtUser(
+                            account,
+                        )
+                            ? {
+                                  ...convertedDashboardParameters,
+                                  ...requestedParameters,
+                              }
+                            : (requestedParameters ?? {
+                                  ...convertedDashboardParameters,
+                                  ...schedulerParameters,
+                              });
+                        const parameterControls =
+                            await getEnabledParameterControls({
+                                featureFlagModel: this.featureFlagModel,
+                                user: {
+                                    organizationUuid:
+                                        dashboard.organizationUuid,
+                                    userUuid,
+                                },
+                                config: dashboard.config,
+                            });
+                        const userParameterNames =
+                            parameterControls === null
+                                ? []
+                                : (
+                                      await this.projectService.projectParametersModel.find(
+                                          dashboard.projectUuid,
+                                      )
+                                  ).map(({ name }) => name);
+                        const getTileParameters = (tileUuid: string) =>
+                            parameterControls === null
+                                ? finalParameters
+                                : getDashboardTileParameterLayer({
+                                      parameterControls,
+                                      dashboardParameters: dashboard.parameters,
+                                      tileUuid,
+                                      chartSavedValues: {},
+                                      requestParameters:
+                                          requestedParameters ??
+                                          schedulerParameters,
+                                      userParameterNames,
+                                  }).dashboardValues;
+
+                        const controlsEnabled =
+                            parameterControls !== null ||
+                            (dashboard.config?.parameterControls ===
+                                undefined &&
+                                exportOptions?.tileParameters !== undefined &&
+                                (await areDashboardControlsEnabled({
+                                    featureFlagModel: this.featureFlagModel,
+                                    user: {
+                                        organizationUuid:
+                                            dashboard.organizationUuid,
+                                        userUuid,
+                                    },
+                                })));
+                        const getExportTileParameters = (tileUuid: string) =>
+                            controlsEnabled &&
+                            (!isJwtUser(account) ||
+                                canEmbedViewerResolveTileParameters(
+                                    account.access.parameters,
+                                ))
+                                ? exportOptions?.tileParameters?.[tileUuid]
+                                : undefined;
 
                         // Sheets are added to the workbook in promise order, so
                         // sort tiles by dashboard layout (tab order, then
@@ -1781,7 +1907,15 @@ export default class SchedulerTask {
                                         dashboardFilters,
                                         dashboardSorts: [],
                                         dateZoom,
-                                        parameters: finalParameters,
+                                        parameters: getExportTileParameters(
+                                            tileUuid,
+                                        )
+                                            ? getExportTileParameters(tileUuid)!
+                                                  .parameters
+                                            : getTileParameters(tileUuid),
+                                        excludedParameterKeys:
+                                            getExportTileParameters(tileUuid)
+                                                ?.excludedParameterKeys,
                                         limit: chartLimit,
                                         pivotResults: shouldPivotResults,
                                     },
@@ -1816,9 +1950,13 @@ export default class SchedulerTask {
                                             getShowColumnTotalsFromChartConfig(
                                                 chart.chartConfig.config,
                                             ),
+                                        showSubtotals:
+                                            getShowSubtotalsFromChartConfig(
+                                                chart.chartConfig.config,
+                                            ),
                                         expirationSecondsOverride,
                                     },
-                                    SCHEDULER_POLLING_OPTIONS,
+                                    this.schedulerPollingOptions,
                                 );
                             return {
                                 chartName: chart.name,
@@ -1852,7 +1990,15 @@ export default class SchedulerTask {
                                         tileUuid,
                                         dashboardFilters,
                                         dashboardSorts: [],
-                                        parameters: finalParameters,
+                                        parameters: getExportTileParameters(
+                                            tileUuid,
+                                        )
+                                            ? getExportTileParameters(tileUuid)!
+                                                  .parameters
+                                            : getTileParameters(tileUuid),
+                                        excludedParameterKeys:
+                                            getExportTileParameters(tileUuid)
+                                                ?.excludedParameterKeys,
                                         limit:
                                             sqlLimit === null
                                                 ? MAX_SAFE_INTEGER
@@ -1896,7 +2042,7 @@ export default class SchedulerTask {
                                             ),
                                         expirationSecondsOverride,
                                     },
-                                    SCHEDULER_POLLING_OPTIONS,
+                                    this.schedulerPollingOptions,
                                 );
                             return {
                                 chartName: chart.name,
@@ -3790,7 +3936,7 @@ export default class SchedulerTask {
                 pivotConfiguration,
                 parameters: payload.parameters,
             },
-            SCHEDULER_POLLING_OPTIONS,
+            this.schedulerPollingOptions,
         );
 
         onQueryComplete();
@@ -4511,7 +4657,7 @@ export default class SchedulerTask {
                             ? scheduler.parameters
                             : undefined,
                     },
-                    SCHEDULER_POLLING_OPTIONS,
+                    this.schedulerPollingOptions,
                 );
 
                 if (thresholds !== undefined && thresholds.length > 0) {
@@ -4668,12 +4814,30 @@ export default class SchedulerTask {
                     );
                 }
 
+                const schedulerParameters = isDashboardScheduler(scheduler)
+                    ? scheduler.parameters
+                    : undefined;
                 const dashboardParameters: ParametersValuesMap = {
                     ...getDashboardParametersValuesMap(dashboard),
-                    ...(isDashboardScheduler(scheduler)
-                        ? scheduler.parameters
-                        : {}),
+                    ...schedulerParameters,
                 };
+                const parameterControls = await getEnabledParameterControls({
+                    featureFlagModel: this.featureFlagModel,
+                    user: {
+                        organizationUuid: dashboard.organizationUuid,
+                        userUuid: scheduler.createdBy,
+                    },
+                    config: dashboard.config,
+                });
+
+                const userParameterNames =
+                    parameterControls === null
+                        ? []
+                        : (
+                              await this.projectService.projectParametersModel.find(
+                                  dashboard.projectUuid,
+                              )
+                          ).map(({ name }) => name);
 
                 // We want to process all charts in sequence, so we don't load all chart results in memory
                 await chartTiles
@@ -4706,9 +4870,21 @@ export default class SchedulerTask {
                                 context:
                                     QueryExecutionContext.SCHEDULED_GSHEETS_DASHBOARD,
                                 pivotResults: shouldPivotChart,
-                                parameters: dashboardParameters,
+                                parameters:
+                                    parameterControls === null
+                                        ? dashboardParameters
+                                        : getDashboardTileParameterLayer({
+                                              parameterControls,
+                                              dashboardParameters:
+                                                  dashboard.parameters,
+                                              tileUuid: tile.uuid,
+                                              chartSavedValues: {},
+                                              requestParameters:
+                                                  schedulerParameters,
+                                              userParameterNames,
+                                          }).dashboardValues,
                             },
-                            SCHEDULER_POLLING_OPTIONS,
+                            this.schedulerPollingOptions,
                         );
                         const showTableNames = isTableChartConfig(
                             chart.chartConfig.config,
@@ -4808,7 +4984,7 @@ export default class SchedulerTask {
                             context:
                                 QueryExecutionContext.SCHEDULED_GSHEETS_SQL_CHART,
                         },
-                        SCHEDULER_POLLING_OPTIONS,
+                        this.schedulerPollingOptions,
                     );
 
                 await this.googleDriveClient.uploadMetadata(
@@ -5324,6 +5500,7 @@ export default class SchedulerTask {
                   createdBy: userUuid,
               }
             : persistedOrInlineScheduler;
+        const useCachedResults = scheduler.useCachedResults === true;
 
         if (!scheduler.enabled) {
             await this.schedulerService.logSchedulerJob({
@@ -5412,6 +5589,7 @@ export default class SchedulerTask {
                 groupId: jobId,
                 sendNow: schedulerUuid === undefined,
                 isThresholdAlert: scheduler.thresholds !== undefined,
+                useCachedResults,
             },
         });
         await this.schedulerService.logSchedulerJob({
@@ -5456,7 +5634,7 @@ export default class SchedulerTask {
                                 schedulerFilters: chartFilterOverrides,
                                 parameters: chartParameterOverrides,
                             },
-                            SCHEDULER_POLLING_OPTIONS,
+                            this.schedulerPollingOptions,
                         );
 
                     const evaluation = SchedulerTask.evaluateThreshold(
@@ -5555,6 +5733,7 @@ export default class SchedulerTask {
                                 groupId: jobId,
                                 isThresholdAlert: true,
                                 thresholdStatus: ThresholdStatus.NOT_MET,
+                                useCachedResults,
                             },
                         });
                         return;
@@ -5866,6 +6045,7 @@ export default class SchedulerTask {
                         hasPartialFailures:
                             partialFailures && partialFailures.length > 0,
                         partialFailuresCount: partialFailures?.length ?? 0,
+                        useCachedResults,
                         ...appDeliveryProperties,
                     },
                 });
@@ -5888,6 +6068,7 @@ export default class SchedulerTask {
                     schedulerId: schedulerUuid,
                     groupId: jobId,
                     error: `${e}`,
+                    useCachedResults,
                 },
             });
             const translatedSlackError = translateSlackError(e);
@@ -6481,6 +6662,20 @@ export default class SchedulerTask {
                 }
 
                 if (isEmbedRender && payload.encodedJwt) {
+                    const tileParameters =
+                        payload.tileParameters !== undefined &&
+                        isJwtUser(overrideAccount) &&
+                        canEmbedViewerResolveTileParameters(
+                            overrideAccount.access.parameters,
+                        ) &&
+                        (await areDashboardControlsEnabled({
+                            featureFlagModel: this.featureFlagModel,
+                            user: {
+                                organizationUuid: payload.organizationUuid,
+                            },
+                        }))
+                            ? payload.tileParameters
+                            : undefined;
                     const embedExportArgs = {
                         projectUuid: payload.projectUuid,
                         dashboardUuid: payload.resourceUuid,
@@ -6489,6 +6684,7 @@ export default class SchedulerTask {
                         selectedTabs: payload.selectedTabs ?? null,
                         dashboardFilters: payload.dashboardFilters ?? null,
                         parameters: payload.parameters ?? null,
+                        tileParameters,
                         dateZoomGranularity:
                             payload.dateZoomGranularity ?? null,
                         gridWidth: payload.customViewportWidth ?? null,
@@ -6547,6 +6743,7 @@ export default class SchedulerTask {
                         dashboardFilters: payload.dashboardFilters,
                         dateZoomGranularity: payload.dateZoomGranularity,
                         parameters: payload.parameters,
+                        tileParameters: payload.tileParameters,
                     },
                     undefined,
                     overrideAccount,
@@ -6917,7 +7114,7 @@ export default class SchedulerTask {
                     pivotConfig: downloadPivotConfig,
                     columnOrder: chart.tableConfig.columnOrder,
                 },
-                SCHEDULER_POLLING_OPTIONS,
+                this.schedulerPollingOptions,
             );
         return {
             chartName: chart.name,
@@ -6997,7 +7194,7 @@ export default class SchedulerTask {
                             : undefined,
                     ),
                 },
-                SCHEDULER_POLLING_OPTIONS,
+                this.schedulerPollingOptions,
             );
         return {
             chartName: chart.name,
@@ -7005,6 +7202,35 @@ export default class SchedulerTask {
             fileUrl: downloadResult.fileUrl,
             s3FileUrl: downloadResult.s3FileUrl,
         };
+    }
+
+    protected async warmWarehouseTablesCache(
+        jobId: string,
+        scheduledTime: Date,
+        payload: TraceTaskBase,
+    ) {
+        await this.logWrapper(
+            {
+                task: SCHEDULER_TASKS.WARM_WAREHOUSE_TABLES_CACHE,
+                jobId,
+                scheduledTime,
+                details: {
+                    userUuid: payload.userUuid,
+                    projectUuid: payload.projectUuid,
+                    organizationUuid: payload.organizationUuid,
+                    createdByUserUuid: payload.userUuid,
+                },
+            },
+            async () => {
+                const user = await this.userService.getSessionByUserUuid(
+                    payload.userUuid,
+                );
+                await this.projectService.populateWarehouseTablesCache(
+                    user,
+                    payload.projectUuid,
+                );
+            },
+        );
     }
 
     protected async backfillDefaultUserSpaces(

@@ -3,6 +3,7 @@ import { Box, Divider, Flex, Stack, Text, Tooltip } from '@mantine/core';
 import { IconCrop, IconInfoCircle } from '@tabler/icons-react';
 import {
     Fragment,
+    useEffect,
     useMemo,
     useRef,
     useState,
@@ -10,6 +11,9 @@ import {
     type PropsWithChildren,
 } from 'react';
 import ErrorBoundary from '../../../../../features/errorBoundary/ErrorBoundary';
+import useApp from '../../../../../providers/App/useApp';
+import useTracking from '../../../../../providers/Tracking/useTracking';
+import { EventName } from '../../../../../types/Events';
 import { type DeepResearchRunRegistration } from '../../deepResearch/types';
 import { ChatViewportContext } from '../../hooks/useChatBackUrl';
 import { useDeepResearchThreadRunRegistrations } from '../../hooks/useDeepResearch';
@@ -20,6 +24,12 @@ import { DeepResearchThreadRuns } from '../DeepResearch/DeepResearchThreadRuns';
 import { AssistantBubble } from './AgentChatAssistantBubble';
 import styles from './AgentChatDisplay.module.css';
 import { UserBubble } from './AgentChatUserBubble';
+import {
+    AskUserQuestionCard,
+    type AskUserSubmission,
+} from './AskUserQuestionCard';
+import askUserStyles from './AskUserQuestionCard.module.css';
+import { getPendingAskUser } from './askUserQuestions';
 import { JevChoiceChips } from './JevChoiceChips';
 import ThreadScrollToBottom from './ScrollToBottom';
 import { ThreadSetupHeader } from './ThreadSetupHeader';
@@ -43,7 +53,7 @@ type Props = {
     onRunDeepResearchAgain?: (
         registration: DeepResearchRunRegistration,
     ) => void;
-    /** Sends a clarifying option as the next message; choices render only when set. */
+    /** Sends a clarifying option or question answer as the next message; choices render only when set. */
     onChoiceSelect?: (prompt: string) => void;
 };
 
@@ -103,6 +113,22 @@ export const AgentChatDisplay: FC<PropsWithChildren<Props>> = ({
     onChoiceSelect,
 }) => {
     const viewport = useRef<HTMLDivElement>(null);
+    const composerFooter = useRef<HTMLDivElement>(null);
+    const hasComposer = !!children;
+    // Reveals (scrollIntoView, focus, find) must stop above the sticky composer.
+    useEffect(() => {
+        const viewportEl = viewport.current;
+        const footerEl = composerFooter.current;
+        if (!viewportEl || !footerEl) return undefined;
+        const observer = new ResizeObserver(() => {
+            viewportEl.style.setProperty(
+                '--chat-composer-height',
+                `${footerEl.offsetHeight}px`,
+            );
+        });
+        observer.observe(footerEl);
+        return () => observer.disconnect();
+    }, [hasComposer]);
     const { data: mcpServers } = useAgentAiMcpServers(projectUuid, agentUuid, {
         enabled: !!projectUuid && !!agentUuid,
     });
@@ -168,6 +194,28 @@ export const AgentChatDisplay: FC<PropsWithChildren<Props>> = ({
             message.role === 'user' ? [message.uuid] : [],
         ),
     );
+    const lastMessage = visibleMessages.at(-1);
+    const askUser = onChoiceSelect ? getPendingAskUser(lastMessage) : null;
+    const { user } = useApp();
+    const { track } = useTracking();
+    const submitAskUser = (submission: AskUserSubmission) => {
+        const organizationId = user.data?.organizationUuid;
+        if (organizationId && projectUuid && agentUuid && lastMessage) {
+            track({
+                name: EventName.AI_AGENT_QUESTION_ANSWERED,
+                properties: {
+                    organizationId,
+                    projectId: projectUuid,
+                    agentId: agentUuid,
+                    threadId: thread.uuid,
+                    messageId: lastMessage.uuid,
+                    questionCount: askUser?.questions.length ?? 0,
+                    typedAnswerCount: submission.typedAnswerCount,
+                },
+            });
+        }
+        onChoiceSelect?.(submission.text);
+    };
     const unanchoredDeepResearchRegistrations =
         deepResearchRegistrations.filter(
             (registration) =>
@@ -192,7 +240,7 @@ export const AgentChatDisplay: FC<PropsWithChildren<Props>> = ({
                     gap="xl"
                     flex={1}
                 >
-                    <Stack flex={1}>
+                    <Stack flex={1} gap="lg">
                         {projectUuid && (
                             <ThreadSetupHeader
                                 thread={thread}
@@ -243,6 +291,10 @@ export const AgentChatDisplay: FC<PropsWithChildren<Props>> = ({
                                                 }
                                                 isLastMessage={
                                                     i === xs.length - 1
+                                                }
+                                                canRetry={
+                                                    thread.createdFrom !==
+                                                    'slack'
                                                 }
                                                 debug={debug}
                                                 projectUuid={projectUuid}
@@ -312,11 +364,21 @@ export const AgentChatDisplay: FC<PropsWithChildren<Props>> = ({
 
                 {children ? (
                     <Box
+                        ref={composerFooter}
                         className={styles.composerFooter}
                         pos="sticky"
                         bottom={0}
                         w="100%"
                     >
+                        {askUser && onChoiceSelect && (
+                            <Box className={askUserStyles.container}>
+                                <AskUserQuestionCard
+                                    key={askUser.toolCallId}
+                                    questions={askUser.questions}
+                                    onSubmit={submitAskUser}
+                                />
+                            </Box>
+                        )}
                         {children}
                     </Box>
                 ) : null}

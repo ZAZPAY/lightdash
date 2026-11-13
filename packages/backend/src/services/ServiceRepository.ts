@@ -45,6 +45,7 @@ import { CatalogService } from './CatalogService/CatalogService';
 import { CiService } from './CiService/CiService';
 import { CoderService } from './CoderService/CoderService';
 import { CommentService } from './CommentService/CommentService';
+import { ComposerChartService } from './ComposerChartService/ComposerChartService';
 import { ContentAsCodeWritebackService } from './ContentAsCodeWritebackService/ContentAsCodeWritebackService';
 import { ContentService } from './ContentService/ContentService';
 import { ContentVerificationService } from './ContentVerificationService';
@@ -66,12 +67,15 @@ import { GitlabAppService } from './GitlabAppService/GitlabAppService';
 import { GroupsService } from './GroupService';
 import { HeadlessBrowserService } from './HeadlessBrowserService';
 import { HealthService } from './HealthService/HealthService';
+import { InstanceBrandService } from './InstanceBrandService/InstanceBrandService';
 import { JiraAppService } from './JiraAppService/JiraAppService';
 import { LearnSandboxService } from './LearnSandboxService/LearnSandboxService';
 import { LicenseService } from './LicenseService/LicenseService';
 import { LightdashAnalyticsService } from './LightdashAnalyticsService/LightdashAnalyticsService';
 import { LinearAppService } from './LinearAppService/LinearAppService';
 import { MetricsExplorerService } from './MetricsExplorerService/MetricsExplorerService';
+import { MobileAppService } from './MobileAppService/MobileAppService';
+import { MobileSignInService } from './MobileSignInService/MobileSignInService';
 import { NotificationsService } from './NotificationsService/NotificationsService';
 import { ManagedSignInService } from './OAuthService/managedSignIn/ManagedSignInService';
 import { OAuthService } from './OAuthService/OAuthService';
@@ -90,10 +94,13 @@ import { PivotTableService } from './PivotTableService/PivotTableService';
 import { ProjectCompileLogService } from './ProjectCompileLogService/ProjectCompileLogService';
 import { ProjectDbtSourcesService } from './ProjectDbtSourcesService';
 import { ProjectParametersService } from './ProjectParametersService';
+import { isAnalyticsProjectAvailable } from './ProjectService/analyticsProject/analyticsProjectAvailability';
 import { ProjectService } from './ProjectService/ProjectService';
 import { provisionTrainingProject } from './ProjectService/provisionTrainingProject';
 import { PromoteService } from './PromoteService/PromoteService';
 import { PromptService } from './PromptService/PromptService';
+import { OidcTokenVerifier } from './ProvisioningService/oidcTokenVerifier';
+import { ProvisioningService } from './ProvisioningService/ProvisioningService';
 import { PullRequestsService } from './PullRequestsService/PullRequestsService';
 import { QuerySourceRegistry } from './QuerySourceService/QuerySourceRegistry';
 import { QuerySourceService } from './QuerySourceService/QuerySourceService';
@@ -150,9 +157,11 @@ interface ServiceManifest {
     groupService: GroupsService;
     headlessBrowserService: HeadlessBrowserService;
     healthService: HealthService;
+    instanceBrandService: InstanceBrandService;
     licenseService: LicenseService;
     notificationService: NotificationsService;
     managedSignInService: ManagedSignInService;
+    provisioningService: ProvisioningService;
     oauthService: OAuthService;
 
     organizationDesignService: OrganizationDesignService;
@@ -190,11 +199,14 @@ interface ServiceManifest {
     userAttributesService: UserAttributesService;
     userService: UserService;
     validationService: ValidationService;
+    mobileAppService: MobileAppService;
     warehouseConnectService: WarehouseConnectService;
+    mobileSignInService: MobileSignInService;
     catalogService: CatalogService;
     metricsExplorerService: MetricsExplorerService;
     promoteService: PromoteService;
     savedSqlService: SavedSqlService;
+    composerChartService: ComposerChartService;
     contentService: ContentService;
     recentContentService: RecentContentService;
     contentVerificationService: ContentVerificationService;
@@ -220,7 +232,7 @@ interface ServiceManifest {
     aiDeepResearchService: unknown;
     aiAgentMemoryService: unknown;
     homepageRecommendedActionSkipsService: unknown;
-    onboardingAgentService: unknown;
+    semanticStudioService: unknown;
     aiAgentReviewNotificationService: unknown;
     writebackPreviewService: unknown;
     appGenerateService: unknown;
@@ -526,6 +538,7 @@ export class ServiceRepository
                     schedulerService: this.getSchedulerService(),
                     savedChartModel: this.models.getSavedChartModel(),
                     savedSqlModel: this.models.getSavedSqlModel(),
+                    composerChartModel: this.models.getComposerChartModel(),
                     savedChartService: this.getSavedChartService(),
                     projectModel: this.models.getProjectModel(),
                     schedulerClient: this.clients.getSchedulerClient(),
@@ -662,6 +675,7 @@ export class ServiceRepository
                 new LinearAppService({
                     linearAppInstallationsModel:
                         this.models.getLinearAppInstallationsModel(),
+                    encryptionUtil: this.utils.getEncryptionUtil(),
                     lightdashConfig: this.context.lightdashConfig,
                     analytics: this.context.lightdashAnalytics, // pragma: allowlist secret
                 }),
@@ -737,7 +751,15 @@ export class ServiceRepository
                     featureFlagModel: this.models.getFeatureFlagModel(),
                     readinessService: this.readinessService,
                     learnSandboxService: this.getLearnSandboxService(),
+                    instanceBrandService: this.getInstanceBrandService(),
                 }),
+        );
+    }
+
+    public getInstanceBrandService(): InstanceBrandService {
+        return this.getService(
+            'instanceBrandService',
+            () => new InstanceBrandService(),
         );
     }
 
@@ -764,6 +786,23 @@ export class ServiceRepository
         );
     }
 
+    public getProvisioningService(): ProvisioningService {
+        return this.getService(
+            'provisioningService',
+            () =>
+                new ProvisioningService({
+                    lightdashConfig: this.context.lightdashConfig,
+                    userModel: this.models.getUserModel(),
+                    emailModel: this.models.getEmailModel(),
+                    managedSignInModel: this.models.getManagedSignInModel(),
+                    organizationAllowedEmailDomainsModel:
+                        this.models.getOrganizationAllowedEmailDomainsModel(),
+                    getOrganizationService: () => this.getOrganizationService(),
+                    verifier: new OidcTokenVerifier(),
+                }),
+        );
+    }
+
     public getOauthService(): OAuthService {
         return this.getService(
             'oauthService',
@@ -774,6 +813,25 @@ export class ServiceRepository
                     lightdashConfig: this.context.lightdashConfig,
                     getManagedSignInService: () =>
                         this.getManagedSignInService(),
+                    getMobileSignInService: () => this.getMobileSignInService(),
+                }),
+        );
+    }
+
+    public getMobileSignInService(): MobileSignInService {
+        return this.getService(
+            'mobileSignInService',
+            () =>
+                new MobileSignInService({
+                    lightdashConfig: this.context.lightdashConfig,
+                    mobileSignInCodeModel:
+                        this.models.getMobileSignInCodeModel(),
+                    mobileAppLinkModel: this.models.getMobileAppLinkModel(),
+                    featureFlagModel: this.models.getFeatureFlagModel(),
+                    userModel: this.models.getUserModel(),
+                    oauthModel: this.models.getOauthModel(),
+                    getUserService: () => this.getUserService(),
+                    analytics: this.context.lightdashAnalytics,
                 }),
         );
     }
@@ -795,6 +853,11 @@ export class ServiceRepository
             'organizationService',
             () =>
                 new OrganizationService({
+                    isAnalyticsProjectEnabled: () =>
+                        isAnalyticsProjectAvailable(
+                            this.context.lightdashConfig,
+                            this.getLicenseService(),
+                        ),
                     lightdashConfig: this.context.lightdashConfig,
                     analytics: this.context.lightdashAnalytics,
                     organizationModel: this.models.getOrganizationModel(),
@@ -1082,13 +1145,11 @@ export class ServiceRepository
                         };
                         return (await resolvers[type]())?.projectUuid ?? null;
                     },
-                    areGroupsAvailable: (organizationUuid) =>
+                    areGroupsAvailable: () =>
                         areOrganizationGroupsAvailable({
-                            organizationUuid,
                             isLicensed: () =>
                                 this.getLicenseService().getLicenseStatus()
                                     .valid,
-                            featureFlagModel: this.models.getFeatureFlagModel(),
                         }),
                     groupsModel: this.models.getGroupsModel(),
                     isCustomRolesLicensed: () =>
@@ -1163,6 +1224,11 @@ export class ServiceRepository
             'projectService',
             () =>
                 new ProjectService({
+                    isAnalyticsProjectEnabled: () =>
+                        isAnalyticsProjectAvailable(
+                            this.context.lightdashConfig,
+                            this.getLicenseService(),
+                        ),
                     dbtSourceRefCatalogModel:
                         this.models.getDbtSourceRefCatalogModel(),
                     getAgentConnectionGrantService: () =>
@@ -1320,11 +1386,18 @@ export class ServiceRepository
             'asyncQueryService',
             () =>
                 new AsyncQueryService({
+                    isAnalyticsProjectEnabled: () =>
+                        isAnalyticsProjectAvailable(
+                            this.context.lightdashConfig,
+                            this.getLicenseService(),
+                        ),
                     dbtSourceRefCatalogModel:
                         this.models.getDbtSourceRefCatalogModel(),
                     refreshTokenRotation: this.models.getRefreshTokenRotation(),
                     aiAccessService: this.getAiAccessService(),
                     getDocumentService: () => this.getDocumentService(),
+                    getComposerChartService: () =>
+                        this.getComposerChartService(),
                     lightdashConfig: this.context.lightdashConfig,
                     analytics: this.context.lightdashAnalytics,
                     contentDraftModel: this.models.getContentDraftModel(),
@@ -1753,6 +1826,19 @@ export class ServiceRepository
         );
     }
 
+    public getMobileAppService(): MobileAppService {
+        return this.getService(
+            'mobileAppService',
+            () =>
+                new MobileAppService({
+                    mobileAppLinkModel: this.models.getMobileAppLinkModel(),
+                    featureFlagModel: this.models.getFeatureFlagModel(),
+                    analytics: this.context.lightdashAnalytics,
+                    lightdashConfig: this.context.lightdashConfig,
+                }),
+        );
+    }
+
     public getWarehouseConnectService(): WarehouseConnectService {
         return this.getService(
             'warehouseConnectService',
@@ -1825,6 +1911,14 @@ export class ServiceRepository
                     directAccessService: this.getDirectAccessService(),
                     warehouseConnectionModel:
                         this.models.getWarehouseConnectionModel(),
+                    // Lazy accessor: AppGenerateService depends on
+                    // CoderService, so resolving it eagerly here would cycle.
+                    // Core builds resolve undefined and data-app slug renames
+                    // stay unsupported.
+                    getAppGenerateService: () =>
+                        this.providers.appGenerateService
+                            ? this.getAppGenerateService<AppGenerateService>()
+                            : undefined,
                 }),
         );
     }
@@ -1904,6 +1998,20 @@ export class ServiceRepository
                     schedulerClient: this.clients.getSchedulerClient(),
                     schedulerModel: this.models.getSchedulerModel(),
                     spacePermissionService: this.getSpacePermissionService(),
+                }),
+        );
+    }
+
+    public getComposerChartService(): ComposerChartService {
+        return this.getService(
+            'composerChartService',
+            () =>
+                new ComposerChartService({
+                    composerChartModel: this.models.getComposerChartModel(),
+                    dashboardModel: this.models.getDashboardModel(),
+                    featureFlagModel: this.models.getFeatureFlagModel(),
+                    spacePermissionService: this.getSpacePermissionService(),
+                    getQuerySourceService: () => this.getQuerySourceService(),
                 }),
         );
     }
@@ -2059,12 +2167,6 @@ export class ServiceRepository
         return this.getService('aiAgentMemoryService');
     }
 
-    public getOnboardingAgentService<
-        OnboardingAgentServiceImplT,
-    >(): OnboardingAgentServiceImplT {
-        return this.getService('onboardingAgentService');
-    }
-
     public getWritebackPreviewService<
         WritebackPreviewServiceImplT,
     >(): WritebackPreviewServiceImplT {
@@ -2123,6 +2225,12 @@ export class ServiceRepository
         HomepageRecommendedActionSkipsServiceImplT,
     >(): HomepageRecommendedActionSkipsServiceImplT {
         return this.getService('homepageRecommendedActionSkipsService');
+    }
+
+    public getSemanticStudioService<
+        SemanticStudioServiceImplT,
+    >(): SemanticStudioServiceImplT {
+        return this.getService('semanticStudioService');
     }
 
     public getAiAgentCoderService<
@@ -2251,6 +2359,8 @@ export class ServiceRepository
                     lightdashConfig: this.context.lightdashConfig,
                     organizationBrandModel:
                         this.models.getOrganizationBrandModel(),
+                    instanceBrandService: this.getInstanceBrandService(),
+                    licenseService: this.getLicenseService(),
                 }),
         );
     }
@@ -2374,8 +2484,6 @@ export class ServiceRepository
             'projectDbtSourcesService',
             () =>
                 new ProjectDbtSourcesService({
-                    dbtSourceRefCatalogModel:
-                        this.models.getDbtSourceRefCatalogModel(),
                     lightdashConfig: this.context.lightdashConfig,
                     analytics: this.context.lightdashAnalytics,
                     projectModel: this.models.getProjectModel(),
@@ -2393,8 +2501,6 @@ export class ServiceRepository
             'warehouseConnectionService',
             () =>
                 new WarehouseConnectionService({
-                    dbtSourceRefCatalogModel:
-                        this.models.getDbtSourceRefCatalogModel(),
                     warehouseConnectionModel:
                         this.models.getWarehouseConnectionModel(),
                     projectModel: this.models.getProjectModel(),
@@ -2431,9 +2537,6 @@ export class ServiceRepository
             'warehouseConnectionBindingService',
             () =>
                 new WarehouseConnectionBindingService({
-                    dbtSourceRefCatalogModel:
-                        this.models.getDbtSourceRefCatalogModel(),
-                    featureFlagService: this.getFeatureFlagService(),
                     projectModel: this.models.getProjectModel(),
                     warehouseConnectionCompileModel:
                         this.models.getWarehouseConnectionCompileModel(),

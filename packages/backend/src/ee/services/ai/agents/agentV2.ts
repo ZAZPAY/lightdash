@@ -16,8 +16,8 @@ import { trace } from '@opentelemetry/api';
 import * as Sentry from '@sentry/node';
 import {
     generateText,
+    isStepCount,
     smoothStream,
-    stepCountIs,
     streamText,
     StreamTextResult,
     type LanguageModelUsage,
@@ -34,6 +34,7 @@ import {
     emitAiUsage,
     languageModelUsageToTokens,
 } from '../../../../analytics/aiUsage';
+import { runWithAiAgentLogContext } from '../../../../logging/aiAgentLogContext';
 import Logger from '../../../../logging/logger';
 import type { ConnectedAgentTool } from '../../../../services/AgentPermissionService/AgentPermissionService';
 import {
@@ -45,6 +46,7 @@ import {
     isDeepResearchWarehouseMcpTool,
 } from '../../AiDeepResearchService/toolClassification';
 import { MCP_UNTRUSTED_OUTPUT_NOTICE } from '../AiAgentMcpRuntimeClient';
+import { createToolCallEventTracker } from '../analytics/toolCallEvent';
 import { Compaction } from '../compaction';
 import {
     getAgentDecisionContext,
@@ -80,7 +82,11 @@ import {
     getSystemPromptV2,
     type CapabilitySectionArgs,
 } from '../prompts/systemV2';
-import { DOCUMENT_OFFER_LINE } from '../prompts/systemV2ContentTools';
+import {
+    DOCUMENT_OFFER_LINE,
+    includesDocumentOffer,
+    MIN_CHARTS_FOR_DOCUMENT_OFFER,
+} from '../prompts/systemV2ContentTools';
 import {
     accumulatePromptTokenUsage,
     completedPromptTokenUsage,
@@ -88,6 +94,11 @@ import {
 } from '../promptTokenUsage';
 import type { AiAgentSkillReference } from '../skills/types';
 import { getAnalyzeFieldImpact } from '../tools/analyzeFieldImpact';
+import {
+    getAskUser,
+    getAskUserResponse,
+    withAskUserQuestions,
+} from '../tools/askUser';
 import { getClosePullRequest } from '../tools/closePullRequest';
 import { getCreateContent } from '../tools/createContent';
 import { getCreateScheduledDelivery } from '../tools/createScheduledDelivery';
@@ -144,6 +155,10 @@ import { getRunSavedChart } from '../tools/runSavedChart';
 import { getRunSql } from '../tools/runSql';
 import { getSearchFieldValues } from '../tools/searchFieldValues';
 import { getSearchSemanticLayer } from '../tools/searchSemanticLayer';
+import {
+    getProposeSemanticLayerChange,
+    getReadSemanticModel,
+} from '../tools/semanticStudioTools';
 import { type SqlApprovalDependencies } from '../tools/sqlApprovalGate';
 import {
     buildSqlApprovalDecidedEvent,
@@ -160,6 +175,7 @@ import type {
     AiStreamAgentResponseArgs,
     UnavailableMcpServer,
 } from '../types/aiAgent';
+import { toAbsoluteHref } from '../utils/absoluteHref';
 import { AgentContext } from '../utils/AgentContext';
 import {
     AiAgentEmptyResponseError,
@@ -181,6 +197,7 @@ import {
     summarizeToolCall,
     summarizeToolResult,
 } from '../utils/toolSummaries';
+import { getAgentLogContext, withToolCallLogContext } from './agentLogContext';
 import { pruneSupersededContentReads } from './contentReadRetention';
 import { getMcpActiveTools } from './mcpToolGating';
 import { compactChartDiscovery, getPreviousQueryUuid } from './previousQuery';
@@ -194,6 +211,7 @@ import {
 } from './referenceToolGating';
 import { getAgentTelemetryConfig, getAiAgentModelName } from './telemetry';
 import {
+    getToolStage,
     TurnTimingTracker,
     withNonStreamingProviderTiming,
     type StepTiming,
@@ -375,6 +393,30 @@ const trackAgentStep = (
     });
 };
 
+const createTurnToolCallEvents = (
+    args: AiAgentArgs,
+    dependencies: Pick<AiAgentDependencies, 'trackEvent'>,
+) => {
+    const logContext = getAgentLogContext(args);
+    return createToolCallEventTracker(
+        {
+            organizationId: logContext.organizationUuid,
+            projectId: logContext.projectUuid,
+            aiAgentId: logContext.agentUuid,
+            threadId: logContext.threadUuid,
+            promptId: logContext.promptUuid,
+            model: logContext.model,
+            serverVersion: logContext.serverVersion,
+        },
+        (properties) =>
+            dependencies.trackEvent({
+                event: 'ai_agent.tool_call_completed',
+                userId: args.userId,
+                properties,
+            }),
+    );
+};
+
 export const DEFAULT_AGENT_MAX_STEPS = 40;
 
 export const AGENT_WRAP_UP_STEPS = 5;
@@ -514,7 +556,6 @@ const DOCUMENT_SAVE_TOOLS = new Set(['createContent', 'editContent']);
 const areDocumentNudgesEnabled = (args: AiAgentArgs): boolean =>
     args.enableDocuments &&
     args.enableDataAccess &&
-    args.enableContentTools &&
     args.execution.mode === 'standard';
 
 const isDocumentInput = (input: unknown): boolean =>
@@ -523,14 +564,14 @@ const isDocumentInput = (input: unknown): boolean =>
     'type' in input &&
     input.type === 'document';
 
-/** An earlier reply made a chart, and no Document was offered or saved yet. */
+/** Earlier replies made enough charts for an analysis, and no Document was offered or saved yet. The latest reply can add the last chart. */
 export const shouldOfferDocument = (
     messageHistory: ModelMessage[],
 ): boolean => {
     const latestUserIndex = messageHistory.findLastIndex(
         (message) => message.role === 'user',
     );
-    let hasChart = false;
+    let chartCount = 0;
     for (const message of messageHistory.slice(0, latestUserIndex)) {
         if (message.role === 'assistant') {
             const parts =
@@ -538,10 +579,7 @@ export const shouldOfferDocument = (
                     ? [{ type: 'text' as const, text: message.content }]
                     : message.content;
             for (const part of parts) {
-                if (
-                    part.type === 'text' &&
-                    part.text.includes(DOCUMENT_OFFER_LINE)
-                ) {
+                if (part.type === 'text' && includesDocumentOffer(part.text)) {
                     return false;
                 }
                 if (part.type === 'tool-call') {
@@ -552,13 +590,13 @@ export const shouldOfferDocument = (
                         return false;
                     }
                     if (part.toolName === 'generateVisualization') {
-                        hasChart = true;
+                        chartCount += 1;
                     }
                 }
             }
         }
     }
-    return hasChart;
+    return chartCount >= MIN_CHARTS_FOR_DOCUMENT_OFFER - 1;
 };
 
 const previousReplyOfferedDocument = (
@@ -579,7 +617,7 @@ const previousReplyOfferedDocument = (
                               part.type === 'text' ? part.text : '',
                           )
                           .join('');
-            if (text.includes(DOCUMENT_OFFER_LINE)) return true;
+            if (includesDocumentOffer(text)) return true;
         }
     }
     return false;
@@ -613,7 +651,7 @@ export const getDocumentNudgeOutcome = (
     return {
         documentNudgesEnabled,
         documentOfferShown:
-            documentNudgesEnabled && response.includes(DOCUMENT_OFFER_LINE),
+            documentNudgesEnabled && includesDocumentOffer(response),
         documentOfferAccepted:
             documentNudgesEnabled &&
             previousReplyOfferedDocument(args.messageHistory) &&
@@ -630,7 +668,7 @@ const withDocumentOfferHint = (
     );
     const lastUser = messageHistory[lastUserIndex];
     if (lastUser?.role !== 'user') return messageHistory;
-    const hint = `\n\n(If your reply creates a chart or concludes a finding that took several steps, end it with this line on its own: "${DOCUMENT_OFFER_LINE}" Skip it if this reply saves a Document.)`;
+    const hint = `\n\n(If your reply concludes a finding from the analysis so far, end it with this line on its own: "${DOCUMENT_OFFER_LINE}" Skip it if this reply only answers a quick follow-up or saves a Document.)`;
     const updatedContent =
         typeof lastUser.content === 'string'
             ? `${lastUser.content}${hint}`
@@ -1250,6 +1288,7 @@ export const getDataAnswerFastResponse = (
 /** Ends a document write-up once the document saved without warnings. */
 export const getDocumentWriteFastResponse = (
     steps: ReadonlyArray<FastChartStep>,
+    siteUrl: string,
 ): string | null => {
     const documentCallIds = new Set(
         steps
@@ -1290,14 +1329,18 @@ export const getDocumentWriteFastResponse = (
     )
         return null;
     const name = metadata.name.replace(/[[\]\\]/g, '\\$&').trim();
-    return `Saved [${name || 'the document'}](${metadata.href}).`;
+    return `Saved [${name || 'the document'}](${toAbsoluteHref(siteUrl, metadata.href)}).`;
 };
 
 const getTurnFastResponse = (
     enableDataAnswerFastResponse: boolean,
     turnIntent: TurnIntent | null | undefined,
     steps: ReadonlyArray<FastChartStep>,
+    siteUrl: string,
 ) => {
+    // Asking ends the turn on any intent; the questions are its reply.
+    const askUserResponse = getAskUserResponse(steps);
+    if (askUserResponse !== null) return askUserResponse;
     if (enableDataAnswerFastResponse && turnIntent === 'data_answer')
         return getDataAnswerFastResponse(steps);
     if (turnIntent === 'chart_from_previous')
@@ -1306,7 +1349,7 @@ const getTurnFastResponse = (
     if (turnIntent === 'data_app_create' || turnIntent === 'data_app_iterate')
         return getDataAppBuildFastResponse(steps);
     if (turnIntent === 'document_write')
-        return getDocumentWriteFastResponse(steps);
+        return getDocumentWriteFastResponse(steps, siteUrl);
     return null;
 };
 
@@ -1392,7 +1435,7 @@ const CONTENT_STREAM_CHUNK_TYPES = new Set<TextStreamPart<ToolSet>['type']>([
 
 export const defaultAgentOptions = {
     toolChoice: 'auto' as const,
-    stopWhen: stepCountIs(DEFAULT_AGENT_MAX_STEPS),
+    stopWhen: isStepCount(DEFAULT_AGENT_MAX_STEPS),
     maxRetries: 6, // Increased for Bedrock rate limits
 };
 
@@ -1495,7 +1538,7 @@ export const buildPrepareStep = ({
     intentToolGate?: IntentToolGate;
     logger: ReturnType<typeof createAiAgentLogger>;
     // Ids of tool calls the AI SDK dropped for invalid input, recorded by
-    // onStepFinish/onChunk as the turn progresses (shared mutable set).
+    // onStepEnd/onChunk as the turn progresses (shared mutable set).
     invalidToolCallIds: ReadonlySet<string>;
     agentContext?: AgentContext;
 }) => {
@@ -1952,30 +1995,40 @@ export const getAgentTools = (
             getResolveUrl({ resolveUrl: dependencies.resolveUrl }),
         updateUserName: () =>
             getUpdateUserName({ updateUserName: dependencies.updateUserName }),
+        askUser: () => getAskUser(),
         readContent: () =>
             getReadContent({
                 readContent: dependencies.readContent,
+                siteUrl: args.siteUrl,
                 documentsEnabled,
             }),
         editContent: () =>
             getEditContent({
                 editContent: dependencies.editContent,
+                siteUrl: args.siteUrl,
                 documentsEnabled,
+                chartsEnabled: args.enableContentTools,
                 artifacts: dependencies.chartExportArtifacts,
                 sqlChartSaving: getSqlChartSaving(),
             }),
         listContent: () =>
-            getListContent({ listContent: dependencies.listContent }),
+            getListContent({
+                listContent: dependencies.listContent,
+                siteUrl: args.siteUrl,
+            }),
         createContent: () =>
             getCreateContent({
                 createContent: dependencies.createContent,
+                siteUrl: args.siteUrl,
                 documentsEnabled,
+                chartsEnabled: args.enableContentTools,
                 artifacts: dependencies.chartExportArtifacts,
                 sqlChartSaving: getSqlChartSaving(),
             }),
         createScheduledDelivery: () =>
             getCreateScheduledDelivery({
                 createScheduledDelivery: dependencies.createScheduledDelivery,
+                siteUrl: args.siteUrl,
             }),
         runContentQuery: () =>
             getRunContentQuery({
@@ -2121,13 +2174,26 @@ export const getAgentTools = (
             getEditProjectContext({
                 editProjectContext: dependencies.editProjectContext,
             }),
+        proposeSemanticLayerChange: () =>
+            getProposeSemanticLayerChange({
+                proposeSemanticLayerChange:
+                    dependencies.proposeSemanticLayerChange,
+            }),
+        readSemanticModel: () =>
+            getReadSemanticModel({
+                readSemanticModel: dependencies.readSemanticModel,
+            }),
         syncDbtProject: () =>
             getSyncDbtProject({
                 syncDbtProject: dependencies.syncDbtProject,
                 updateProgress: dependencies.updateProgress,
             }),
         exploreRepo: () =>
-            getExploreRepo({ exploreRepo: dependencies.exploreRepo }),
+            getExploreRepo({
+                exploreRepo: dependencies.exploreRepo,
+                decisions: args.decisions,
+                question: getAgentQuestion(args),
+            }),
         readAttachments: () =>
             getReadAttachments({
                 readAttachments: dependencies.readAttachments,
@@ -2373,7 +2439,7 @@ export const getAgentTools = (
 
 // Fires an `in_progress` task update the moment a tool's execute() runs — i.e. as
 // soon as the model emits the call, before the (possibly slow) tool finishes.
-// generateText() only surfaces tool progress in onStepFinish, which lands after
+// generateText() only surfaces tool progress in onStepEnd, which lands after
 // the tool already returned, so without this the Slack/UI card stays empty until
 // the first tool completes. The streaming path emits this from its 'tool-call'
 // chunk instead, so this wrap is only applied in the non-streaming path.
@@ -2526,6 +2592,8 @@ const getCapabilitySectionArgs = (
 ): CapabilitySectionArgs => ({
     promptSections: loadout.promptSections,
     availableSkills: getAvailableSkills(args, loadout),
+    // The content tools also load for Documents alone; chart guidance needs chart saves.
+    canSaveCharts: args.enableContentTools,
     enableDocumentNudges: areDocumentNudgesEnabled(args),
     // Custom charts reach Documents through findCustomChartTypes and
     // exportChartAsCode, so the guidance needs both tools.
@@ -2876,13 +2944,16 @@ const prepareAgentTurn = async ({
             ),
         );
     }
-    tools = reportEarlyToolProgress
-        ? withEarlyToolProgress(
-              intentToolGate.tools,
-              dependencies.updateProgress,
-              args.execution.mode === 'deep_research',
-          )
-        : intentToolGate.tools;
+    tools = withToolCallLogContext(
+        reportEarlyToolProgress
+            ? withEarlyToolProgress(
+                  intentToolGate.tools,
+                  dependencies.updateProgress,
+                  args.execution.mode === 'deep_research',
+              )
+            : intentToolGate.tools,
+        getAgentLogContext(args),
+    );
     const messages = getAgentMessages(
         args,
         loadout,
@@ -2945,12 +3016,12 @@ const prepareAgentTurn = async ({
 
 // Forked scope so every capture in the turn, including from tool execute, carries the model.
 const withAgentModelScope = <T>(
-    model: AiAgentArgs['model'],
+    args: AiAgentArgs,
     run: () => Promise<T>,
 ): Promise<T> =>
     Sentry.withScope((scope) => {
-        scope.setTag('ai.model', getAiAgentModelName(model));
-        return run();
+        scope.setTag('ai.model', getAiAgentModelName(args.model));
+        return runWithAiAgentLogContext(getAgentLogContext(args), run);
     });
 
 const runGenerateAgentResponse = async ({
@@ -2980,6 +3051,7 @@ const runGenerateAgentResponse = async ({
     );
     const startTime = Date.now();
     const timing = new TurnTimingTracker(startTime);
+    const toolCallEvents = createTurnToolCallEvents(args, dependencies);
     const modelName = getAiAgentModelName(args.model);
     let generatedTokenUsage = initialPromptTokenUsage(
         args.execution.mode === 'deep_research'
@@ -3040,13 +3112,14 @@ const runGenerateAgentResponse = async ({
                 };
             },
             stopWhen: [
-                stepCountIs(args.execution.maxSteps),
+                isStepCount(args.execution.maxSteps),
                 stopWhenPromptInterrupted,
                 ({ steps }) =>
                     getTurnFastResponse(
                         args.enableDataAnswerFastResponse,
                         preparedContext?.turnIntent,
                         steps,
+                        args.siteUrl,
                     ) !== null,
             ],
             abortSignal,
@@ -3056,13 +3129,14 @@ const runGenerateAgentResponse = async ({
             tools,
             allowSystemInMessages: true,
             messages,
-            experimental_onToolCallStart: ({ toolCall }) => {
+            onToolExecutionStart: ({ toolCall }) => {
                 timing.recordToolCallStart(
                     toolCall.toolCallId,
                     toolCall.toolName,
                 );
+                toolCallEvents.start(toolCall.toolCallId, toolCall.toolName);
             },
-            experimental_onToolCallFinish: (event) => {
+            onToolExecutionEnd: (event) => {
                 notifyAiAccessRefusal(dependencies, event);
                 recordExternalMcpToolCall(dependencies, mcpToolSetup, event);
                 const toolTiming = timing.recordToolCallEnd(
@@ -3073,32 +3147,47 @@ const runGenerateAgentResponse = async ({
                         isQueryReuseHit(event.toolOutput.output),
                 );
                 if (toolTiming) {
-                    dependencies.trackEvent({
-                        event: 'ai_agent.tool_call_completed',
-                        userId: args.userId,
-                        properties: {
-                            organizationId: args.organizationId,
-                            projectId: args.agentSettings.projectUuid,
-                            aiAgentId: args.agentSettings.uuid,
-                            promptId: args.promptUuid,
-                            threadId: args.threadUuid,
-                            stepIndex: toolTiming.stepIndex,
-                            toolName: toolTiming.toolName,
-                            toolCallId: event.toolCall.toolCallId,
-                            durationMs: toolTiming.durationMs,
-                            stage: toolTiming.stage,
-                            queryCacheHit: toolTiming.queryCacheHit,
-                            queryReuseHit: toolTiming.queryReuseHit,
-                            status:
-                                event.toolOutput.type !== 'tool-result' ||
-                                isErrorToolResult(event.toolOutput.output)
-                                    ? 'error'
-                                    : 'success',
-                        },
+                    toolCallEvents.track({
+                        toolCallId: event.toolCall.toolCallId,
+                        toolName: toolTiming.toolName,
+                        result:
+                            event.toolOutput.type === 'tool-result'
+                                ? {
+                                      type: 'tool-result',
+                                      output: event.toolOutput.output,
+                                  }
+                                : {
+                                      type: 'tool-error',
+                                      error: event.toolOutput.error,
+                                  },
+                        stepIndex: toolTiming.stepIndex,
+                        durationMs: toolTiming.durationMs,
+                        stage: toolTiming.stage,
+                        queryCacheHit: toolTiming.queryCacheHit,
+                        queryReuseHit: toolTiming.queryReuseHit,
                     });
                 }
             },
-            onStepFinish: async (step) => {
+            onStepEnd: async (step) => {
+                // Calls the SDK rejected before execution (invalid input) never reach onToolExecutionEnd
+                for (const part of step.content) {
+                    if (
+                        part.type === 'tool-call' &&
+                        part.invalid === true &&
+                        !toolCallEvents.isTracked(part.toolCallId)
+                    ) {
+                        toolCallEvents.track({
+                            toolCallId: part.toolCallId,
+                            toolName: part.toolName,
+                            result: { type: 'tool-error', error: part.error },
+                            stepIndex: timing.getCurrentStepIndex(),
+                            durationMs: 0,
+                            stage: getToolStage(part.toolName),
+                            queryCacheHit: null,
+                            queryReuseHit: null,
+                        });
+                    }
+                }
                 const stepUsage = await recordStepUsage(step);
                 // completeStep opens the next step; these calls belong to this one.
                 const stepIndex = timing.getCurrentStepIndex();
@@ -3281,13 +3370,17 @@ const runGenerateAgentResponse = async ({
             },
             ...telemetry,
         });
-        const responseText = result.text.trim()
-            ? result.text
-            : (getTurnFastResponse(
-                  args.enableDataAnswerFastResponse,
-                  preparedContext?.turnIntent,
-                  result.steps,
-              ) ?? result.text);
+        const responseText = withAskUserQuestions(
+            result.text.trim()
+                ? result.text
+                : (getTurnFastResponse(
+                      args.enableDataAnswerFastResponse,
+                      preparedContext?.turnIntent,
+                      result.steps,
+                      args.siteUrl,
+                  ) ?? result.text),
+            result.steps,
+        );
 
         logger(
             'Generate Agent Response',
@@ -3391,9 +3484,7 @@ const runGenerateAgentResponse = async ({
 export const generateAgentResponse = (
     params: Parameters<typeof runGenerateAgentResponse>[0],
 ): Promise<string> =>
-    withAgentModelScope(params.args.model, () =>
-        runGenerateAgentResponse(params),
-    );
+    withAgentModelScope(params.args, () => runGenerateAgentResponse(params));
 
 const runStreamAgentResponse = async ({
     args,
@@ -3421,6 +3512,7 @@ const runStreamAgentResponse = async ({
     let mcpClientsClosed = false;
     // The turn-level timers above still feed Prometheus and responseTiming.
     const timing = new TurnTimingTracker(startTime);
+    const toolCallEvents = createTurnToolCallEvents(args, dependencies);
     const modelName = getAiAgentModelName(args.model);
     const persistPrompt = makeStreamSafePersist(
         dependencies.updatePrompt,
@@ -3482,13 +3574,14 @@ const runStreamAgentResponse = async ({
             ...args.callOptions,
             prepareStep,
             stopWhen: [
-                stepCountIs(args.execution.maxSteps),
+                isStepCount(args.execution.maxSteps),
                 stopWhenPromptInterrupted,
                 ({ steps }) =>
                     getTurnFastResponse(
                         args.enableDataAnswerFastResponse,
                         preparedContext?.turnIntent,
                         steps,
+                        args.siteUrl,
                     ) !== null,
             ],
             providerOptions: args.providerOptions,
@@ -3497,7 +3590,7 @@ const runStreamAgentResponse = async ({
             tools,
             allowSystemInMessages: true,
             messages,
-            experimental_onToolCallFinish: (event) => {
+            onToolExecutionEnd: (event) => {
                 notifyAiAccessRefusal(dependencies, event);
                 recordExternalMcpToolCall(dependencies, mcpToolSetup, event);
             },
@@ -3519,6 +3612,10 @@ const runStreamAgentResponse = async ({
                 switch (event.chunk.type) {
                     case 'tool-call':
                         timing.recordToolCallStart(
+                            event.chunk.toolCallId,
+                            event.chunk.toolName,
+                        );
+                        toolCallEvents.start(
                             event.chunk.toolCallId,
                             event.chunk.toolName,
                         );
@@ -3655,6 +3752,7 @@ const runStreamAgentResponse = async ({
                                         toolResults: fastToolResults,
                                     },
                                 ],
+                                args.siteUrl,
                             );
                         }
                         logger(
@@ -3697,30 +3795,18 @@ const runStreamAgentResponse = async ({
                             isQueryReuseHit(event.chunk.output),
                         );
                         if (toolTiming) {
-                            dependencies.trackEvent({
-                                event: 'ai_agent.tool_call_completed',
-                                userId: args.userId,
-                                properties: {
-                                    organizationId: args.organizationId,
-                                    projectId: args.agentSettings.projectUuid,
-                                    aiAgentId: args.agentSettings.uuid,
-                                    toolName: event.chunk.toolName,
-                                    threadId: args.threadUuid,
-                                    promptId: args.promptUuid,
-                                    toolCallId: event.chunk.toolCallId,
-                                    stepIndex: toolTiming.stepIndex,
-                                    durationMs: toolTiming.durationMs,
-                                    stage: toolTiming.stage,
-                                    queryCacheHit:
-                                        toolTiming.queryCacheHit || null,
-                                    queryReuseHit:
-                                        toolTiming.queryReuseHit || null,
-                                    status: isErrorToolResult(
-                                        event.chunk.output as AnyType,
-                                    )
-                                        ? 'error'
-                                        : 'success',
+                            toolCallEvents.track({
+                                toolCallId: event.chunk.toolCallId,
+                                toolName: event.chunk.toolName,
+                                result: {
+                                    type: 'tool-result',
+                                    output: event.chunk.output,
                                 },
+                                stepIndex: toolTiming.stepIndex,
+                                durationMs: toolTiming.durationMs,
+                                stage: toolTiming.stage,
+                                queryCacheHit: toolTiming.queryCacheHit || null,
+                                queryReuseHit: toolTiming.queryReuseHit || null,
                             });
                         }
                         void dependencies
@@ -3760,6 +3846,27 @@ const runStreamAgentResponse = async ({
                             );
                         }
                         break;
+                    case 'tool-error': {
+                        const errorTiming = timing.recordToolCallEnd(
+                            event.chunk.toolCallId,
+                        );
+                        if (errorTiming) {
+                            toolCallEvents.track({
+                                toolCallId: event.chunk.toolCallId,
+                                toolName: event.chunk.toolName,
+                                result: {
+                                    type: 'tool-error',
+                                    error: event.chunk.error,
+                                },
+                                stepIndex: errorTiming.stepIndex,
+                                durationMs: errorTiming.durationMs,
+                                stage: errorTiming.stage,
+                                queryCacheHit: null,
+                                queryReuseHit: null,
+                            });
+                        }
+                        break;
+                    }
                     case 'raw':
                     case 'reasoning-delta':
                     case 'source':
@@ -3776,7 +3883,6 @@ const runStreamAgentResponse = async ({
                     case 'reasoning-end':
                     case 'reasoning-file':
                     case 'tool-input-end':
-                    case 'tool-error':
                     case 'tool-output-denied':
                     case 'tool-approval-request':
                     case 'tool-approval-response':
@@ -3793,7 +3899,7 @@ const runStreamAgentResponse = async ({
                         assertUnreachable(event.chunk, 'Unknown chunk type');
                 }
             },
-            onStepFinish: async (step) => {
+            onStepEnd: async (step) => {
                 await recordStepUsage(step);
                 trackAgentStep(
                     args,
@@ -3827,12 +3933,7 @@ const runStreamAgentResponse = async ({
                         });
                 }
             },
-            onFinish: async ({
-                totalUsage,
-                steps,
-                finishReason,
-                finalStep,
-            }) => {
+            onEnd: async ({ totalUsage, steps, finishReason, finalStep }) => {
                 logger(
                     'On Finish',
                     `Stream finished. Updating prompt with response. finishReason: ${finishReason}, steps: ${steps.length}`,
@@ -3842,13 +3943,17 @@ const runStreamAgentResponse = async ({
                 const modelResponse = steps
                     .map((step) => step.text ?? '')
                     .join('\n');
-                const responseText = modelResponse.trim()
-                    ? modelResponse
-                    : (getTurnFastResponse(
-                          args.enableDataAnswerFastResponse,
-                          preparedContext?.turnIntent,
-                          steps,
-                      ) ?? modelResponse);
+                const responseText = withAskUserQuestions(
+                    modelResponse.trim()
+                        ? modelResponse
+                        : (getTurnFastResponse(
+                              args.enableDataAnswerFastResponse,
+                              preparedContext?.turnIntent,
+                              steps,
+                              args.siteUrl,
+                          ) ?? modelResponse),
+                    steps,
+                );
                 const completeResponse =
                     agentContext.responseBlocks.render(responseText);
 
@@ -4059,6 +4164,4 @@ const runStreamAgentResponse = async ({
 export const streamAgentResponse = (
     params: Parameters<typeof runStreamAgentResponse>[0],
 ): Promise<AgentStreamTextResult> =>
-    withAgentModelScope(params.args.model, () =>
-        runStreamAgentResponse(params),
-    );
+    withAgentModelScope(params.args, () => runStreamAgentResponse(params));

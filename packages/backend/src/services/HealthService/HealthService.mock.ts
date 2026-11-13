@@ -7,6 +7,7 @@ import {
 
 export const BaseResponse: HealthState = {
     healthy: true,
+    hasManagedAnalytics: false,
     requiresMigration: false,
     migrationWarnings: undefined,
     license: {
@@ -23,6 +24,7 @@ export const BaseResponse: HealthState = {
     },
     isAuthenticated: false,
     requiresOrgRegistration: false,
+    instanceBrand: null,
     localDbtEnabled: true,
     defaultProject: undefined,
     siteUrl: 'https://test.lightdash.cloud',
@@ -39,6 +41,7 @@ export const BaseResponse: HealthState = {
     hasJira: true,
     hasLinear: true,
     hasPostHogOAuth: false,
+    hasLinkedInAdsOAuth: false,
     hasGoogleLiveSources: false,
     hasHeadlessBrowser: false,
     hasSlack: false,
@@ -139,7 +142,7 @@ export const BaseResponse: HealthState = {
     isAthenaWarehouseIamRoleAuthEnabled: false,
     isSaveCredentialsFormEnabled: false,
     isCustomRolesEnabled: false,
-    embedding: { enabled: false, events: undefined },
+    embedding: { events: undefined },
     ai: {
         analyticsProjectUuid: undefined,
         analyticsDashboardUuid: undefined,
@@ -161,6 +164,9 @@ export const BaseResponse: HealthState = {
         enabled: false,
     },
     dashboardComments: {
+        enabled: true,
+    },
+    mergeQueryAuthoring: {
         enabled: true,
     },
     preAggregates: {

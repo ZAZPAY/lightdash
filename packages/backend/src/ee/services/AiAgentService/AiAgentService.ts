@@ -68,6 +68,8 @@ import {
     ApiAiAgentThreadMessageVizQuery,
     ApiAiAgentThreadShareResponse,
     ApiAiAgentVisualizeSlackPreviewRequest,
+    ApiAiAgentVisualizeSlackSendRequest,
+    ApiAiAgentVisualizeSlackSendResponse,
     ApiAiMcpOAuthCredentialRequest,
     ApiAppendEvaluationRequest,
     ApiCreateAiAgent,
@@ -117,6 +119,7 @@ import {
     getAppDisplayName,
     getComposerChartStage,
     getComposerSlackEchartsConfig,
+    getComposerSlackRunQueryChart,
     getDataAppVizChartFromArtifact,
     getEmbedWriteSpaceUuids,
     getErrorMessage,
@@ -127,6 +130,8 @@ import {
     getItemLabelWithoutTableName,
     getItemMap,
     getSlackAiEchartsConfig,
+    getSlackNativeChart,
+    getSlackNativeChartConfigGate,
     getValidAiQueryLimit,
     getWebAiChartConfig,
     GITHUB_MCP_SERVER_NAME,
@@ -145,6 +150,7 @@ import {
     isAiWritebackRunInProgress,
     isComposerQueryToolName,
     isDashboardChartTileType,
+    isEmbedReadOnlyAiAgentToken,
     isGithubMcpServerUrl,
     isGitProjectType,
     isJwtUser,
@@ -175,7 +181,9 @@ import {
     QuerySourceType,
     QuerySurface,
     ReadinessScore,
+    serializeDashboardDateZoomControlsForAiContext,
     serializeDashboardFiltersForAiContext,
+    serializeDashboardTileParametersForAiContext,
     ShareUrl,
     SlackPrompt,
     sleep,
@@ -195,9 +203,10 @@ import {
     type AgentToolName,
     type AgentWorkMarker,
     type AiAgentEditDbtProjectPipelineJobPayload,
-    type AiAgentMessageQueryPipeline,
     type AiAgentModelConfig,
+    type AiAgentNodeCitationPipeline,
     type AiAgentSkill,
+    type AiAgentThreadComposerNode,
     type AiArtifact,
     type AiChartRuntimeOverrides,
     type AiClonedThreadCreatedFrom,
@@ -224,7 +233,9 @@ import {
     type PivotConfiguration,
     type QueryResultReader,
     type RegisteredAccount,
+    type ResultColumn,
     type SessionUser,
+    type SlackNativeChartRoute,
     type SlackPromptJobPayload,
     type SqlApprovalToolName,
     type SuggestionValidationCatalog,
@@ -355,6 +366,7 @@ import {
 } from '../../../services/AiAccessService/agentExecutionContext';
 import { type AgentResultReadDecision } from '../../../services/AiAccessService/AiAccessService';
 import { AsyncQueryService } from '../../../services/AsyncQueryService/AsyncQueryService';
+import { REQUEST_AUTHORITY } from '../../../services/AsyncQueryService/types';
 import { BaseService } from '../../../services/BaseService';
 import { CatalogService } from '../../../services/CatalogService/CatalogService';
 import { CoderService } from '../../../services/CoderService/CoderService';
@@ -365,6 +377,11 @@ import { FeatureFlagService } from '../../../services/FeatureFlag/FeatureFlagSer
 import { GithubAppService } from '../../../services/GithubAppService/GithubAppService';
 import { PersistentDownloadFileService } from '../../../services/PersistentDownloadFileService/PersistentDownloadFileService';
 import { ProjectService } from '../../../services/ProjectService/ProjectService';
+import {
+    describeApiSourceTarget,
+    getApiSourceExploreNames,
+    getLegacyLiveSourceName,
+} from '../../../services/QuerySourceService/api/apiSourceExplores';
 import { type QuerySourceService } from '../../../services/QuerySourceService/QuerySourceService';
 import { SavedChartService } from '../../../services/SavedChartsService/SavedChartService';
 import { SearchService } from '../../../services/SearchService/SearchService';
@@ -383,7 +400,10 @@ import {
     type DbAiPromptTurnDecisionOutcome,
 } from '../../database/entities/ai';
 import { type DbAiDeepResearchEvent } from '../../database/entities/aiDeepResearch';
-import { toSlackArtifactRenderInput } from '../../database/entities/aiSlackArtifactDeliveries';
+import {
+    toSlackArtifactRenderInput,
+    type SlackArtifactRenderInput,
+} from '../../database/entities/aiSlackArtifactDeliveries';
 import { threadComposerQueryScope } from '../../database/entities/composerQueryNodes';
 import { AiAgentDocumentModel } from '../../models/AiAgentDocumentModel';
 import {
@@ -399,6 +419,7 @@ import {
     type AiMcpCredential,
     type AiMcpServerWithSensitiveData,
     type AiPromptResponseState,
+    type EmbedThreadScope,
 } from '../../models/AiAgentModel';
 import { AiAgentReviewClassifierModel } from '../../models/AiAgentReviewClassifierModel';
 import { AiAgentReviewNotificationModel } from '../../models/AiAgentReviewNotificationModel';
@@ -497,6 +518,7 @@ import { composeInstantReply } from '../ai/decisions/instantReplies';
 import { classifyResponseSignals } from '../ai/decisions/responseSignals';
 import { selectVerifiedAnswers } from '../ai/decisions/verifiedAnswers';
 import {
+    findPreferredPreset,
     getCompactionModelMetadata,
     getDefaultModel,
     getModel,
@@ -506,6 +528,7 @@ import {
     resolveKeyManagement,
     resolveModelConfigForPrompt,
 } from '../ai/models';
+import { type ModelTier } from '../ai/models/presets';
 import {
     OrgAiCopilotConfigResolver,
     type AiConfigScope,
@@ -532,6 +555,7 @@ import {
 } from '../ai/repoFs/mountingRepoFileSystem';
 import { RepoFs } from '../ai/repoFs/RepoFs';
 import type { AiAgentSkill as ServedSkill } from '../ai/skills/types';
+import { canOfferAskUser } from '../ai/tools/askUser';
 import { executeEditContent } from '../ai/tools/editContent';
 import { formatSkillResult } from '../ai/tools/loadSkill';
 import {
@@ -572,7 +596,9 @@ import {
     GetPromptFn,
     GetPullRequestDiffFn,
     ListWorkstreamsFn,
+    ProposeSemanticLayerChangeFn,
     ReadAttachmentsFn,
+    ReadSemanticModelFn,
     RecordMcpToolCallFn,
     RecordPromptDecisionFn,
     SendFileFn,
@@ -603,6 +629,7 @@ import {
 import { getPivotedResults } from '../ai/utils/getPivotedResults';
 import {
     buildFeedbackContextActions,
+    buildSlackCardBlock,
     buildSlackTaskUpdate,
     getAgentConfirmationBlocks,
     getAgentSelectionBlocks,
@@ -621,6 +648,7 @@ import {
     getThinkingBlocks,
     selectSlackAiAccessRefusal,
     splitMarkdownIntoMessages,
+    stripCitationsForSlack,
 } from '../ai/utils/getSlackBlocks';
 import { llmAsAJudge } from '../ai/utils/llmAsAJudge';
 import {
@@ -631,13 +659,19 @@ import {
     parseMemoryCitations,
     stripMemoryCitations,
 } from '../ai/utils/memoryCitation';
-import { buildMessageQueryPipelines } from '../ai/utils/messageQueryPipelines';
+import {
+    buildNodeCitationPipeline,
+    nodeCitationReadsWarehouseSql,
+} from '../ai/utils/nodeCitationPipeline';
 import {
     expandMetricsWithPopAdditionalMetrics,
     populateCustomMetricsSQL,
 } from '../ai/utils/populateCustomMetricsSQL';
 import { renderEcharts } from '../ai/utils/renderEcharts';
-import { getSlackArtifactCardVersions } from '../ai/utils/slackArtifactImages';
+import {
+    getSlackArtifactCardBlockId,
+    getSlackArtifactCardVersions,
+} from '../ai/utils/slackArtifactImages';
 import {
     getSlackImageSource,
     type SlackImageSource,
@@ -645,8 +679,16 @@ import {
 import { getSlackBigNumbers } from '../ai/utils/slackBigNumbers';
 import { getSlackSelectedCardArtifacts } from '../ai/utils/slackChartSelection';
 import {
+    getSlackNativeChartBlockId,
+    getSlackNativeChartLayout,
+    getSlackNativeCharts,
+    sendWithSlackNativeChartFallback,
+    toSlackImageChartBlocks,
+    type SlackChartBlocks,
+} from '../ai/utils/slackNativeCharts';
+import {
     getSlackTableBlocks,
-    splitSlackTableMessage,
+    splitSlackDataMessage,
     type SlackTableQueryResults,
 } from '../ai/utils/slackTableBlocks';
 import { getSlackTablePreviews } from '../ai/utils/slackTablePreviews';
@@ -670,7 +712,10 @@ import {
     WritebackAgentAccessError,
     WritebackThreadPrClosedError,
 } from '../AiWritebackService/errors';
-import type { AiWritebackSource } from '../AiWritebackService/types';
+import type {
+    AiWritebackSource,
+    ParsedDbtProject,
+} from '../AiWritebackService/types';
 import { createWritebackAgentDeliveryGuard } from '../AiWritebackService/writebackAgentWork';
 import { type WritebackPreviewService } from '../AiWritebackService/WritebackPreviewService';
 import type { AppGenerateService } from '../AppGenerateService/AppGenerateService';
@@ -679,12 +724,15 @@ import { type ExternalConnectionService } from '../ExternalConnectionService/Ext
 import { type MobilePushNotificationService } from '../MobilePushNotificationService/MobilePushNotificationService';
 import { ProjectContextService } from '../ProjectContextService/ProjectContextService';
 import { createReviewRemediationAgentWorkGuard } from '../reviewRemediationAgentWork';
+import { SEMANTIC_STUDIO_MODEL_TIER } from '../SemanticStudioService/modelPreference';
+import { type SemanticStudioService } from '../SemanticStudioService/SemanticStudioService';
 import {
     parseAgentSelectionValue,
     resolveAgentSelectionPrompt,
 } from './agentSelectionPrompt';
 import { canAccessAiAgent, canAccessAiAgentThread } from './aiAgentAccess';
 import { deriveAiAgentThreadLiveStatus } from './aiAgentThreadLiveStatus';
+import { getArtifactRunAccount } from './artifactRunAccount';
 import { isComposerQueriesEnabled } from './composerQueriesGate';
 import {
     isAnalysisInvestigationThread,
@@ -726,6 +774,12 @@ import {
     type AiUsageViewerAttribution,
 } from './usageAttribution';
 import { getWritebackConnectionSupport } from './writebackConnection';
+
+/** Checks a Slack answer may read a query's results before they are shown. */
+type SlackResultAuthorizer = (args: {
+    queryUuid: string;
+    exploreNames: string[];
+}) => Promise<void>;
 
 type SlackAiAccessRefusalState = {
     selected: AiAccessRefusal | null;
@@ -917,19 +971,19 @@ export const assertDeepResearchPromptExecution = ({
 // Set where a user action starts; null where the run continues one that was already checked.
 export type AiCreditCheck = { isEmbedViewer: boolean };
 
-type MessageQueryPipelineRef = {
+type NodeCitationRef = {
     agentUuid: string;
     threadUuid: string;
     messageUuid: string;
-    /** The pipeline's terminal queryUuid from its `query` call. */
-    queryUuid: string;
+    nodeId: string;
 };
 
 type EmbedAiAgentRuntimeOptions = {
-    // A thread belongs to every write space of the token that created it.
+    // Empty for read-only tokens.
     writeSpaceUuids: string[];
     // The host application's id for the viewer, when its token carries one.
     externalUserId: string | null;
+    threadScope: EmbedThreadScope;
     spaceAccess: string[];
     // Source spaces the agent may read but not write to.
     readOnlySpaceUuids: string[];
@@ -1020,6 +1074,7 @@ type AiAgentServiceDependencies = {
     aiAgentContentValidation: AiAgentContentValidation;
     aiWritebackService: AiWritebackService;
     projectContextService: ProjectContextService;
+    semanticStudioService: SemanticStudioService;
     writebackPreviewService: WritebackPreviewService;
     githubAppInstallationsModel: GithubAppInstallationsModel;
     githubAppService: GithubAppService;
@@ -1407,6 +1462,8 @@ export class AiAgentService extends BaseService {
 
     private readonly projectContextService: ProjectContextService;
 
+    private readonly semanticStudioService: SemanticStudioService;
+
     private readonly writebackPreviewService: WritebackPreviewService;
 
     private readonly aiAgentToolsService: AiAgentToolsService;
@@ -1458,6 +1515,7 @@ export class AiAgentService extends BaseService {
         threadModelConfig,
         agentModelConfig,
         requestedModelConfig,
+        preferredTier,
     }: {
         organizationUuid: string;
         projectUuid: string;
@@ -1465,6 +1523,8 @@ export class AiAgentService extends BaseService {
         threadModelConfig: AiAgentModelConfig | null;
         agentModelConfig: AiAgentModelConfig | null;
         requestedModelConfig: AiAgentModelConfig | null;
+        /** The tier to prefer when nobody chose a model; null to take the default. */
+        preferredTier: ModelTier | null;
     }): Promise<AiAgentModelConfig | null> {
         if (threadModelConfig) return threadModelConfig;
         const pickedModelConfig = requestedModelConfig ?? agentModelConfig;
@@ -1473,20 +1533,40 @@ export class AiAgentService extends BaseService {
             (await this.aiOrganizationSettingsService.getDefaultModelConfig(
                 organizationUuid,
             ));
-        if (!modelConfig) return null;
+        if (!modelConfig && !preferredTier) return null;
         const { catalogue, copilotConfig } =
             await this.orgAiCopilotConfigResolver.getOrgModelCatalogue({
                 organizationUuid,
                 projectUuid,
                 credentialUuid,
             });
-        const resolved = resolveModelConfigForPrompt(catalogue, modelConfig);
+        const resolved = modelConfig
+            ? resolveModelConfigForPrompt(catalogue, modelConfig)
+            : null;
+        if (pickedModelConfig) return resolved;
         // An org-default model inherited into a scope the org default does not
         // serve (a project pinned to a Bedrock credential) is repointed at the
         // scoped config's own default; explicit picks fail closed instead.
-        return pickedModelConfig
-            ? resolved
-            : reconcileInheritedModelConfig(copilotConfig, resolved);
+        const inherited = resolved
+            ? reconcileInheritedModelConfig(copilotConfig, resolved)
+            : null;
+        // A preference only replaces a model nobody chose, and only within the provider already in use.
+        const provider =
+            inherited?.modelProvider ??
+            getDefaultModel(copilotConfig)?.provider;
+        const preferred =
+            preferredTier && provider
+                ? findPreferredPreset(catalogue, provider, preferredTier)
+                : null;
+        if (!preferred) return inherited;
+        this.logger.info(
+            `Running a thread on preferred model "${preferred.provider}/${preferred.name}" in place of ${inherited ? `"${inherited.modelProvider}/${inherited.modelName}"` : 'the instance default'}`,
+        );
+        return {
+            ...inherited,
+            modelProvider: preferred.provider,
+            modelName: preferred.name,
+        };
     }
 
     private static getPinnedContextAnalyticsProperties(
@@ -1589,6 +1669,9 @@ export class AiAgentService extends BaseService {
                     break;
                 case 'preview_environment':
                     key = `preview_environment:${item.previewProjectUuid}`;
+                    break;
+                case 'semantic_model':
+                    key = `semantic_model:${item.modelName}:${item.fieldName ?? ''}`;
                     break;
                 case 'data_app_element':
                     key = dataAppElementContextKey(item);
@@ -1872,7 +1955,8 @@ export class AiAgentService extends BaseService {
                 // beyond the agent's project membership the request already has.
                 if (
                     item.type === 'pull_request' ||
-                    item.type === 'preview_environment'
+                    item.type === 'preview_environment' ||
+                    item.type === 'semantic_model'
                 ) {
                     return;
                 }
@@ -2067,6 +2151,7 @@ export class AiAgentService extends BaseService {
         this.aiAgentContentValidation = dependencies.aiAgentContentValidation;
         this.aiWritebackService = dependencies.aiWritebackService;
         this.projectContextService = dependencies.projectContextService;
+        this.semanticStudioService = dependencies.semanticStudioService;
         this.writebackPreviewService = dependencies.writebackPreviewService;
         this.githubAppInstallationsModel =
             dependencies.githubAppInstallationsModel;
@@ -2491,17 +2576,174 @@ export class AiAgentService extends BaseService {
         }
     }
 
-    /** Debug harness: draws caller-provided rows exactly as the Slack composer chart image. */
-    public async previewVisualizeSlackChart(
+    /** Null keeps the image path: an unreadable or incomplete result, or a chart with no image. */
+    private async getSlackNativeChartRoute({
+        user,
+        reader,
+        projectUuid,
+        artifact,
+        input,
+        authorize,
+    }: {
+        user: SessionUser;
+        reader: QueryResultReader;
+        projectUuid: string;
+        artifact: AiArtifact;
+        input: SlackArtifactRenderInput;
+        authorize: SlackResultAuthorizer;
+    }): Promise<SlackNativeChartRoute | null> {
+        const source = getSlackImageSource(input, artifact.chartConfig);
+        if (!source) return null;
+        const account = fromSession(user);
+        const blockId = getSlackNativeChartBlockId(input.versionUuid);
+        const getRows = async () => {
+            await authorize({
+                queryUuid: input.queryUuid,
+                exploreNames: source.exploreNames,
+            });
+            const results =
+                await this.asyncQueryService.getRawAsyncQueryResults({
+                    account,
+                    reader,
+                    projectUuid,
+                    queryUuid: input.queryUuid,
+                    aiAccessOnly: true,
+                    maxRows: input.rowLimit,
+                });
+            return results.truncated || results.rows.length !== input.rowLimit
+                ? null
+                : results;
+        };
+
+        if (input.source === 'runQuery') {
+            const gate = getSlackNativeChartConfigGate(input.queryTool);
+            if (!gate.eligible) return { route: 'image', reason: gate.reason };
+            const results = await getRows();
+            return results
+                ? getSlackNativeChart({
+                      queryTool: input.queryTool,
+                      queryResults: results,
+                      getPivotedResults,
+                      blockId,
+                  })
+                : null;
+        }
+        if (source.source !== 'composer') return null;
+        const history = await this.asyncQueryService.getAsyncQueryHistory({
+            account,
+            reader,
+            projectUuid,
+            queryUuid: input.queryUuid,
+        });
+        const { columns } = history;
+        if (!columns) return null;
+        const toChart = (rows: Record<string, unknown>[]) =>
+            getComposerSlackRunQueryChart({
+                columns: Object.values(columns),
+                rows,
+                vizConfig: source.vizConfig,
+                metadata: {
+                    title: artifact.title ?? '',
+                    description: artifact.description ?? '',
+                },
+            });
+        const shape = toChart([]);
+        if (!shape) return null;
+        const gate = getSlackNativeChartConfigGate(shape.tool);
+        if (!gate.eligible) return { route: 'image', reason: gate.reason };
+        const results = await getRows();
+        const chart = results ? toChart(results.rows) : null;
+        return chart
+            ? getSlackNativeChart({
+                  queryTool: chart.tool,
+                  queryResults: { rows: chart.rows, fields: chart.fields },
+                  getPivotedResults,
+                  blockId,
+              })
+            : null;
+    }
+
+    /** Flag-gated: up to two eligible chart cards become native charts; the rest keep the image path. */
+    private async withSlackNativeCharts({
+        user,
+        slackPrompt,
+        reader,
+        artifacts,
+        cardBlocks,
+        authorize,
+    }: {
+        user: SessionUser;
+        slackPrompt: SlackPrompt;
+        reader: QueryResultReader;
+        artifacts: AiArtifact[];
+        cardBlocks: (Block | KnownBlock)[];
+        authorize: SlackResultAuthorizer;
+    }): Promise<SlackChartBlocks | null> {
+        try {
+            const versions = getSlackArtifactCardVersions(cardBlocks);
+            if (versions.length === 0) return null;
+            const { enabled } = await this.featureFlagService.get({
+                user,
+                featureFlagId: FeatureFlags.AiAgentSlackNativeCharts,
+            });
+            if (!enabled) return null;
+            const delivery =
+                await this.aiAgentModel.slackArtifactDeliveries.get(
+                    slackPrompt.promptUuid,
+                );
+            if (!delivery || delivery.finished_at) return null;
+            const charts = await getSlackNativeCharts(
+                versions,
+                async (versionUuid) => {
+                    const stored = delivery.render_inputs[versionUuid];
+                    const artifact = artifacts.find(
+                        (candidate) => candidate.versionUuid === versionUuid,
+                    );
+                    if (!stored || !artifact) return null;
+                    try {
+                        const result = await this.getSlackNativeChartRoute({
+                            user,
+                            reader,
+                            projectUuid: slackPrompt.projectUuid,
+                            artifact,
+                            input: toSlackArtifactRenderInput(stored),
+                            authorize,
+                        });
+                        this.logger.info('Slack chart route', {
+                            promptUuid: slackPrompt.promptUuid,
+                            versionUuid,
+                            route: result?.route ?? 'image',
+                            reason:
+                                result?.route === 'image'
+                                    ? result.reason
+                                    : null,
+                        });
+                        return result;
+                    } catch (error) {
+                        this.logger.warn('Slack native chart unavailable', {
+                            promptUuid: slackPrompt.promptUuid,
+                            versionUuid,
+                            error: getErrorMessage(error),
+                        });
+                        return null;
+                    }
+                },
+            );
+            return getSlackNativeChartLayout(cardBlocks, charts);
+        } catch (error) {
+            this.logger.warn('Slack native charts skipped', {
+                promptUuid: slackPrompt.promptUuid,
+                error: getErrorMessage(error),
+            });
+            return null;
+        }
+    }
+
+    private async parseSlackChartHarnessVizConfig(
         account: RegisteredAccount,
         projectUuid: UUID,
-        {
-            title,
-            columns,
-            rows,
-            vizConfig,
-        }: ApiAiAgentVisualizeSlackPreviewRequest,
-    ): Promise<Buffer> {
+        vizConfig: Record<string, unknown>,
+    ) {
         if (!(await this.getIsCopilotEnabled(toSessionUser(account)))) {
             throw new ForbiddenError('Copilot is not enabled');
         }
@@ -2526,10 +2768,33 @@ export class AiAgentService extends BaseService {
                 `Invalid vizConfig: ${parsed.error.message}`,
             );
         }
+        return {
+            vizConfig: parsed.data,
+            organizationUuid: project.organizationUuid,
+        };
+    }
+
+    /** Debug harness: draws caller-provided rows exactly as the Slack composer chart image. */
+    public async previewVisualizeSlackChart(
+        account: RegisteredAccount,
+        projectUuid: UUID,
+        {
+            title,
+            columns,
+            rows,
+            vizConfig,
+        }: ApiAiAgentVisualizeSlackPreviewRequest,
+    ): Promise<Buffer> {
+        const { vizConfig: parsedVizConfig } =
+            await this.parseSlackChartHarnessVizConfig(
+                account,
+                projectUuid,
+                vizConfig,
+            );
         const options = await getComposerSlackEchartsConfig({
             columns,
             rows,
-            vizConfig: parsed.data,
+            vizConfig: parsedVizConfig,
             metadata: { title, description: '' },
             getPivotedResults,
         });
@@ -2537,6 +2802,148 @@ export class AiAgentService extends BaseService {
             throw new ParameterError('This chart has no Slack image');
         }
         return renderEcharts(options);
+    }
+
+    /** Dev-only harness: posts caller-provided rows to Slack, routed by the native chart rules unless forced. */
+    public async sendVisualizeSlackChart(
+        account: RegisteredAccount,
+        projectUuid: UUID,
+        {
+            title,
+            columns,
+            rows,
+            vizConfig,
+            channel,
+            threadTs,
+            route,
+        }: ApiAiAgentVisualizeSlackSendRequest,
+    ): Promise<ApiAiAgentVisualizeSlackSendResponse['results']> {
+        const { vizConfig: parsedVizConfig, organizationUuid } =
+            await this.parseSlackChartHarnessVizConfig(
+                account,
+                projectUuid,
+                vizConfig,
+            );
+        const metadata = { title, description: '' };
+        const chart = getComposerSlackRunQueryChart({
+            columns,
+            rows,
+            vizConfig: parsedVizConfig,
+            metadata,
+        });
+        if (!chart) {
+            throw new ParameterError('This chart has no Slack image');
+        }
+        const versionUuid = nanoidGenerator();
+        const decision = await getSlackNativeChart({
+            queryTool: chart.tool,
+            queryResults: { rows: chart.rows, fields: chart.fields },
+            getPivotedResults,
+            blockId: getSlackNativeChartBlockId(versionUuid),
+        });
+        const reason = decision.route === 'image' ? decision.reason : null;
+        const nativeBlock =
+            route !== 'image' && decision.route === 'native'
+                ? decision.block
+                : null;
+        if (route === 'native' && !nativeBlock) {
+            return {
+                route: 'image',
+                reason,
+                blocks: [],
+                ts: null,
+                permalink: null,
+            };
+        }
+        const card = (heroImageUrl: string | undefined) =>
+            buildSlackCardBlock({
+                blockId: getSlackArtifactCardBlockId(versionUuid),
+                title,
+                subtitle: 'Chart',
+                heroImageUrl,
+                actions: [
+                    {
+                        type: 'button',
+                        url: `${this.lightdashConfig.siteUrl}/projects/${projectUuid}`,
+                        style: 'primary',
+                        action_id: 'actions.view_composer_card_button_click.0',
+                        text: {
+                            type: 'plain_text',
+                            text: 'Explore in Lightdash',
+                        },
+                    },
+                ],
+            });
+        const blocks = nativeBlock
+            ? (getSlackNativeChartLayout(
+                  [card(undefined)],
+                  new Map([[versionUuid, nativeBlock]]),
+              )?.native ?? [card(undefined)])
+            : [
+                  card(
+                      await this.renderSlackChartHarnessImage({
+                          organizationUuid,
+                          columns,
+                          rows,
+                          vizConfig: parsedVizConfig,
+                          metadata,
+                      }),
+                  ),
+              ];
+        const posted = await this.slackClient.postMessage({
+            organizationUuid,
+            channel,
+            ...(threadTs !== null ? { thread_ts: threadTs } : {}),
+            text: title,
+            blocks,
+            unfurl_links: false,
+        });
+        const ts = posted.ts ?? null;
+        const webClient = await this.slackClient.getWebClient(organizationUuid);
+        const permalink = ts
+            ? ((
+                  await webClient.chat.getPermalink({
+                      channel: posted.channel ?? channel,
+                      message_ts: ts,
+                  })
+              ).permalink ?? null)
+            : null;
+        return {
+            route: nativeBlock ? 'native' : 'image',
+            reason,
+            blocks: blocks as unknown as Record<string, unknown>[],
+            ts,
+            permalink,
+        };
+    }
+
+    private async renderSlackChartHarnessImage({
+        organizationUuid,
+        columns,
+        rows,
+        vizConfig,
+        metadata,
+    }: {
+        organizationUuid: string;
+        columns: ResultColumn[];
+        rows: Record<string, unknown>[];
+        vizConfig: ComposerStoredChartVizConfig;
+        metadata: { title: string; description: string };
+    }): Promise<string> {
+        const options = await getComposerSlackEchartsConfig({
+            columns,
+            rows,
+            vizConfig,
+            metadata,
+            getPivotedResults,
+        });
+        if (!options) {
+            throw new ParameterError('This chart has no Slack image');
+        }
+        return this.uploadSlackAgentCardImage({
+            organizationUuid,
+            image: await renderEcharts(options),
+        });
     }
 
     private async uploadSlackAgentCardImage(
@@ -3161,10 +3568,15 @@ export class AiAgentService extends BaseService {
         const { writeActions, content } = account.authentication.data;
         const writeSpaceUuids = getEmbedWriteSpaceUuids(writeActions);
         const chartSpaceUuids = getEmbedActorChartSpaceUuids(account);
+        const externalUserId =
+            account.authentication.data.user?.externalId || null;
+        const isReadOnly = isEmbedReadOnlyAiAgentToken(
+            account.authentication.data,
+        );
 
         if (
             content.type !== 'aiAgent' ||
-            writeSpaceUuids.length === 0 ||
+            (writeSpaceUuids.length === 0 && !isReadOnly) ||
             !account.embedWriteUser ||
             account.embedWriteContext?.canUseAiAgent !== true ||
             account.embed.projectUuid !== projectUuid
@@ -3175,13 +3587,28 @@ export class AiAgentService extends BaseService {
             );
         }
 
+        let threadScope: EmbedThreadScope;
+        if (!isReadOnly) {
+            threadScope = {
+                type: 'writeSpaces',
+                writeSpaceUuids,
+                externalUserId,
+            };
+        } else if (externalUserId !== null) {
+            threadScope = { type: 'externalUser', externalUserId };
+        } else {
+            throw new ForbiddenError(
+                'Embed tokens without write spaces must include user.externalId',
+            );
+        }
+
         return {
             user: account.embedWriteUser,
             tokenAgentUuid: content.agentUuid,
             runtimeOptions: {
                 writeSpaceUuids,
-                externalUserId:
-                    account.authentication.data.user?.externalId || null,
+                externalUserId,
+                threadScope,
                 spaceAccess: chartSpaceUuids,
                 readOnlySpaceUuids: chartSpaceUuids.filter(
                     (uuid) => !writeSpaceUuids.includes(uuid),
@@ -3192,24 +3619,26 @@ export class AiAgentService extends BaseService {
         };
     }
 
+    // Read-only tokens have no write spaces, so their readable spaces decide.
     private static isAgentAvailableInEmbedSpaces(
         agent: AiAgent,
-        writeSpaceUuids: string[],
+        runtimeOptions: EmbedAiAgentRuntimeOptions,
     ) {
-        return writeSpaceUuids.some((spaceUuid) =>
+        const embedSpaceUuids =
+            runtimeOptions.writeSpaceUuids.length > 0
+                ? runtimeOptions.writeSpaceUuids
+                : runtimeOptions.spaceAccess;
+        return embedSpaceUuids.some((spaceUuid) =>
             hasAiAgentAccessToSpace(agent, spaceUuid),
         );
     }
 
     private static assertAgentAvailableInEmbedSpaces(
         agent: AiAgent,
-        writeSpaceUuids: string[],
+        runtimeOptions: EmbedAiAgentRuntimeOptions,
     ) {
         if (
-            !AiAgentService.isAgentAvailableInEmbedSpaces(
-                agent,
-                writeSpaceUuids,
-            )
+            !AiAgentService.isAgentAvailableInEmbedSpaces(agent, runtimeOptions)
         ) {
             throw new ForbiddenError(
                 'AI agent is not available in the embedded space',
@@ -3231,10 +3660,7 @@ export class AiAgentService extends BaseService {
         }
 
         const agent = await this.getAgent(user, agentUuid, projectUuid);
-        AiAgentService.assertAgentAvailableInEmbedSpaces(
-            agent,
-            runtimeOptions.writeSpaceUuids,
-        );
+        AiAgentService.assertAgentAvailableInEmbedSpaces(agent, runtimeOptions);
         return {
             user,
             agent,
@@ -3295,12 +3721,12 @@ export class AiAgentService extends BaseService {
     ) {
         if (!runtimeOptions) return;
 
-        const isInEmbedSpaces =
-            await this.aiAgentModel.isWebAppThreadInEmbedSpaces(
+        const isInEmbedScope =
+            await this.aiAgentModel.isWebAppThreadInEmbedScope(
                 threadUuid,
-                runtimeOptions.writeSpaceUuids,
+                runtimeOptions.threadScope,
             );
-        if (!isInEmbedSpaces) {
+        if (!isInEmbedScope) {
             throw new ForbiddenError(
                 'AI agent thread is outside the embedded space',
             );
@@ -3350,7 +3776,7 @@ export class AiAgentService extends BaseService {
                     agent.uuid === tokenAgentUuid &&
                     AiAgentService.isAgentAvailableInEmbedSpaces(
                         agent,
-                        runtimeOptions.writeSpaceUuids,
+                        runtimeOptions,
                     ),
             )
             .map((agent) => this.forEmbedViewer(agent));
@@ -4258,6 +4684,7 @@ export class AiAgentService extends BaseService {
         // the builtin groupBy path.
         customChartType?: DataAppVizChart,
         userAttributeOverrides?: UserAttributeValueMap,
+        account: RegisteredAccount = fromSession(user),
     ) {
         const explore = await this.getExplore(
             user,
@@ -4319,7 +4746,7 @@ export class AiAgentService extends BaseService {
 
         const asyncQuery = await this.asyncQueryService.executeAsyncMetricQuery(
             {
-                account: fromSession(user),
+                account,
                 projectUuid,
                 metricQuery: metricQueryWithCustomMetrics,
                 context: QueryExecutionContext.AI,
@@ -4368,6 +4795,7 @@ export class AiAgentService extends BaseService {
         toolArgs: ToolRunQueryArgsTransformed,
         querySurface: QuerySurface,
         userAttributeOverrides?: UserAttributeValueMap,
+        account: RegisteredAccount = fromSession(user),
     ) {
         const mergeQuery = await this.buildAiMergeQuery(
             user,
@@ -4375,7 +4803,7 @@ export class AiAgentService extends BaseService {
             toolArgs,
         );
         const outcome = await this.asyncQueryService.executeAsyncMergeQuery({
-            account: fromSession(user),
+            account,
             projectUuid,
             mergeQuery,
             context: QueryExecutionContext.AI,
@@ -5372,6 +5800,27 @@ export class AiAgentService extends BaseService {
             );
         }
 
+        if (body.createdFrom === 'semantic_studio') {
+            // Only the app starts these; an embed or scheduler keeps its own origin.
+            if (createdFrom !== 'web_app') {
+                throw new ParameterError(
+                    'A Semantic Studio thread can only be started from the app',
+                );
+            }
+            if (
+                !(
+                    await this.semanticStudioService.getStatus(
+                        user,
+                        agent.projectUuid,
+                    )
+                ).enabled
+            ) {
+                throw new ForbiddenError(
+                    'You cannot change the semantic layer of this project',
+                );
+            }
+        }
+
         const context = body.prompt
             ? await this.validatePromptContextAccess(
                   user,
@@ -5422,9 +5871,10 @@ export class AiAgentService extends BaseService {
             organizationUuid,
             projectUuid: agent.projectUuid,
             userUuid: user.userUuid,
-            createdFrom,
+            createdFrom: body.createdFrom ?? createdFrom,
             agentUuid,
             embedSpaceUuids: runtimeOptions?.writeSpaceUuids,
+            embedExternalUserId: runtimeOptions?.externalUserId ?? null,
             battleProfile: body.battleProfile ?? null,
             binding,
             threadContext,
@@ -5437,6 +5887,10 @@ export class AiAgentService extends BaseService {
             threadModelConfig: null,
             agentModelConfig: agent.modelConfig,
             requestedModelConfig: body.modelConfig ?? null,
+            preferredTier:
+                body.createdFrom === 'semantic_studio'
+                    ? SEMANTIC_STUDIO_MODEL_TIER
+                    : null,
         });
 
         if (body.prompt) {
@@ -5472,6 +5926,10 @@ export class AiAgentService extends BaseService {
                     threadId: threadUuid,
                     promptId: promptUuid,
                     context: 'web_app',
+                    threadCreatedFrom: body.createdFrom ?? createdFrom,
+                    ...AiAgentService.getModelConfigAnalyticsProperties(
+                        modelConfig,
+                    ),
                     ...AiAgentService.getPinnedContextAnalyticsProperties(
                         context,
                     ),
@@ -5659,6 +6117,10 @@ export class AiAgentService extends BaseService {
                 await this.aiAgentModel.findThreadModelConfig(threadUuid),
             agentModelConfig: agent.modelConfig,
             requestedModelConfig: body.modelConfig ?? null,
+            preferredTier:
+                thread.createdFrom === 'semantic_studio'
+                    ? SEMANTIC_STUDIO_MODEL_TIER
+                    : null,
         });
 
         const messageUuid = await this.aiAgentModel.createWebAppPrompt({
@@ -5691,6 +6153,10 @@ export class AiAgentService extends BaseService {
                 threadId: threadUuid,
                 promptId: messageUuid,
                 context: 'web_app',
+                threadCreatedFrom: thread.createdFrom,
+                ...AiAgentService.getModelConfigAnalyticsProperties(
+                    modelConfig,
+                ),
                 ...AiAgentService.getPinnedContextAnalyticsProperties(context),
             },
         });
@@ -6007,16 +6473,20 @@ export class AiAgentService extends BaseService {
                 return;
             }
 
+            const { enabled: isNewOnboarding } =
+                await this.featureFlagService.get({
+                    user,
+                    featureFlagId: FeatureFlags.NewOnboarding,
+                });
             await this.createAgent(
                 user,
                 {
-                    name: 'Aurora',
+                    name: isNewOnboarding ? 'Analytics agent' : 'Aurora',
                     projectUuid,
                     description: null,
                     integrations: [],
                     tags: null,
-                    instruction:
-                        "You are Aurora, this organization's analytics agent. Help people explore and understand their data, and answer questions with clear, concise analysis. If no explores are available yet, use your warehouse tools to discover the schema and answer with SQL.",
+                    instruction: `You are ${isNewOnboarding ? '' : 'Aurora, '}this organization's analytics agent. Help people explore and understand their data, and answer questions with clear, concise analysis. If no explores are available yet, use your warehouse tools to discover the schema and answer with SQL.`,
                     imageUrl: null,
                     groupAccess: [],
                     userAccess: [],
@@ -8241,6 +8711,13 @@ export class AiAgentService extends BaseService {
             );
         }
 
+        // A reply generated here would never reach the Slack conversation.
+        if (thread.createdFrom === 'slack') {
+            throw new ForbiddenError(
+                'This thread was created in Slack. Continue the conversation in Slack.',
+            );
+        }
+
         const threadMessages = await this.aiAgentModel.getThreadMessages(
             user.organizationUuid,
             agent.projectUuid,
@@ -9223,7 +9700,7 @@ export class AiAgentService extends BaseService {
             agentUuid,
             userUuid: user.userUuid,
             createdFrom: ['web_app'],
-            embedWriteSpaceUuids: runtimeOptions.writeSpaceUuids,
+            embedThreadScope: runtimeOptions.threadScope,
         });
 
         return this.withVisibleThreadContext(account, agent, threads);
@@ -9305,24 +9782,46 @@ export class AiAgentService extends BaseService {
         });
     }
 
-    async getEmbedMessageQueryPipelines(
+    async getEmbedThreadComposerNodes(
         account: AnonymousAccount,
         projectUuid: string,
-        args: { agentUuid: string; threadUuid: string; messageUuid: string },
-    ): Promise<AiAgentMessageQueryPipeline[]> {
+        args: { agentUuid: string; threadUuid: string },
+    ): Promise<AiAgentThreadComposerNode[]> {
         const { user, runtimeOptions } = await this.getEmbedAgent(
             account,
             projectUuid,
             args.agentUuid,
         );
         await this.assertEmbedThreadInSpace(args.threadUuid, runtimeOptions);
-        return this.getMessageQueryPipelines(user, { ...args, projectUuid });
+        return this.getThreadComposerNodes(user, {
+            ...args,
+            projectUuid,
+            runtimeOptions,
+        });
     }
 
-    async getEmbedMessageQueryPipelineVizQuery(
+    async getEmbedNodeCitationPipeline(
         account: AnonymousAccount,
         projectUuid: string,
-        args: MessageQueryPipelineRef,
+        args: NodeCitationRef,
+    ): Promise<AiAgentNodeCitationPipeline> {
+        const { user, runtimeOptions } = await this.getEmbedAgent(
+            account,
+            projectUuid,
+            args.agentUuid,
+        );
+        await this.assertEmbedThreadInSpace(args.threadUuid, runtimeOptions);
+        return this.getNodeCitationPipeline(user, {
+            ...args,
+            projectUuid,
+            runtimeOptions,
+        });
+    }
+
+    async getEmbedNodeCitationVizQuery(
+        account: AnonymousAccount,
+        projectUuid: string,
+        args: NodeCitationRef,
     ): Promise<ApiAiAgentComposerArtifactVizQuery> {
         const { user, runtimeOptions } = await this.getEmbedAgent(
             account,
@@ -9330,7 +9829,7 @@ export class AiAgentService extends BaseService {
             args.agentUuid,
         );
         await this.assertEmbedThreadInSpace(args.threadUuid, runtimeOptions);
-        return this.getMessageQueryPipelineVizQuery(user, {
+        return this.getNodeCitationVizQuery(user, {
             ...args,
             projectUuid,
             runtimeOptions,
@@ -10086,6 +10585,7 @@ export class AiAgentService extends BaseService {
         },
         execute: () => Promise<T>,
         getQueryUuids: (result: T) => string[],
+        account: RegisteredAccount = fromSession(user),
     ): Promise<T> {
         const { enabled } = await this.featureFlagService.get({
             user,
@@ -10105,13 +10605,14 @@ export class AiAgentService extends BaseService {
             { projectUuid, agentUuid, source: artifact },
             execute,
             getQueryUuids,
-            (account, queryUuid) =>
+            (bindingAccount, queryUuid) =>
                 this.asyncQueryService.bindQueryToArtifact(
-                    account,
+                    bindingAccount,
                     projectUuid,
                     queryUuid,
                     { agentUuid, artifactUuid, versionUuid },
                 ),
+            account,
         );
     }
 
@@ -10130,8 +10631,8 @@ export class AiAgentService extends BaseService {
         execute: () => Promise<T>,
         getQueryUuids: (result: T) => string[],
         bind: (account: RegisteredAccount, queryUuid: string) => Promise<void>,
+        account: RegisteredAccount = fromSession(user),
     ): Promise<T> {
-        const account = fromSession(user);
         const reader = await this.getArtifactOwnerResultReader(
             user,
             projectUuid,
@@ -10168,13 +10669,15 @@ export class AiAgentService extends BaseService {
             runtimeOptions?: EmbedAiAgentRuntimeOptions;
             cachedQueryUuid?: string;
         },
+        callerAccount?: RegisteredAccount,
     ): Promise<ApiAiAgentArtifactVizQuery> {
         if (options.cachedQueryUuid !== undefined || options.runtimeOptions)
             return this.executeArtifactVizQuery(user, options);
+        const account = getArtifactRunAccount(user, callerAccount);
         return this.executeArtifactQueriesAsOwner(
             user,
             options,
-            () => this.executeArtifactVizQuery(user, options),
+            () => this.executeArtifactVizQuery(user, options, account),
             (vizQuery) =>
                 isAiAgentComposerArtifactVizQuery(vizQuery)
                     ? [
@@ -10184,6 +10687,7 @@ export class AiAgentService extends BaseService {
                               : []),
                       ]
                     : [vizQuery.query.queryUuid],
+            account,
         );
     }
 
@@ -10239,6 +10743,7 @@ export class AiAgentService extends BaseService {
             runtimeOptions?: EmbedAiAgentRuntimeOptions;
             cachedQueryUuid?: string;
         },
+        account: RegisteredAccount = fromSession(user),
     ): Promise<ApiAiAgentArtifactVizQuery> {
         // Timed from the top: the browser blocks on the whole call.
         const vizQueryStartedAt = Date.now();
@@ -10330,6 +10835,7 @@ export class AiAgentService extends BaseService {
                 parsed,
                 await this.getArtifactQuerySurface(artifact.promptUuid),
                 runtimeOptions?.userAttributeOverrides,
+                account,
             );
             this.analytics.track({
                 event: 'ai_agent.artifact_viz_query',
@@ -10386,7 +10892,6 @@ export class AiAgentService extends BaseService {
                     : null;
             const stageNodeId =
                 stage?.status === 'ok' ? stage.query.nodeId : null;
-            const account = fromSession(user);
             const { queries: allSubmissions } =
                 await this.querySourceService.submitQueries({
                     account,
@@ -10404,6 +10909,7 @@ export class AiAgentService extends BaseService {
                         runtimeOptions?.userAttributeOverrides ?? {},
                     invalidateCache: false,
                     plans: {},
+                    authority: REQUEST_AUTHORITY,
                     // Re-renders stay unattributed: prompt ids mark tool runs only.
                     aiAttribution: null,
                 });
@@ -10485,7 +10991,7 @@ export class AiAgentService extends BaseService {
 
             // Re-executes as the viewer — same trust model as viewing a saved SQL chart.
             const query = await this.asyncQueryService.executeAsyncSqlQuery({
-                account: fromSession(user),
+                account,
                 projectUuid,
                 sql: artifact.chartConfig.sql,
                 limit: artifact.chartConfig.limit,
@@ -10556,6 +11062,7 @@ export class AiAgentService extends BaseService {
             await this.getArtifactQuerySurface(artifact.promptUuid),
             customChartType,
             runtimeOptions?.userAttributeOverrides,
+            account,
         );
 
         const metadata = {
@@ -10606,15 +11113,22 @@ export class AiAgentService extends BaseService {
             chartIndex: number;
             runtimeOptions?: EmbedAiAgentRuntimeOptions;
         },
+        callerAccount?: RegisteredAccount,
     ): Promise<ApiAiAgentThreadMessageVizQuery> {
-        const execute = () =>
-            this.executeDashboardArtifactChartVizQuery(user, options);
-        if (options.runtimeOptions) return execute();
+        if (options.runtimeOptions)
+            return this.executeDashboardArtifactChartVizQuery(user, options);
+        const account = getArtifactRunAccount(user, callerAccount);
         return this.executeArtifactQueriesAsOwner(
             user,
             options,
-            execute,
+            () =>
+                this.executeDashboardArtifactChartVizQuery(
+                    user,
+                    options,
+                    account,
+                ),
             (vizQuery) => [vizQuery.query.queryUuid],
+            account,
         );
     }
 
@@ -10635,6 +11149,7 @@ export class AiAgentService extends BaseService {
             chartIndex: number;
             runtimeOptions?: EmbedAiAgentRuntimeOptions;
         },
+        account: RegisteredAccount = fromSession(user),
     ): Promise<ApiAiAgentThreadMessageVizQuery> {
         const { organizationUuid } = user;
         if (!organizationUuid) {
@@ -10722,6 +11237,7 @@ export class AiAgentService extends BaseService {
             await this.getArtifactQuerySurface(artifact.promptUuid),
             undefined,
             runtimeOptions?.userAttributeOverrides,
+            account,
         );
 
         const metadata = {
@@ -10928,20 +11444,14 @@ export class AiAgentService extends BaseService {
         });
     }
 
-    async getMessageQueryPipelines(
+    private async assertThreadReadable(
         user: SessionUser,
         {
             projectUuid,
             agentUuid,
             threadUuid,
-            messageUuid,
-        }: {
-            projectUuid: string;
-            agentUuid: string;
-            threadUuid: string;
-            messageUuid: string;
-        },
-    ): Promise<AiAgentMessageQueryPipeline[]> {
+        }: { projectUuid: string; agentUuid: string; threadUuid: string },
+    ): Promise<{ organizationUuid: string }> {
         const { organizationUuid } = user;
         if (!organizationUuid)
             throw new ForbiddenError(`Organization not found`);
@@ -10977,69 +11487,107 @@ export class AiAgentService extends BaseService {
                 'Insufficient permissions to view this thread',
             );
         }
+        return { organizationUuid };
+    }
 
+    async getThreadComposerNodes(
+        user: SessionUser,
+        {
+            runtimeOptions,
+            ...args
+        }: {
+            projectUuid: string;
+            agentUuid: string;
+            threadUuid: string;
+            runtimeOptions: EmbedAiAgentRuntimeOptions | null;
+        },
+    ): Promise<AiAgentThreadComposerNode[]> {
+        await this.assertThreadReadable(user, args);
+        const threadNodes = await this.aiAgentModel.listComposerQueryNodes(
+            threadComposerQueryScope(args.threadUuid),
+        );
+        // A citation an embed viewer can't open must not resolve for them.
+        return threadNodes
+            .filter(({ nodeId }) => {
+                if (!runtimeOptions) return true;
+                const pipeline = buildNodeCitationPipeline({
+                    nodeId,
+                    threadNodes,
+                });
+                return (
+                    pipeline !== null &&
+                    !nodeCitationReadsWarehouseSql(pipeline)
+                );
+            })
+            .map(({ nodeId, title }) => ({ nodeId, title: title ?? null }));
+    }
+
+    async getNodeCitationPipeline(
+        user: SessionUser,
+        {
+            projectUuid,
+            runtimeOptions,
+            agentUuid,
+            threadUuid,
+            messageUuid,
+            nodeId,
+        }: NodeCitationRef & {
+            projectUuid: string;
+            runtimeOptions: EmbedAiAgentRuntimeOptions | null;
+        },
+    ): Promise<AiAgentNodeCitationPipeline> {
+        const { organizationUuid } = await this.assertThreadReadable(user, {
+            projectUuid,
+            agentUuid,
+            threadUuid,
+        });
         // Throws unless the message belongs to this thread
         await this.aiAgentModel.findThreadMessage('assistant', {
             organizationUuid,
             threadUuid,
             messageUuid,
         });
-
-        const [toolCalls, threadNodes] = await Promise.all([
-            this.aiAgentModel.getToolCallsAndResultsForPrompt(messageUuid),
-            this.aiAgentModel.listComposerQueryNodes(
+        const pipeline = buildNodeCitationPipeline({
+            nodeId,
+            threadNodes: await this.aiAgentModel.listComposerQueryNodes(
                 threadComposerQueryScope(threadUuid),
             ),
-        ]);
-        return buildMessageQueryPipelines({ toolCalls, threadNodes });
-    }
-
-    private async getMessageQueryPipeline(
-        user: SessionUser,
-        args: MessageQueryPipelineRef & { projectUuid: string },
-    ): Promise<AiAgentMessageQueryPipeline> {
-        const pipelines = await this.getMessageQueryPipelines(user, args);
-        const pipeline = pipelines.find(
-            ({ queryUuid }) => queryUuid === args.queryUuid,
-        );
+        });
         if (!pipeline) {
-            throw new NotFoundError(`Query not found: ${args.queryUuid}`);
+            throw new NotFoundError(`Node not found: ${nodeId}`);
+        }
+        // Embed viewers are scoped by user attributes, which raw SQL bypasses.
+        if (runtimeOptions && nodeCitationReadsWarehouseSql(pipeline)) {
+            throw new ForbiddenError(
+                'Pipelines with warehouse SQL are not available in embedded AI agents',
+            );
         }
         return pipeline;
     }
 
-    /** Runs a message's `query` pipeline for the preview panel, like an artifact's viz query. */
-    async getMessageQueryPipelineVizQuery(
+    /** Runs a cited node and what it reads for the preview panel, like an artifact's viz query. */
+    async getNodeCitationVizQuery(
         user: SessionUser,
         {
             projectUuid,
             runtimeOptions,
             ...args
-        }: MessageQueryPipelineRef & {
+        }: NodeCitationRef & {
             projectUuid: string;
             runtimeOptions: EmbedAiAgentRuntimeOptions | null;
         },
+        account: RegisteredAccount = fromSession(user),
     ): Promise<ApiAiAgentComposerArtifactVizQuery> {
-        const pipeline = await this.getMessageQueryPipeline(user, {
+        const pipeline = await this.getNodeCitationPipeline(user, {
             ...args,
             projectUuid,
+            runtimeOptions,
         });
-        // Embed viewers are scoped by user attributes, which raw SQL bypasses.
-        if (
-            runtimeOptions &&
-            pipeline.nodes.some(
-                (node) => node.sourceType === QuerySourceType.SQL,
-            )
-        ) {
-            throw new ForbiddenError(
-                'Pipelines with warehouse SQL are not available in embedded AI agents',
-            );
-        }
         const execute =
             async (): Promise<ApiAiAgentComposerArtifactVizQuery> => {
                 const { queries } = await this.querySourceService.submitQueries(
                     {
-                        account: fromSession(user),
+                        account,
                         projectUuid,
                         queries: pipeline.nodes,
                         context: QueryExecutionContext.AI,
@@ -11051,13 +11599,14 @@ export class AiAgentService extends BaseService {
                             runtimeOptions?.userAttributeOverrides ?? {},
                         invalidateCache: false,
                         plans: {},
+                        authority: REQUEST_AUTHORITY,
                         // Re-renders stay unattributed: prompt ids mark tool runs only.
                         aiAttribution: null,
                     },
                 );
                 return {
                     source: 'composer',
-                    terminalNodeId: pipeline.terminalNodeId,
+                    terminalNodeId: pipeline.nodeId,
                     nodeQueryUuids: Object.fromEntries(
                         queries.map(({ nodeId, queryUuid }) => [
                             nodeId,
@@ -11086,21 +11635,22 @@ export class AiAgentService extends BaseService {
             },
             execute,
             (vizQuery) => Object.values(vizQuery.nodeQueryUuids),
-            (account, queryUuid) =>
+            (bindingAccount, queryUuid) =>
                 this.asyncQueryService.bindQueryToMessageQuery(
-                    account,
+                    bindingAccount,
                     projectUuid,
                     queryUuid,
                     {
                         agentUuid: args.agentUuid,
                         promptUuid: args.messageUuid,
-                        queryUuid: args.queryUuid,
+                        nodeId: args.nodeId,
                     },
                 ),
+            account,
         );
     }
 
-    async getMessageQueryPipelineQueryResults(
+    async getNodeCitationQueryResults(
         user: SessionUser,
         {
             projectUuid,
@@ -11108,7 +11658,7 @@ export class AiAgentService extends BaseService {
             page,
             pageSize,
             ...args
-        }: MessageQueryPipelineRef & {
+        }: NodeCitationRef & {
             projectUuid: string;
             resultQueryUuid: string;
             page: number | null;
@@ -11116,7 +11666,11 @@ export class AiAgentService extends BaseService {
         },
         account: RegisteredAccount = fromSession(user),
     ): Promise<ApiGetAsyncQueryResults> {
-        await this.getMessageQueryPipeline(user, { ...args, projectUuid });
+        await this.getNodeCitationPipeline(user, {
+            ...args,
+            projectUuid,
+            runtimeOptions: null,
+        });
         const { enabled } = await this.featureFlagService.get({
             user,
             featureFlagId: FeatureFlags.AgentIdentity,
@@ -11145,7 +11699,7 @@ export class AiAgentService extends BaseService {
             {
                 agentUuid: args.agentUuid,
                 promptUuid: args.messageUuid,
-                queryUuid: args.queryUuid,
+                nodeId: args.nodeId,
             },
         );
     }
@@ -11164,6 +11718,7 @@ export class AiAgentService extends BaseService {
         } & (
             | { savedDashboardUuid: string | null }
             | { savedSqlUuid: string | null }
+            | { savedComposerChartUuid: string | null }
         ),
     ): Promise<void> {
         const { organizationUuid } = user;
@@ -11226,6 +11781,19 @@ export class AiAgentService extends BaseService {
         ) {
             throw new NotFoundError(
                 `Saved SQL chart not found in project: ${update.savedSqlUuid}`,
+            );
+        }
+
+        if (
+            'savedComposerChartUuid' in update &&
+            update.savedComposerChartUuid !== null &&
+            !(await this.aiAgentModel.isComposerChartInProject(
+                update.savedComposerChartUuid,
+                agent.projectUuid,
+            ))
+        ) {
+            throw new NotFoundError(
+                `Composer chart not found in project: ${update.savedComposerChartUuid}`,
             );
         }
 
@@ -11764,13 +12332,35 @@ export class AiAgentService extends BaseService {
                 projectUuid,
             );
         return connections.flatMap(
-            ({ externalConnectionUuid, name, apiSource }) =>
+            ({
+                externalConnectionUuid,
+                name,
+                apiSource,
+                origin,
+                liveSourceName,
+                aiHint,
+                targetLabel,
+            }) =>
                 apiSource
                     ? [
                           {
                               connectionUuid: externalConnectionUuid,
                               name,
                               connector: apiSource.connector,
+                              exploreNames: getApiSourceExploreNames(
+                                  apiSource.connector,
+                                  liveSourceName ??
+                                      getLegacyLiveSourceName(
+                                          apiSource.connector,
+                                          externalConnectionUuid,
+                                      ),
+                              ),
+                              target: describeApiSourceTarget(
+                                  apiSource,
+                                  origin,
+                                  targetLabel ?? null,
+                              ),
+                              hint: aiHint ?? null,
                           },
                       ]
                     : [],
@@ -12197,7 +12787,7 @@ Prefer reusing a matching query before rediscovering fields or constructing a ne
     }
 
     static createDeepResearchRunContext(
-        runs: AiDeepResearchRunContextRow[],
+        runs: Array<AiDeepResearchRunContextRow & { has_report: boolean }>,
         latestProgressEvents: DbAiDeepResearchEvent[],
         now = new Date(),
     ): AiAgentDeepResearchRunContext[] {
@@ -12237,9 +12827,9 @@ Prefer reusing a matching query before rediscovering fields or constructing a ne
         });
     }
 
-    static selectDeepResearchContextRuns(
-        runs: AiDeepResearchRunContextRow[],
-    ): AiDeepResearchRunContextRow[] {
+    static selectDeepResearchContextRuns<T extends AiDeepResearchRunContextRow>(
+        runs: T[],
+    ): T[] {
         const activeRuns = runs.filter(
             ({ status }) => !isAiDeepResearchRunTerminal(status),
         );
@@ -12451,12 +13041,29 @@ Prefer reusing a matching query before rediscovering fields or constructing a ne
                 case 'dashboard': {
                     const name = item.displayName ?? '(name unavailable)';
                     const headline = `- Dashboard "${name}" (dashboardSlug: ${item.dashboardSlug ?? '(slug unavailable)'})`;
-                    const overrides = item.runtimeOverrides;
-                    if (!overrides) return headline;
+                    const overrides: AiDashboardRuntimeOverrides =
+                        item.runtimeOverrides ?? {};
                     const overrideLines: string[] = [];
                     if (overrides.activeTab) {
                         overrideLines.push(
                             `  Active tab: "${overrides.activeTab.name}"`,
+                        );
+                    }
+                    // With named zooms the dashboard-wide one needs its own name
+                    const dateZoomLabel = overrides.dateZoomControls
+                        ? 'default date zoom'
+                        : 'date zoom';
+                    // Stated explicitly so a reset replaces overrides from earlier turns.
+                    const savedState = [
+                        !overrides.dashboardFilters && 'filters',
+                        !overrides.dashboardParameters &&
+                            !overrides.tileParameters &&
+                            'parameter values',
+                        overrides.dateZoom === undefined && dateZoomLabel,
+                    ].filter((label): label is string => !!label);
+                    if (savedState.length > 0) {
+                        overrideLines.push(
+                            `  As saved on the dashboard: ${savedState.join(', ')}`,
                         );
                     }
                     if (overrides.dashboardFilters) {
@@ -12471,7 +13078,17 @@ Prefer reusing a matching query before rediscovering fields or constructing a ne
                     }
                     if (overrides.dateZoom !== undefined) {
                         overrideLines.push(
-                            `  Date zoom: ${JSON.stringify(overrides.dateZoom)}`,
+                            `  ${overrides.dateZoomControls ? 'Default date zoom' : 'Date zoom'}: ${JSON.stringify(overrides.dateZoom)}`,
+                        );
+                    }
+                    if (overrides.tileParameters) {
+                        overrideLines.push(
+                            `  Parameter values by tile: ${JSON.stringify(serializeDashboardTileParametersForAiContext(overrides.tileParameters))}`,
+                        );
+                    }
+                    if (overrides.dateZoomControls) {
+                        overrideLines.push(
+                            `  Named date zooms, each setting the grain of its own tiles; the other tiles follow the default date zoom: ${JSON.stringify(serializeDashboardDateZoomControlsForAiContext(overrides.dateZoomControls))}`,
                         );
                     }
                     return overrideLines.length > 0
@@ -12549,6 +13166,10 @@ Prefer reusing a matching query before rediscovering fields or constructing a ne
                         : '';
                     return `- Review finding: "${item.title}" (${item.rootCause}, seen ${item.findingCount}×).${evidenceText}`;
                 }
+                case 'semantic_model':
+                    return item.fieldName
+                        ? `- The person is looking at field "${item.fieldName}" of model "${item.modelName}".`
+                        : `- The person is looking at model "${item.modelName}".`;
                 case 'preview_environment': {
                     const name = item.projectName
                         ? ` (${item.projectName})`
@@ -13150,7 +13771,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
     /**
      * The editDbtProject tool enqueues this pipeline job mid-step, so the job
      * can start — and a fast pre-flight failure can call updateToolResult —
-     * before onStepFinish has inserted the tool-result row. updateToolResult is
+     * before onStepEnd has inserted the tool-result row. updateToolResult is
      * an UPDATE, so it would silently match no rows and leave the card stuck.
      * Poll until the row exists (bounded), mirroring
      * waitForOriginalResponseWritten for the model-response field.
@@ -13257,15 +13878,31 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 return;
             }
 
-            // This job is enqueued mid-step, so it can outrun the onStepFinish
+            // This job is enqueued mid-step, so it can outrun the onStepEnd
             // insert of its own tool-result row — wait for it before any
             // updateToolResult below would otherwise no-op and strand the card.
             await this.waitForToolResultWritten(promptUuid, toolCallId);
             toolResultReady = true;
 
             let result: AiWritebackRunResult;
+            let changedModels: string[] | null = null;
             try {
                 const runArgs = {
+                    ...(prompt.threadCreatedFrom === 'semantic_studio'
+                        ? {
+                              onDbtProject: async (
+                                  project: ParsedDbtProject,
+                              ) => {
+                                  changedModels =
+                                      await this.semanticStudioService.saveDbtTryOut(
+                                          user,
+                                          projectUuid,
+                                          project,
+                                          prompt.threadUuid,
+                                      );
+                              },
+                          }
+                        : {}),
                     agentPermissionsApply: true,
                     user,
                     projectUuid,
@@ -13447,6 +14084,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     deletions: result.deletions ?? null,
                     previewUrl: previewUrl ?? null,
                     steps: result.steps,
+                    changedModels,
                     needsDbtSourceSelection:
                         result.needsDbtSourceSelection ?? null,
                     dbtSourceOptions: result.dbtSourceOptions ?? null,
@@ -13609,7 +14247,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 );
                 return;
             }
-            // The build can end before onStepFinish inserts the row.
+            // The build can end before onStepEnd inserts the row.
             await this.waitForToolResultWritten(
                 aiAgentToolCall.promptUuid,
                 aiAgentToolCall.toolCallId,
@@ -14659,7 +15297,11 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
             return runAttachmentShellCommand(files, command);
         };
 
-        const exploreRepo: ExploreRepoFn = async ({ command, target }) => {
+        const exploreRepo: ExploreRepoFn = async ({
+            command,
+            target,
+            rankMatches,
+        }) => {
             const mountFs = await getMountFs();
             const trimmedTarget = target?.trim();
             // `target` selects the starting directory in the unified tree: an
@@ -14681,11 +15323,36 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 cwd,
                 isTruncated: () => Promise.resolve(mountFs.isTruncated()),
                 budgetHit: () => Promise.resolve(mountFs.wasBudgetHit()),
-                search: (absPath, query) => mountFs.search(absPath, query),
+                search: async (absPath, query) => {
+                    const found = await mountFs.search(absPath, query);
+                    return rankMatches
+                        ? {
+                              ...found,
+                              matches: await rankMatches(found.matches),
+                          }
+                        : found;
+                },
             });
         };
 
         const discoverRepos: DiscoverReposFn = listAuthorizedRepos;
+
+        const proposeSemanticLayerChange: ProposeSemanticLayerChangeFn = (
+            models,
+        ) =>
+            this.semanticStudioService.proposeDraftChange(
+                user,
+                projectUuid,
+                models,
+                prompt.promptUuid,
+            );
+
+        const readSemanticModel: ReadSemanticModelFn = (name) =>
+            this.semanticStudioService.readDraftedModel(
+                user,
+                projectUuid,
+                name,
+            );
 
         // Deterministic project_context.yml writeback (no sandbox). Only wired
         // into review-remediation work threads; the source thread is linked
@@ -14811,6 +15478,8 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
             searchFieldValues: toolsRuntime.searchFieldValues,
             editDbtProject,
             editProjectContext,
+            proposeSemanticLayerChange,
+            readSemanticModel,
             exploreRepo,
             readAttachments,
             discoverRepos,
@@ -15906,7 +16575,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         return agent.enableContentTools && agent.enableDataAccess;
     }
 
-    /** The agent offers content write tools when the setting is on and the user can save content where the run may write. */
+    /** The agent offers chart and dashboard write tools when the setting is on and the user can save one where the run may write. */
     private async canUseContentWriteTools(
         user: SessionUser,
         agent: Pick<AiAgent, 'enableContentTools' | 'enableDataAccess'>,
@@ -15916,6 +16585,23 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         return (
             AiAgentService.canReadContent(agent) &&
             this.aiAgentToolsService.canAuthorContent({
+                user,
+                projectUuid,
+                spaceUuids: writeSpaceUuids,
+            })
+        );
+    }
+
+    /** The agent offers Documents when the setting is on and the user can save a Document in a Space where the run may write. */
+    private async canUseDocumentTools(
+        user: SessionUser,
+        agent: Pick<AiAgent, 'enableContentTools' | 'enableDataAccess'>,
+        projectUuid: string,
+        writeSpaceUuids: string[] | null,
+    ): Promise<boolean> {
+        return (
+            AiAgentService.canReadContent(agent) &&
+            this.aiAgentToolsService.canAuthorDocuments({
                 user,
                 projectUuid,
                 spaceUuids: writeSpaceUuids,
@@ -15944,7 +16630,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         if (
             documentSlug === null ||
             pinsOtherContent ||
-            !(await this.canUseContentWriteTools(
+            !(await this.canUseDocumentTools(
                 user,
                 agent,
                 prompt.projectUuid,
@@ -16053,7 +16739,11 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
             },
         };
         const output = await executeEditContent(
-            { editContent: document.editContent, documentsEnabled: true },
+            {
+                editContent: document.editContent,
+                siteUrl: this.lightdashConfig.siteUrl,
+                documentsEnabled: true,
+            },
             toolCall.input,
         );
         if (output.metadata.status !== 'success') {
@@ -16406,9 +17096,13 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 const decisionUsage = decisionClient
                     ? { inputTokens: 0, outputTokens: 0, serviceMs: null }
                     : undefined;
-                const decisions = decisionUsage
-                    ? decisionClient?.withUsage(decisionUsage)
-                    : undefined;
+                const isSemanticStudioThread =
+                    prompt.threadCreatedFrom === 'semantic_studio';
+                // Fast decisions route analytics turns; this thread only edits models.
+                const decisions =
+                    decisionUsage && !isSemanticStudioThread
+                        ? decisionClient?.withUsage(decisionUsage)
+                        : undefined;
                 // The decision client is the master gate; battle mode and Fast mode can only disable it.
                 const fastExperienceEnabled = decisions !== undefined;
                 let forceChartMutationRouting = false;
@@ -16796,12 +17490,22 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                         }),
                     );
 
+                // A project with only live sources has no warehouse to run SQL on
                 const warehouseCredentials = canRunSql
-                    ? await this.projectModel.getWarehouseCredentialsForBinding(
-                          prompt.projectUuid,
-                          { kind: 'connection', warehouseConnectionUuid: null },
-                      )
+                    ? await this.projectModel
+                          .getWarehouseCredentialsForBinding(
+                              prompt.projectUuid,
+                              {
+                                  kind: 'connection',
+                                  warehouseConnectionUuid: null,
+                              },
+                          )
+                          .catch((error: unknown) => {
+                              if (error instanceof NotFoundError) return null;
+                              throw error;
+                          })
                     : null;
+                if (!warehouseCredentials) canRunSql = false;
                 const warehouseConnections = canRunSql
                     ? await this.projectModel.getWarehouseConnectionsMetadata(
                           prompt.projectUuid,
@@ -16863,11 +17567,9 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     AiAgentService.selectDeepResearchContextRuns(
                         threadDeepResearchRuns.map((run) => ({
                             ...run,
-                            has_report:
-                                run.has_report ||
-                                researchDocuments.has(
-                                    run.ai_deep_research_run_uuid,
-                                ),
+                            has_report: researchDocuments.has(
+                                run.ai_deep_research_run_uuid,
+                            ),
                         })),
                     );
                 const latestDeepResearchProgress =
@@ -16909,6 +17611,25 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                         user,
                         featureFlagId: FeatureFlags.AiFilterExpressions,
                     });
+                const enableAskUser =
+                    canOfferAskUser(prompt, responseExecution.mode) &&
+                    (
+                        await this.featureFlagService.get({
+                            user,
+                            featureFlagId: FeatureFlags.AiAgentAskUser,
+                        })
+                    ).enabled;
+                // A dbt project keeps no draft in Semantic Studio; its thread edits the repository instead.
+                const semanticStudioStatus = isSemanticStudioThread
+                    ? await this.semanticStudioService.getStatus(
+                          user,
+                          promptProject.projectUuid,
+                      )
+                    : null;
+                const semanticStudioDrafts =
+                    semanticStudioStatus !== null &&
+                    semanticStudioStatus.enabled &&
+                    semanticStudioStatus.appliesAs !== 'dbt_pull_request';
                 let aiWritebackEnabled = hasTrustedPromptUserIdentity;
                 if (!aiWritebackEnabled) {
                     this.logger.info(
@@ -16920,6 +17641,16 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 if (
                     aiWritebackEnabled &&
                     !writebackConnectionSupport.editDbtProject
+                ) {
+                    aiWritebackEnabled = false;
+                }
+
+                // On a dbt project Semantic Studio proposes first: the pull request tools join only the turn the person asks for one.
+                if (
+                    semanticStudioStatus !== null &&
+                    (!semanticStudioStatus.enabled ||
+                        (!semanticStudioDrafts &&
+                            !options.toolHints?.includes('editDbtProject')))
                 ) {
                     aiWritebackEnabled = false;
                 }
@@ -16958,9 +17689,9 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     }
                 }
 
+                // Stored context is readable on any connection; only writeback needs Git.
                 const projectContextEnabled =
-                    aiWritebackEnabled &&
-                    writebackConnectionSupport.supportsProjectContext &&
+                    hasTrustedPromptUserIdentity &&
                     (await this.aiOrganizationSettingsService.isAiAgentReviewsEnabled(
                         user,
                     ));
@@ -17014,14 +17745,25 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 const canReadContent =
                     hasTrustedPromptUserIdentity &&
                     AiAgentService.canReadContent(agentSettings);
-                const canUseContentWriteTools =
-                    hasTrustedPromptUserIdentity &&
-                    (await this.canUseContentWriteTools(
-                        user,
-                        agentSettings,
-                        promptProject.projectUuid,
-                        options.runtimeOptions?.writeSpaceUuids ?? null,
-                    ));
+                const writeSpaceUuids =
+                    options.runtimeOptions?.writeSpaceUuids ?? null;
+                const [canUseContentWriteTools, canUseDocumentTools] =
+                    hasTrustedPromptUserIdentity
+                        ? await Promise.all([
+                              this.canUseContentWriteTools(
+                                  user,
+                                  agentSettings,
+                                  promptProject.projectUuid,
+                                  writeSpaceUuids,
+                              ),
+                              this.canUseDocumentTools(
+                                  user,
+                                  agentSettings,
+                                  promptProject.projectUuid,
+                                  writeSpaceUuids,
+                              ),
+                          ])
+                        : [false, false];
                 const enableGenerateDataApp =
                     canUseContentWriteTools &&
                     (await this.aiAgentToolsService.canGenerateDataApp({
@@ -17088,6 +17830,8 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     searchFieldValues,
                     editDbtProject,
                     editProjectContext,
+                    proposeSemanticLayerChange,
+                    readSemanticModel,
                     exploreRepo,
                     readAttachments,
                     discoverRepos,
@@ -17118,7 +17862,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     suppressWritebackPreview: options.suppressWritebackPreview,
                     dbtSourceUuid: options.dbtSourceUuid,
                     onWarehouseQuery: responseExecution.onWarehouseQuery,
-                    enableDocuments: canUseContentWriteTools,
+                    enableDocuments: canUseDocumentTools,
                     enableRuntimeCache: !!decisions,
                     // Battle sides must not warm one another's result cache. Normal
                     // threads retain production cache behavior.
@@ -17379,13 +18123,16 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     enableSelfImprovement: agentSettings.enableSelfImprovement,
                     enableContentReads: canReadContent,
                     enableContentTools: canUseContentWriteTools,
-                    enableDocuments: canUseContentWriteTools,
+                    enableDocuments: canUseDocumentTools,
                     enableGenerateDataApp,
                     enableAiWriteback: aiWritebackEnabled,
                     enableEditProjectContext: isReviewRemediationWorkThread,
+                    isSemanticStudioThread,
+                    semanticStudioDrafts,
                     writebackAttribution,
                     enableRepoDiscovery: repoDiscoveryEnabled,
                     enableReadAttachments: threadHasAttachments,
+                    enableAskUser,
                     enableFilterExpressions: filterExpressionsEnabled,
                     repoFsRoot,
                     repoFsSupportsCodeSearch,
@@ -17595,6 +18342,8 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     searchFieldValues,
                     editDbtProject,
                     editProjectContext,
+                    proposeSemanticLayerChange,
+                    readSemanticModel,
                     exploreRepo,
                     readAttachments,
                     discoverRepos,
@@ -18018,7 +18767,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                                 : result.toUIMessageStream(),
                         );
                     },
-                    onFinish: () => {
+                    onEnd: () => {
                         clearKeepalive();
                         stepProgressEmitter?.removeAllListeners(
                             'artifactReady',
@@ -18212,6 +18961,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 : null,
             agentModelConfig: agent?.modelConfig ?? null,
             requestedModelConfig: data.modelConfig ?? null,
+            preferredTier: null,
         });
 
         if (!threadUuid) {
@@ -18261,6 +19011,10 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 threadId: threadUuid,
                 promptId: uuid,
                 context: 'slack',
+                threadCreatedFrom: 'slack',
+                ...AiAgentService.getModelConfigAnalyticsProperties(
+                    modelConfig,
+                ),
                 ...AiAgentService.getPinnedContextAnalyticsProperties(
                     undefined,
                 ),
@@ -18356,7 +19110,10 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         response: string;
         accessRefusal: AiAccessRefusal | null;
         runtimeTableResults: ReadonlyMap<string, SlackTableQueryResults>;
-    }): Promise<(Block | KnownBlock)[]> {
+    }): Promise<{
+        blocks: (Block | KnownBlock)[];
+        chartBlocks: SlackChartBlocks | null;
+    }> {
         const referencedArtifactsMap =
             await this.aiAgentModel.findThreadReferencedArtifacts({
                 promptUuids: [slackPrompt.promptUuid],
@@ -18443,12 +19200,9 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 agentUuid: agent?.uuid ?? null,
             }),
         };
-        const authorizeSlackResults = async ({
+        const authorizeSlackResults: SlackResultAuthorizer = async ({
             queryUuid,
             exploreNames,
-        }: {
-            queryUuid: string;
-            exploreNames: string[];
         }) => {
             const history = await this.asyncQueryService.getAsyncQueryHistory({
                 account: fromSession(user),
@@ -18574,6 +19328,16 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
             !!(await this.getDecisionClient(user, slackPrompt.projectUuid)),
             bigNumbers,
         );
+        const chartBlocks = canShowInlineTables
+            ? await this.withSlackNativeCharts({
+                  user,
+                  slackPrompt,
+                  reader: slackResultReader,
+                  artifacts: cardArtifacts,
+                  cardBlocks: exploreBlocks,
+                  authorize: authorizeSlackResults,
+              })
+            : null;
         const sqlArtifactBlocks = await getSqlArtifactCardBlocks(
             slackPrompt.promptUuid,
             toolCalls,
@@ -18616,20 +19380,23 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
             response,
         });
 
-        return [
-            ...memoryCitationBlocks,
-            ...tableBlocks,
-            ...exploreBlocks,
-            ...sqlArtifactBlocks,
-            ...editDbtProjectBlocks,
-            ...referencedArtifactsBlocks,
-            ...getAiAccessRefusalBlocks(
-                accessRefusal,
-                this.lightdashConfig.siteUrl,
-            ),
-            ...feedbackBlocks,
-            ...historyBlocks,
-        ];
+        return {
+            blocks: [
+                ...memoryCitationBlocks,
+                ...tableBlocks,
+                ...(chartBlocks?.native ?? exploreBlocks),
+                ...sqlArtifactBlocks,
+                ...editDbtProjectBlocks,
+                ...referencedArtifactsBlocks,
+                ...getAiAccessRefusalBlocks(
+                    accessRefusal,
+                    this.lightdashConfig.siteUrl,
+                ),
+                ...feedbackBlocks,
+                ...historyBlocks,
+            ],
+            chartBlocks,
+        };
     }
 
     private getAgentThreadUrl(
@@ -18657,8 +19424,8 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         };
     }
 
-    // Always ≥1 message so the stream closes. With native tables, the tables and
-    // every block after them (cards, feedback) post as their own last message.
+    // Always ≥1 message so the stream closes. Native tables and charts, with
+    // every block after them (cards, feedback), post as their own last message.
     private static getSlackAnswerMessages({
         slackResponse,
         trailingBlocks,
@@ -18668,8 +19435,8 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         trailingBlocks: (Block | KnownBlock)[];
         threadUrl: string;
     }): (Block | KnownBlock)[][] {
-        const { withAnswer, tableMessage } =
-            splitSlackTableMessage(trailingBlocks);
+        const { withAnswer, dataMessage } =
+            splitSlackDataMessage(trailingBlocks);
         const { messages, truncated } =
             slackResponse === null
                 ? { messages: [], truncated: false }
@@ -18694,9 +19461,23 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                       ]
                     : []),
             ],
-            ...(tableMessage ? [tableMessage] : []),
+            ...(dataMessage ? [dataMessage] : []),
         ].filter((blocks) => blocks.length > 0);
         return composed.length > 0 ? composed : [[]];
+    }
+
+    private static trackNativeChartFallback(promptUuid: string) {
+        let dropped = false;
+        return {
+            dropped: () => dropped,
+            onFallback: (error: unknown) => {
+                dropped = true;
+                Logger.warn('Slack rejected native charts; sending images', {
+                    promptUuid,
+                    error: getErrorMessage(error),
+                });
+            },
+        };
     }
 
     private static readonly SLACK_PROMPT_RETRY_ACTION_ID = 'ai_prompt_retry';
@@ -18749,6 +19530,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         slackResponse,
         slackifiedMarkdown,
         trailingBlocks,
+        chartBlocks,
         accessRefusalState,
         deliveryGuard,
     }: {
@@ -18760,10 +19542,15 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         slackResponse: string;
         slackifiedMarkdown: string;
         trailingBlocks: (Block | KnownBlock)[];
+        /** The native chart segment of trailingBlocks and its image form; null without one. */
+        chartBlocks: SlackChartBlocks | null;
         accessRefusalState: SlackAiAccessRefusalState;
         deliveryGuard: AgentDeliveryGuard;
-    }): Promise<void> {
+    }): Promise<{ nativeChartsDropped: boolean }> {
         const threadUrl = this.getAgentThreadUrl(slackPrompt, agentUuid);
+        const nativeChartFallback = AiAgentService.trackNativeChartFallback(
+            slackPrompt.promptUuid,
+        );
         const messages = AiAgentService.getSlackAnswerMessages({
             slackResponse:
                 accessRefusalState.selected === null ? slackResponse : null,
@@ -18793,18 +19580,19 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         try {
             if (accessRefusalState.selected === null)
                 await deliveryGuard.assert();
-            await this.slackClient.stopAgentStream({
-                organizationUuid: slackPrompt.organizationUuid,
-                channelId: slackPrompt.slackChannelId,
-                threadTs,
-                messageTs: streamTs,
-                chunks: [
-                    {
-                        type: 'blocks',
-                        blocks: messages[0],
-                    },
-                ],
-            });
+            await sendWithSlackNativeChartFallback(
+                messages[0],
+                chartBlocks,
+                (blocks) =>
+                    this.slackClient.stopAgentStream({
+                        organizationUuid: slackPrompt.organizationUuid,
+                        channelId: slackPrompt.slackChannelId,
+                        threadTs,
+                        messageTs: streamTs,
+                        chunks: [{ type: 'blocks', blocks }],
+                    }),
+                nativeChartFallback.onFallback,
+            );
             if (isLast(0)) {
                 accessRefusalState.markDelivered();
             }
@@ -18827,7 +19615,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                         e,
                     ),
                 );
-            return;
+            return { nativeChartsDropped: nativeChartFallback.dropped() };
         }
 
         for (let index = 1; index < messages.length; index += 1) {
@@ -18836,15 +19624,21 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 await (async () => {
                     if (accessRefusalState.selected === null)
                         await deliveryGuard.assert();
-                    return this.slackClient.postMessage({
-                        organizationUuid: slackPrompt.organizationUuid,
-                        channel: slackPrompt.slackChannelId,
-                        thread_ts: threadTs,
-                        text: notificationText,
-                        blocks: messages[index],
-                        unfurl_links: false,
-                        ...(agentName ? { username: agentName } : {}),
-                    });
+                    return sendWithSlackNativeChartFallback(
+                        messages[index],
+                        chartBlocks,
+                        (blocks) =>
+                            this.slackClient.postMessage({
+                                organizationUuid: slackPrompt.organizationUuid,
+                                channel: slackPrompt.slackChannelId,
+                                thread_ts: threadTs,
+                                text: notificationText,
+                                blocks,
+                                unfurl_links: false,
+                                ...(agentName ? { username: agentName } : {}),
+                            }),
+                        nativeChartFallback.onFallback,
+                    );
                 })();
                 if (isLast(index)) {
                     accessRefusalState.markDelivered();
@@ -18881,6 +19675,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 break;
             }
         }
+        return { nativeChartsDropped: nativeChartFallback.dropped() };
     }
 
     private async deliverSlackAnswerMessages({
@@ -18891,6 +19686,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         slackResponse,
         slackifiedMarkdown,
         trailingBlocks,
+        chartBlocks,
         accessRefusalState,
         deliveryGuard,
     }: {
@@ -18901,10 +19697,15 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
         slackResponse: string;
         slackifiedMarkdown: string;
         trailingBlocks: (Block | KnownBlock)[];
+        /** The native chart segment of trailingBlocks and its image form; null without one. */
+        chartBlocks: SlackChartBlocks | null;
         accessRefusalState: SlackAiAccessRefusalState;
         deliveryGuard: AgentDeliveryGuard;
-    }): Promise<void> {
+    }): Promise<{ nativeChartsDropped: boolean }> {
         const threadUrl = this.getAgentThreadUrl(slackPrompt, agentUuid);
+        const nativeChartFallback = AiAgentService.trackNativeChartFallback(
+            slackPrompt.promptUuid,
+        );
         const messages = AiAgentService.getSlackAnswerMessages({
             slackResponse:
                 accessRefusalState.selected === null ? slackResponse : null,
@@ -18938,15 +19739,21 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 const posted = await (async () => {
                     if (accessRefusalState.selected === null)
                         await deliveryGuard.assert();
-                    return this.slackClient.postMessage({
-                        organizationUuid: slackPrompt.organizationUuid,
-                        channel: slackPrompt.slackChannelId,
-                        thread_ts: threadTs,
-                        text: notificationText,
-                        blocks: messages[index],
-                        unfurl_links: false,
-                        ...(agentName ? { username: agentName } : {}),
-                    });
+                    return sendWithSlackNativeChartFallback(
+                        messages[index],
+                        chartBlocks,
+                        (blocks) =>
+                            this.slackClient.postMessage({
+                                organizationUuid: slackPrompt.organizationUuid,
+                                channel: slackPrompt.slackChannelId,
+                                thread_ts: threadTs,
+                                text: notificationText,
+                                blocks,
+                                unfurl_links: false,
+                                ...(agentName ? { username: agentName } : {}),
+                            }),
+                        nativeChartFallback.onFallback,
+                    );
                 })();
                 if (isLast(index)) {
                     accessRefusalState.markDelivered();
@@ -18991,6 +19798,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 responseSlackTs: firstMessageTs,
             });
         }
+        return { nativeChartsDropped: nativeChartFallback.dropped() };
     }
 
     // Builds a SQL Runner share URL for a specific runSql call — used by
@@ -19469,6 +20277,10 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 case 'getPullRequestDiff':
                 case 'listWorkstreams':
                     return 'Inspecting the project files...';
+                case 'proposeSemanticLayerChange':
+                    return 'Checking the change...';
+                case 'readSemanticModel':
+                    return 'Reading the model...';
                 case 'closePullRequest':
                 case 'editContent':
                 case 'createContent':
@@ -19498,6 +20310,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                 case 'delegateResearchTask':
                 case 'submitWorkerFindings':
                 case 'updateUserName':
+                case 'askUser':
                     return 'Answering your question';
                 default:
                     return assertUnreachable(
@@ -19680,6 +20493,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     slackResponse: '',
                     slackifiedMarkdown: refusalMessage,
                     trailingBlocks: getAccessRefusalBlocks(),
+                    chartBlocks: null,
                     accessRefusalState,
                     deliveryGuard,
                 };
@@ -19746,31 +20560,34 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
             }
 
             const finalizationStartedAt = Date.now();
-            const blocks = await this.getSlackAgentFinalBlocks({
-                user,
-                slackPrompt,
-                agent,
-                response,
-                runtimeTableResults,
-                accessRefusal: accessRefusalState.delivered
-                    ? null
-                    : accessRefusalState.selected,
-            });
+            const { blocks, chartBlocks } = await this.getSlackAgentFinalBlocks(
+                {
+                    user,
+                    slackPrompt,
+                    agent,
+                    response,
+                    runtimeTableResults,
+                    accessRefusal: accessRefusalState.delivered
+                        ? null
+                        : accessRefusalState.selected,
+                },
+            );
             const blocksFinishedAt = Date.now();
             const visibleResponse = stripSlackVisualizationSelection(response);
-            const slackResponse = stripMemoryCitations(visibleResponse);
+            const slackResponse = stripCitationsForSlack(visibleResponse);
             const slackifiedMarkdown = slackifyMarkdown(slackResponse).replace(
                 /\\\n/g,
                 '\n',
             );
 
             await flushTaskUpdates();
+            let delivered: { nativeChartsDropped: boolean };
             if (streamTs) {
                 finalizeToolTasksForSuccess();
                 queueReasoningTaskUpdate({ status: 'complete' });
                 await flushTaskUpdates();
                 await updatePlanTitle(completionTitle());
-                await this.deliverSlackAnswerWithCard({
+                delivered = await this.deliverSlackAnswerWithCard({
                     slackPrompt,
                     threadTs,
                     streamTs,
@@ -19779,12 +20596,13 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     slackResponse,
                     slackifiedMarkdown,
                     trailingBlocks: blocks,
+                    chartBlocks,
                     accessRefusalState,
                     deliveryGuard,
                 });
                 await persistCardResponseTs();
             } else {
-                await this.deliverSlackAnswerMessages({
+                delivered = await this.deliverSlackAnswerMessages({
                     slackPrompt,
                     threadTs,
                     agentUuid: agent?.uuid,
@@ -19792,6 +20610,7 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     slackResponse,
                     slackifiedMarkdown,
                     trailingBlocks: blocks,
+                    chartBlocks,
                     accessRefusalState,
                     deliveryGuard,
                 });
@@ -19824,7 +20643,9 @@ ${lines.join('\n')}${guidanceSection}${inlinedSection}`,
                     );
                 if (delivery && !delivery.finished_at) {
                     const hasSelectedImages = getSlackArtifactCardVersions(
-                        blocks,
+                        delivered.nativeChartsDropped && chartBlocks
+                            ? toSlackImageChartBlocks(blocks, chartBlocks)
+                            : blocks,
                     ).some((version) =>
                         Object.hasOwn(delivery.render_inputs, version),
                     );

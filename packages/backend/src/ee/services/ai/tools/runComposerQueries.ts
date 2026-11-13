@@ -1,5 +1,4 @@
 import {
-    COMPOSER_QUERY_PREVIEW_ROW_LIMIT,
     createToolComposerQueriesArgsSchema,
     getSourceQueryResultReferences,
     getSqlApprovalSql,
@@ -15,6 +14,7 @@ import {
     type ToolComposerQueriesSuccessMetadata,
 } from '@lightdash/common';
 import { tool } from 'ai';
+import { markAlreadyReported } from '../../../../sentry/aiAgentErrors';
 import { type AiDecisionClient } from '../decisions/AiDecisionClient';
 import { getEmptyFilterHints } from '../decisions/queryChecks';
 import {
@@ -49,6 +49,8 @@ import {
     getFailedRunNodes,
     isSaved,
     renderComposerNodeListing,
+    renderOtherUnreadNodesNote,
+    shareComposerPreview,
     toNodeColumns,
     toNodeSummary,
 } from './composerQueryPipeline';
@@ -268,6 +270,7 @@ export const getRunComposerQueries = ({
                 const {
                     queries,
                     terminalNodeId: resolvedTerminalNodeId,
+                    otherUnreadNodeIds,
                     appliedParameters,
                 } = built.pipeline;
                 const submittedNodeIds = new Set(
@@ -298,6 +301,7 @@ export const getRunComposerQueries = ({
                     runComposerQueries({
                         queries,
                         terminalNodeId: resolvedTerminalNodeId,
+                        otherUnreadNodeIds,
                         sampleNodeIds: enableDataAccess
                             ? [...submittedNodeIds].filter(
                                   (nodeId) => nodeId !== resolvedTerminalNodeId,
@@ -365,11 +369,20 @@ export const getRunComposerQueries = ({
                         submittedNodeIds,
                         maxQueryLimit,
                     });
-                    throw new WarehouseQueryError(
+                    const composerError = new WarehouseQueryError(
                         `${run.error}\nNodes in this pipeline, failed nodes first. A later call can read any node with rows by node id:\n${nodeListing}`,
                     );
+                    if (run.cause) composerError.cause = run.cause;
+                    throw run.reportedAtSource
+                        ? markAlreadyReported(composerError)
+                        : composerError;
                 }
-                const { terminal, nodeStatuses } = run;
+                const { terminal } = run;
+                const { nodeStatuses, terminalRowLimit } = shareComposerPreview(
+                    run.nodeStatuses,
+                    otherUnreadNodeIds,
+                    terminal.rowCount,
+                );
 
                 if (approvalSql !== null) {
                     await renderState({
@@ -415,7 +428,10 @@ export const getRunComposerQueries = ({
                     submittedNodeIds,
                     maxQueryLimit,
                 });
-                const preview = buildComposerPreview(terminal);
+                const preview = buildComposerPreview(
+                    terminal,
+                    terminalRowLimit,
+                );
                 const { columns } = preview;
                 const columnSummary = columns
                     .map((column) => `${column.reference} (${column.type})`)
@@ -451,14 +467,20 @@ export const getRunComposerQueries = ({
                               review,
                           });
                 const resultSummary = [
-                    `Composer query complete. Terminal node "${resolvedTerminalNodeId}" returned ${terminal.rowCount} rows.`,
+                    `Composer query complete. Terminal node "${resolvedTerminalNodeId}" returned ${terminal.rowCount} rows.${renderOtherUnreadNodesNote(
+                        otherUnreadNodeIds,
+                    )}`,
                     `Nodes in this pipeline:\n${nodeSummary}`,
                     `Terminal columns: ${columnSummary}.`,
                     ...appliedParameters.map(
                         ({ nodeId, ...applied }) =>
                             `Node "${nodeId}":${renderAppliedParameters(applied)}`,
                     ),
-                    `Not visualized yet. To present it to the user, call visualize with nodeId "${resolvedTerminalNodeId}".`,
+                    `Not visualized yet. To present it to the user, call visualize with nodeId "${resolvedTerminalNodeId}"${
+                        otherUnreadNodeIds.length > 0
+                            ? ` (or ${otherUnreadNodeIds.join(', ')})`
+                            : ''
+                    }.`,
                     ...(review && terminal.rowCount !== 0 ? [review] : []),
                     ...(emptyReview !== null ? [emptyReview] : []),
                 ].join('\n');
@@ -482,7 +504,7 @@ export const getRunComposerQueries = ({
                     }
                     const { truncated } = preview;
                     const truncatedNote = truncated
-                        ? `\n(Showing first ${COMPOSER_QUERY_PREVIEW_ROW_LIMIT} of ${terminal.rowCount} rows.)`
+                        ? `\n(Showing first ${preview.rows.length} of ${terminal.rowCount} rows.)`
                         : '';
                     return {
                         result: `${resultSummary}${truncatedNote}\n${serializeData(

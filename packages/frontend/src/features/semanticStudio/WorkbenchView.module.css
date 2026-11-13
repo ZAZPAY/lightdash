@@ -1,0 +1,546 @@
+/* Flat to the page edges: the chat and the workbench split by a line, not cards. Tree and row navigation never animate. */
+.shell {
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'workspace agent';
+    height: 100%;
+    min-height: 0;
+    background: var(--mantine-color-body);
+}
+
+.shell[data-no-chat='true'] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'workspace';
+}
+
+.workspace {
+    grid-area: workspace;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.toolbar {
+    flex: none;
+    min-height: 44px;
+    padding: 6px var(--mantine-spacing-xs);
+    border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+/* Where the person is in the workspace: the models, or the changes the conversation made. */
+.crumb {
+    padding: 4px 6px;
+    border-radius: 6px;
+    color: var(--mantine-color-dimmed);
+    font-size: var(--mantine-font-size-sm);
+}
+
+.crumb:hover {
+    background: color-mix(in srgb, var(--mantine-color-text) 5%, transparent);
+}
+
+.crumb[aria-current='page'] {
+    color: var(--mantine-color-text);
+    font-weight: 500;
+}
+
+/* Live and Changes: where you are, never what you have open. */
+.views {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--mantine-color-text) 5%, transparent);
+}
+
+.view {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 7px;
+    font-size: var(--mantine-font-size-sm);
+    color: var(--mantine-color-dimmed);
+    transition:
+        background-color 140ms var(--ease-out),
+        color 140ms var(--ease-out);
+}
+
+.view:hover {
+    color: var(--mantine-color-text);
+}
+
+.view[aria-selected='true'] {
+    background: var(--mantine-color-body);
+    color: var(--mantine-color-text);
+    font-weight: 500;
+    box-shadow:
+        0 0 0 1px var(--mantine-color-default-border),
+        0 1px 2px rgb(0 0 0 / 6%);
+}
+
+.liveDot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--mantine-color-green-6);
+    transition: box-shadow 140ms var(--ease-out);
+}
+
+.view[aria-selected='true'] .liveDot {
+    box-shadow: 0 0 0 3px var(--mantine-color-green-light);
+}
+
+.tabBadge {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    display: inline-grid;
+    place-items: center;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--mantine-color-text) 9%, transparent);
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--mantine-color-text);
+}
+
+.tabBadge[data-tone='attention'] {
+    background: var(--mantine-color-orange-6);
+    color: var(--mantine-color-white);
+}
+
+.busyDot {
+    position: relative;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--mantine-color-violet-6);
+}
+
+.busyDot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: inherit;
+    animation: ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes ping {
+    75%,
+    100% {
+        transform: scale(2.4);
+        opacity: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .busyDot::after {
+        animation: none;
+    }
+}
+
+/* The open change: its name, where it stands, and what you can do with it. */
+.changeBar {
+    flex: none;
+    min-height: 46px;
+    padding: 6px var(--mantine-spacing-xs);
+    border-bottom: 1px solid var(--mantine-color-default-border);
+    background: color-mix(
+        in srgb,
+        var(--mantine-color-text) 2.5%,
+        var(--mantine-color-body)
+    );
+}
+
+.changeHeader {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.back {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    font-size: var(--mantine-font-size-xs);
+    color: var(--mantine-color-dimmed);
+    transition: color 140ms var(--ease-out);
+}
+
+.back:hover {
+    color: var(--mantine-color-text);
+}
+
+.changeTitleRow {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--mantine-spacing-md);
+}
+
+.changeTitleRow > :last-child {
+    flex: none;
+    margin-left: auto;
+}
+
+.changeTitle {
+    min-width: 0;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+}
+
+.changeMeta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+}
+
+.changeLink {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: var(--mantine-font-size-xs);
+    color: var(--mantine-color-dimmed);
+}
+
+.changeLink:hover {
+    color: var(--mantine-color-text);
+}
+
+.changeName {
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--mantine-font-size-sm);
+    font-weight: 600;
+}
+
+.stageLine {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.workspaceBody {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-areas: 'rail main';
+}
+
+.workspaceBody[data-no-rail='true'] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'main';
+}
+
+@media (max-width: 1200px) {
+    .workspaceBody:not([data-no-rail='true']) {
+        grid-template-columns: 190px minmax(0, 1fr);
+    }
+}
+
+/* Rail */
+
+.rail {
+    grid-area: rail;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-right: 1px solid var(--mantine-color-default-border);
+}
+
+.railHeader {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: var(--mantine-spacing-xs);
+}
+
+.treeScroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0 8px 12px;
+    outline: none;
+}
+
+.treeScroll:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--mantine-primary-color-light);
+}
+
+.treeInner {
+    position: relative;
+}
+
+.treeRow {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-right: 8px;
+    border-radius: 6px;
+    color: var(--mantine-color-text);
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Hover stays quieter than selection, so only one row ever looks picked. */
+.treeRow:hover {
+    background: color-mix(in srgb, var(--mantine-color-text) 3%, transparent);
+}
+
+.treeRow[data-selected='true'] {
+    background: color-mix(in srgb, var(--mantine-color-text) 12%, transparent);
+}
+
+.treeRow[data-selected='true'] .treeLabel {
+    font-weight: 500;
+}
+
+.treeRow[data-restricted='true'] .treeLabel {
+    color: var(--mantine-color-dimmed);
+}
+
+.chevron {
+    width: 14px;
+    flex: none;
+    display: flex;
+    justify-content: center;
+    color: var(--mantine-color-dimmed);
+}
+
+.chevron[data-open='true'] {
+    transform: rotate(90deg);
+}
+
+.treeLabel {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+}
+
+.draftDot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--mantine-color-yellow-6);
+}
+
+/* Someone else's work in development: an outline, so it never reads as yours. */
+.draftDot[data-others] {
+    background: transparent;
+    border: 1px solid var(--mantine-color-yellow-6);
+}
+
+.fileRow:first-child {
+    margin-top: var(--mantine-spacing-xs);
+}
+
+.fileRow {
+    all: unset;
+    box-sizing: border-box;
+    width: 100%;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.fileRow:hover {
+    background: color-mix(in srgb, var(--mantine-color-text) 3%, transparent);
+}
+
+.fileRow:focus-visible {
+    outline: 2px solid var(--mantine-primary-color-filled);
+    outline-offset: -2px;
+}
+
+.fileRow[data-selected='true'] {
+    background: color-mix(in srgb, var(--mantine-color-text) 12%, transparent);
+}
+
+.fileRow[data-selected='true'] .treeLabel {
+    font-weight: 500;
+}
+
+/* Main */
+
+.main {
+    grid-area: main;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    /* The page width settings uses, centred beside the tree. */
+    justify-self: center;
+    width: 100%;
+    max-width: calc(var(--page-content-width) + 48px);
+}
+
+.main[data-full='true'] {
+    max-width: none;
+}
+
+.mainHeader {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 20px 24px 20px;
+}
+
+/* Breadcrumbs: quiet, one line, each level a way back up. */
+.crumbs {
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow: hidden;
+    line-height: 20px;
+}
+
+.crumb {
+    min-width: 0;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--mantine-color-dimmed);
+}
+
+.crumb:hover {
+    color: var(--mantine-color-text);
+    text-decoration: none;
+}
+
+.crumbSeparator {
+    font-size: 12px;
+    color: light-dark(
+        var(--mantine-color-ldGray-4),
+        var(--mantine-color-dark-3)
+    );
+}
+
+.title {
+    flex: 0 1 auto;
+    min-width: 0;
+    letter-spacing: -0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mainBody {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 0 24px 24px;
+    overflow: auto;
+}
+
+/* Children list: the same raised table as the field list. */
+
+.table {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    min-height: 0;
+    background: var(--mantine-color-body);
+    border: 1px solid
+        light-dark(var(--mantine-color-ldGray-2), var(--mantine-color-dark-4));
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.childRow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 96px;
+    align-items: center;
+    gap: 12px;
+    min-height: 40px;
+    padding: 4px 12px;
+    border-bottom: 1px solid
+        light-dark(var(--mantine-color-ldGray-1), var(--mantine-color-dark-5));
+    cursor: pointer;
+}
+
+.childScroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.childInner {
+    position: relative;
+}
+
+.childRow[data-virtual] {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 40px;
+}
+
+/* Explores without descriptions: just the name. */
+.childRow[data-name-only='true'] {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+/* A list of explores: name, then its description. */
+.childRow[data-describe='true'] {
+    grid-template-columns: minmax(200px, 360px) minmax(0, 1fr);
+}
+
+.childDescription {
+    font-size: 13px;
+    color: var(--mantine-color-dimmed);
+}
+
+.childRow[data-virtual]:hover {
+    background: var(--mantine-color-default-hover);
+}
+
+.childRow[data-head] {
+    flex: none;
+    min-height: 32px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--mantine-color-dimmed);
+    border-bottom-color: light-dark(
+        var(--mantine-color-ldGray-2),
+        var(--mantine-color-dark-4)
+    );
+    cursor: default;
+}
+
+.alignRight {
+    text-align: right;
+}
+
+.childLabel {
+    font-size: 13px;
+    font-weight: 500;
+}

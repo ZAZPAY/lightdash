@@ -1,9 +1,10 @@
-import { type SourceQuery } from '@lightdash/common';
+import { QuerySourceType, type SourceQuery } from '@lightdash/common';
 import {
     ActionIcon,
     Badge,
     Box,
     Button,
+    Collapse,
     Group,
     Stack,
     Text,
@@ -28,23 +29,35 @@ import {
     type Ref,
 } from 'react';
 import MantineIcon from '../../../../../../../components/common/MantineIcon';
+import useIsEmbedded from '../../../../../../providers/Embed/useIsEmbedded';
 import { useUiStrings } from '../../../../../../providers/Embed/useUiStrings';
 import { useCanViewAiAgentSql } from '../../../../hooks/useCanViewAiAgentSql';
 import { useComposerNodeRowsLabel } from '../../composerNodeStatus';
 import { NodeStatusIndicator } from '../../ComposerNodeStatusIndicator';
 import { type ComposerRunNodeStatus } from '../../useComposerRunNodeStatuses';
 import { ComposerNodeIcon } from '../ComposerNodeIcon';
-import { nodeTypeLabelOf, type PipelineNode } from '../groupPipeline';
-import { CellQueryPanels, CellQueryToggles, ExploreSource } from './NodeQuery';
+import { type NodeLineage, type PipelineNode } from '../groupPipeline';
+import { MergeStepBody, MergeStepTitle } from '../MergeStep';
+import { MergeStepProvider } from '../MergeStepParts';
+import { NodeReferencePill } from '../NodeReferencePill';
+import { useComposerNodeTypeLabel } from '../useComposerNodeLiveSource';
+import {
+    CellQueryPanels,
+    CellQueryToggles,
+    ExploreSource,
+    MergeCellToggles,
+} from './NodeQuery';
 import styles from './PipelineNotebook.module.css';
 import {
     hasQueryDetails,
     semanticQueryOf,
     type QueryPanel,
 } from './semanticQueryOf';
-import { useExploreFromHere } from './useExploreFromHere';
+import { getNodeExploreUrl, useExploreFromHere } from './useExploreFromHere';
+import { useMergeNodeView } from './useMergeNodeView';
 
 const FLASH_MS = 1200;
+const CELL_SCROLL_GAP = 16;
 
 const formatDuration = (ms: number) =>
     ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
@@ -70,34 +83,51 @@ export type PipelineNotebookProps = {
     chatNodeIds: ReadonlySet<string>;
     /** Null when the pipeline can't be pinned to a chat. */
     onAddToChat: ((node: PipelineNode) => void) | null;
+    /** Selects the node in the lineage graph. */
+    onSelectNode: (nodeId: string) => void;
+    /** The lineage drawn in the notebook. */
+    onLineageChange: (lineage: NodeLineage | null) => void;
+    /** Scrolled to with its results open once the run has its result. */
+    initialFocusNodeId: string | null;
 };
 
 const CellStatus: FC<{
     query: SourceQuery;
     status: ComposerRunNodeStatus | undefined;
-}> = ({ query, status }) => (
-    <Tooltip label={nodeTypeLabelOf(query)}>
-        <Box className={styles.cellIcon}>
-            {status && status.status !== 'success' ? (
-                <NodeStatusIndicator status={status.status} />
-            ) : (
-                <ComposerNodeIcon query={query} size={14} />
-            )}
-        </Box>
-    </Tooltip>
-);
+}> = ({ query, status }) => {
+    const typeLabel = useComposerNodeTypeLabel(query);
+    return (
+        <Tooltip label={typeLabel}>
+            <Box className={styles.cellIcon}>
+                {status && status.status !== 'success' ? (
+                    <NodeStatusIndicator status={status.status} />
+                ) : (
+                    <ComposerNodeIcon query={query} size={14} />
+                )}
+            </Box>
+        </Tooltip>
+    );
+};
 
 type CellProps = Omit<
     PipelineNotebookProps,
-    'ref' | 'nodes' | 'chatNodeIds'
+    | 'ref'
+    | 'nodes'
+    | 'chatNodeIds'
+    | 'onSelectNode'
+    | 'onLineageChange'
+    | 'initialFocusNodeId'
 > & {
     node: PipelineNode;
+    resultsInitiallyOpen: boolean;
     /** The nodes this one reads. */
     references: PipelineNode[];
     inChat: boolean;
     flashing: boolean;
     onJump: (nodeId: string) => void;
     onLineageHover: (hovering: boolean) => void;
+    /** Highlights one step this cell reads in the graph; null clears it. */
+    onHighlightNode: (nodeId: string | null) => void;
 };
 
 const NotebookCell: FC<CellProps> = ({
@@ -112,14 +142,28 @@ const NotebookCell: FC<CellProps> = ({
     flashing,
     onJump,
     onLineageHover,
+    onHighlightNode,
+    resultsInitiallyOpen,
 }) => {
     const getUiString = useUiStrings();
     const rowsLabel = useComposerNodeRowsLabel();
-    const canViewSql = useCanViewAiAgentSql();
-    const exploreFromHere = useExploreFromHere(projectUuid);
-    const [resultsOpen, setResultsOpen] = useState(false);
+    const isEmbed = useIsEmbedded();
+    const canViewAgentSql = useCanViewAiAgentSql();
+    const exploreFromHere = useExploreFromHere();
+    const [resultsOpen, setResultsOpen] = useState(resultsInitiallyOpen);
     const status = nodeStatuses[node.nodeId];
     const semanticQuery = semanticQueryOf(node.query);
+    const mergeView = useMergeNodeView(node.query, references, projectUuid);
+    // Merges compile through an endpoint embed accounts cannot call
+    const canViewSql =
+        canViewAgentSql &&
+        !(node.query.sourceType === QuerySourceType.MERGE && isEmbed);
+    const referenceQueries = references.map((reference) => reference.query);
+    const getExploreUrl = getNodeExploreUrl(
+        node.query,
+        referenceQueries,
+        projectUuid,
+    );
     const hasResult =
         displayableNodeIds.has(node.nodeId) &&
         (status === undefined || status.status === 'success');
@@ -148,7 +192,7 @@ const NotebookCell: FC<CellProps> = ({
     const [openPanels, setOpenPanels] = useState<ReadonlySet<QueryPanel>>(
         () =>
             new Set(
-                semanticQuery && hasQueryDetails(semanticQuery)
+                mergeView || (semanticQuery && hasQueryDetails(semanticQuery))
                     ? ['details']
                     : [],
             ),
@@ -203,13 +247,13 @@ const NotebookCell: FC<CellProps> = ({
                             {addToChatLabel}
                         </Button>
                     )}
-                    {semanticQuery && exploreFromHere && (
+                    {getExploreUrl && exploreFromHere && (
                         <Tooltip label={exploreLabel}>
                             <ActionIcon
                                 size="sm"
                                 aria-label={exploreLabel}
                                 onClick={() =>
-                                    void exploreFromHere(semanticQuery)
+                                    void exploreFromHere(getExploreUrl())
                                 }
                             >
                                 <MantineIcon icon={IconTelescope} />
@@ -224,6 +268,7 @@ const NotebookCell: FC<CellProps> = ({
                     data-flash={flashing}
                     data-empty={
                         !semanticQuery &&
+                        !mergeView &&
                         !canViewSql &&
                         !hasError &&
                         !hasResult &&
@@ -248,8 +293,35 @@ const NotebookCell: FC<CellProps> = ({
                             />
                         </Group>
                     )}
+                    {mergeView && (
+                        <MergeStepProvider
+                            view={mergeView}
+                            references={references}
+                            onJump={onJump}
+                            onHighlightNode={onHighlightNode}
+                        >
+                            <Group
+                                justify="space-between"
+                                wrap="nowrap"
+                                className={styles.toolbar}
+                            >
+                                <MergeStepTitle view={mergeView} />
+                                <MergeCellToggles
+                                    canViewSql={canViewSql}
+                                    openPanels={openPanels}
+                                    onTogglePanel={togglePanel}
+                                />
+                            </Group>
+                            <Collapse expanded={openPanels.has('details')}>
+                                <Box className={styles.panel}>
+                                    <MergeStepBody view={mergeView} />
+                                </Box>
+                            </Collapse>
+                        </MergeStepProvider>
+                    )}
                     <CellQueryPanels
                         query={node.query}
+                        reads={referenceQueries}
                         projectUuid={projectUuid}
                         canViewSql={canViewSql}
                         openPanels={openPanels}
@@ -302,7 +374,7 @@ const NotebookCell: FC<CellProps> = ({
                         </Box>
                     )}
                 </Box>
-                {references.length > 0 && (
+                {references.length > 0 && !mergeView && (
                     <Group gap="xs" pl="xxs">
                         <MantineIcon
                             icon={IconHash}
@@ -313,19 +385,21 @@ const NotebookCell: FC<CellProps> = ({
                             {getUiString('aiAgent.composer.node.references')}
                         </Text>
                         {references.map((reference) => (
-                            <UnstyledButton
+                            <NodeReferencePill
                                 key={reference.nodeId}
-                                className={styles.referencePill}
-                                onClick={() => onJump(reference.nodeId)}
-                                onMouseEnter={() => onLineageHover(true)}
-                                onMouseLeave={() => onLineageHover(false)}
-                            >
-                                <ComposerNodeIcon
-                                    query={reference.query}
-                                    size={12}
-                                />
-                                {reference.title}
-                            </UnstyledButton>
+                                node={reference}
+                                leading={
+                                    <ComposerNodeIcon
+                                        query={reference.query}
+                                        size={12}
+                                    />
+                                }
+                                onJump={onJump}
+                                onHighlight={onLineageHover}
+                                details={null}
+                                active={false}
+                                trailing={null}
+                            />
                         ))}
                     </Group>
                 )}
@@ -353,32 +427,17 @@ const branchPath = (
     return `M ${trunkX} ${y} H ${endX}`;
 };
 
-/** A trunk in the gutter with a branch into each cell; the hovered cell's branch drawn on its own. */
-const lineagePaths = (
-    relatedYs: number[],
-    hoveredY: number,
-    trunkX: number,
-    endX: number,
-) => {
-    const ys = [...relatedYs, hoveredY];
+/** A trunk in the gutter with a branch into each cell. */
+const lineagePath = (ys: number[], trunkX: number, endX: number) => {
     const top = Math.min(...ys);
     const bottom = Math.max(...ys);
-    return {
-        d: [
-            `M ${trunkX} ${top + CORNER} V ${bottom - CORNER}`,
-            ...relatedYs.map((y) => branchPath(y, top, bottom, trunkX, endX)),
-        ].join(' '),
-        anchorD: branchPath(hoveredY, top, bottom, trunkX, endX),
-    };
+    return [
+        `M ${trunkX} ${top + CORNER} V ${bottom - CORNER}`,
+        ...ys.map((y) => branchPath(y, top, bottom, trunkX, endX)),
+    ].join(' ');
 };
 
-type Lineage = {
-    nodeId: string;
-    relatedIds: ReadonlySet<string>;
-    d: string;
-    /** The hovered cell's own branch, drawn darker. */
-    anchorD: string;
-};
+type Lineage = NodeLineage & { d: string };
 
 // Skips cells the pointer only sweeps across.
 const HOVER_INTENT_MS = 150;
@@ -388,8 +447,12 @@ export const PipelineNotebook: FC<PipelineNotebookProps> = ({
     ref,
     nodes,
     chatNodeIds,
+    onSelectNode,
+    onLineageChange,
+    initialFocusNodeId,
     ...cellProps
 }) => {
+    const notebookEl = useRef<HTMLDivElement>(null);
     const cellEls = useRef(new Map<string, HTMLDivElement>());
     const [flashNodeId, setFlashNodeId] = useState<string | null>(null);
     const [lineage, setLineage] = useState<Lineage | null>(null);
@@ -400,10 +463,23 @@ export const PipelineNotebook: FC<PipelineNotebookProps> = ({
         () => new Map(nodes.map((node) => [node.nodeId, node])),
         [nodes],
     );
+    const hideLineage = () => {
+        window.clearTimeout(intentTimer.current);
+        setIsLineageVisible(false);
+        onLineageChange(null);
+    };
     const focusNode = (nodeId: string) => {
-        cellEls.current
-            .get(nodeId)
-            ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        onSelectNode(nodeId);
+        // Lines drawn before the scroll would leave a hook pointing off-screen.
+        hideLineage();
+        const cell = cellEls.current.get(nodeId);
+        // Scrolls only the notebook; scrollIntoView would also nudge the page.
+        if (cell) {
+            notebookEl.current?.scrollTo({
+                top: cell.offsetTop - CELL_SCROLL_GAP,
+                behavior: 'smooth',
+            });
+        }
         setFlashNodeId(nodeId);
         window.setTimeout(
             () =>
@@ -432,13 +508,19 @@ export const PipelineNotebook: FC<PipelineNotebookProps> = ({
             return el ? [y(el)] : [];
         });
         if (relatedYs.length === 0) return;
-        const hoveredY = y(hovered);
+        const nodeLineage = { nodeId, relatedIds: new Set(related) };
         setLineage({
-            nodeId,
-            relatedIds: new Set(related),
-            ...lineagePaths(relatedYs, hoveredY, trunkX, endX),
+            ...nodeLineage,
+            d: lineagePath([...relatedYs, y(hovered)], trunkX, endX),
         });
         setIsLineageVisible(true);
+        onLineageChange(nodeLineage);
+    };
+    const highlightNode = (nodeId: string | null, fromNodeId: string) => {
+        hideLineage();
+        if (nodeId) {
+            onLineageChange({ nodeId, relatedIds: new Set([fromNodeId]) });
+        }
     };
     const showLineage = (nodeId: string) => {
         window.clearTimeout(intentTimer.current);
@@ -447,31 +529,37 @@ export const PipelineNotebook: FC<PipelineNotebookProps> = ({
             HOVER_INTENT_MS,
         );
     };
-    const hideLineage = () => {
-        window.clearTimeout(intentTimer.current);
-        setIsLineageVisible(false);
-    };
     useEffect(() => () => window.clearTimeout(intentTimer.current), []);
+
+    const hasFocusedInitialNode = useRef(false);
+    useEffect(() => {
+        if (
+            hasFocusedInitialNode.current ||
+            initialFocusNodeId === null ||
+            !cellProps.displayableNodeIds.has(initialFocusNodeId)
+        ) {
+            return;
+        }
+        hasFocusedInitialNode.current = true;
+        focusNode(initialFocusNodeId);
+    });
 
     useImperativeHandle(ref, () => ({ focusNode, showLineage, hideLineage }));
 
     return (
-        <Stack gap="lg" className={styles.notebook}>
+        <Stack
+            gap="lg"
+            className={styles.notebook}
+            ref={notebookEl}
+            data-focus-room={initialFocusNodeId !== null}
+        >
             <svg
                 className={styles.lineage}
                 data-lineage
                 data-visible={isLineageVisible}
                 aria-hidden
             >
-                {lineage && (
-                    <>
-                        <path d={lineage.d} />
-                        <path
-                            d={lineage.anchorD}
-                            className={styles.lineageAnchor}
-                        />
-                    </>
-                )}
+                {lineage && <path d={lineage.d} />}
             </svg>
             {nodes.map((node) => (
                 <Box
@@ -480,6 +568,7 @@ export const PipelineNotebook: FC<PipelineNotebookProps> = ({
                         if (el) cellEls.current.set(node.nodeId, el);
                         else cellEls.current.delete(node.nodeId);
                     }}
+                    onClick={() => onSelectNode(node.nodeId)}
                     data-lineage-role={
                         !isLineageVisible || !lineage
                             ? undefined
@@ -498,9 +587,15 @@ export const PipelineNotebook: FC<PipelineNotebookProps> = ({
                         })}
                         inChat={chatNodeIds.has(node.nodeId)}
                         flashing={flashNodeId === node.nodeId}
+                        resultsInitiallyOpen={
+                            node.nodeId === initialFocusNodeId
+                        }
                         onJump={focusNode}
                         onLineageHover={(hovering) =>
                             hovering ? showLineage(node.nodeId) : hideLineage()
+                        }
+                        onHighlightNode={(nodeId) =>
+                            highlightNode(nodeId, node.nodeId)
                         }
                         {...cellProps}
                     />

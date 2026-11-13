@@ -24,7 +24,9 @@ import {
 import {
     selectInvalidateCache,
     selectParameterValues,
+    selectRefreshCounter,
     useDashboardSelector,
+    useTileDashboardParameterInputs,
 } from '../../features/dashboard/store';
 import { useSavedSqlChartResults } from '../../features/sqlRunner/hooks/useSavedSqlChartResults';
 import useDashboardFiltersForTile from '../../hooks/dashboard/useDashboardFiltersForTile';
@@ -114,8 +116,11 @@ const SqlChartTile: FC<Props> = ({
     const updateSqlChartTilesMetadata = useDashboardTileStatusContext(
         (c) => c.updateSqlChartTilesMetadata,
     );
-    const parameters = useDashboardSelector(selectParameterValues);
+    const appliedParameterValues = useDashboardSelector(selectParameterValues);
+    const { dashboardValues: parameters, excludedParameterKeys } =
+        useTileDashboardParameterInputs(tile.uuid, appliedParameterValues);
     const invalidateCache = useDashboardSelector(selectInvalidateCache);
+    const refreshCounter = useDashboardSelector(selectRefreshCounter);
     const addParameterReferences = useDashboardContext(
         (c) => c.addParameterReferences,
     );
@@ -158,6 +163,7 @@ const SqlChartTile: FC<Props> = ({
                   dashboardFilters,
                   dashboardSorts: [],
                   parameters,
+                  excludedParameterKeys,
                   isEmbed: true,
               }
             : {
@@ -169,7 +175,9 @@ const SqlChartTile: FC<Props> = ({
                   dashboardFilters,
                   dashboardSorts: [],
                   parameters,
+                  excludedParameterKeys,
                   invalidateCache,
+                  refreshCounter,
               },
     );
     const connections = useConnectionBadges(effectiveProjectUuid);

@@ -95,22 +95,21 @@ export type OrganizationSettings = {
      */
     corsAllowedDomains: string[] | null;
     /**
-     * Whether a data app version gets a thumbnail captured automatically when
-     * it becomes ready. On unless the org turned it off, so `null` (or no
-     * stored row) resolves to `true`. Always resolved to `false` while
-     * {@link OrganizationSettings.dataAppCapturesEnabled} is off.
-     */
-    dataAppAutomaticThumbnailsEnabled: boolean | null;
-    /**
      * Whether images of a running data app, and files, may be captured or
      * attached anywhere in the data app builder: prompt-bar screenshots, file
-     * attachments sent to the coding agent, manual and automatic thumbnails,
-     * and the Slack build-outcome image. Inherits and is capped by the
-     * instance-wide `LIGHTDASH_APP_CAPTURES_ENABLED` (the ceiling): an org can
-     * turn captures off, never back on past the env. `null` inherits it.
+     * attachments sent to the coding agent, manual thumbnails, and the Slack
+     * build-outcome image. Inherits and is capped by the instance-wide
+     * `LIGHTDASH_APP_CAPTURES_ENABLED` (the ceiling): an org can turn captures
+     * off, never back on past the env. `null` inherits it.
      * Always resolved to an effective boolean in API responses.
      */
     dataAppCapturesEnabled: boolean | null;
+    /**
+     * Whether data app uploads may declare custom npm dependencies. Off by
+     * default; only org admins can change it. Uploaders also need the
+     * `manage:DataAppDependency` permission.
+     */
+    dataAppCustomDependenciesEnabled: boolean;
 };
 
 export const DEFAULT_INVITE_LINK_EXPIRATION_DAYS = 3;
@@ -291,10 +290,7 @@ export type OrganizationSettingsInstanceDefaults = {
 const resolveEffectiveOrganizationSettingsFields = (
     raw: Partial<OrganizationSettings>,
     instanceDefaults: OrganizationSettingsInstanceDefaults,
-): Omit<
-    OrganizationSettings,
-    'dataAppCapturesEnabled' | 'dataAppAutomaticThumbnailsEnabled'
-> => ({
+): Omit<OrganizationSettings, 'dataAppCapturesEnabled'> => ({
     oidcLinkingEnabled:
         raw.oidcLinkingEnabled ?? instanceDefaults.enableOidcLinking,
     oidcToEmailLinkingEnabled:
@@ -325,6 +321,8 @@ const resolveEffectiveOrganizationSettingsFields = (
     queryLimit: raw.queryLimit ?? instanceDefaults.queryLimit,
     csvCellsLimit: raw.csvCellsLimit ?? instanceDefaults.csvCellsLimit,
     corsAllowedDomains: raw.corsAllowedDomains ?? [],
+    dataAppCustomDependenciesEnabled:
+        raw.dataAppCustomDependenciesEnabled ?? false,
 });
 
 /**
@@ -338,17 +336,10 @@ const resolveEffectiveOrganizationSettingsFields = (
 export const resolveEffectiveOrganizationSettings = (
     raw: Partial<OrganizationSettings>,
     instanceDefaults: OrganizationSettingsInstanceDefaults,
-): OrganizationSettings => {
+): OrganizationSettings => ({
+    ...resolveEffectiveOrganizationSettingsFields(raw, instanceDefaults),
     // The env is a ceiling: an org may turn captures off, never on past it.
-    const dataAppCapturesEnabled =
+    dataAppCapturesEnabled:
         instanceDefaults.dataAppCapturesEnabled &&
-        (raw.dataAppCapturesEnabled ?? true);
-    return {
-        ...resolveEffectiveOrganizationSettingsFields(raw, instanceDefaults),
-        dataAppCapturesEnabled,
-        // Automatic thumbnails are a capture, so they follow the switch.
-        dataAppAutomaticThumbnailsEnabled:
-            dataAppCapturesEnabled &&
-            (raw.dataAppAutomaticThumbnailsEnabled ?? true),
-    };
-};
+        (raw.dataAppCapturesEnabled ?? true),
+});

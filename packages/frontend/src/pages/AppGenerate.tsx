@@ -133,6 +133,7 @@ import { useCaptureThumbnail } from '../features/apps/hooks/useCaptureThumbnail'
 import { useClarificationRound } from '../features/apps/hooks/useClarificationRound';
 import { useDataAppCapturesEnabled } from '../features/apps/hooks/useDataAppCapturesEnabled';
 import { useDataAppModelSelection } from '../features/apps/hooks/useDataAppModelSelection';
+import { useDataAppProjectContext } from '../features/apps/hooks/useDataAppProjectContext';
 import { useElementPicker } from '../features/apps/hooks/useElementPicker';
 import { useGenerateApp } from '../features/apps/hooks/useGenerateApp';
 import { useGetApp } from '../features/apps/hooks/useGetApp';
@@ -143,7 +144,10 @@ import {
     countReadyQueriesSinceBoundary,
     useTrackedAppQueries,
 } from '../features/apps/hooks/useTrackedAppQueries';
-import { useTrackedExternalRequests } from '../features/apps/hooks/useTrackedExternalRequests';
+import {
+    useTrackedAppStateEvents,
+    useTrackedExternalRequests,
+} from '../features/apps/hooks/useTrackedExternalRequests';
 import { getTemplate } from '../features/apps/templates';
 import {
     toAppClarifyParams,
@@ -182,6 +186,7 @@ import { useAppExternalConnections } from '../features/externalConnections/hooks
 import { ThemePicker } from '../features/organizationDesigns/components/ThemePicker';
 import { useOrganizationDesigns } from '../features/organizationDesigns/hooks/useOrganizationDesigns';
 import useToaster from '../hooks/toaster/useToaster';
+import { useProject } from '../hooks/useProject';
 import { useOptionalProjectRoute } from '../hooks/useProjectRoute';
 import { useProjectUuid } from '../hooks/useProjectUuid';
 import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
@@ -334,6 +339,8 @@ const AppGenerate: FC = () => {
     );
     const { appUuid: urlAppUuid } = useParams();
     const projectUuid = useProjectUuid();
+    const dataAppProjectContext = useDataAppProjectContext(projectUuid);
+    const { isInitialLoading: isProjectLoading } = useProject(projectUuid);
     const projectRoute = useOptionalProjectRoute();
     const navigate = useNavigate();
     const location = useLocation();
@@ -424,6 +431,12 @@ const AppGenerate: FC = () => {
         clearExternalRequests,
         interruptInFlightRequests,
     } = useTrackedExternalRequests();
+    const {
+        appStateEvents,
+        handleAppStateEvent,
+        clearAppStateEvents,
+        interruptInFlightAppStateEvents,
+    } = useTrackedAppStateEvents();
     // Parent-owned visibility so the X dismisses the panel completely and the
     // user re-opens it from the dots menu — same model as preview, for
     // consistency. Defaults to visible because the builder is the technical
@@ -541,6 +554,7 @@ const AppGenerate: FC = () => {
         // parent-owned fetch/poll of an in-flight query.
         resetQueries();
         clearExternalRequests();
+        clearAppStateEvents();
         setScreenshotAvailable(false);
         setIsCapturingScreenshot(false);
         setLineageEnabled(false);
@@ -562,6 +576,7 @@ const AppGenerate: FC = () => {
     }, [
         resetQueries,
         clearExternalRequests,
+        clearAppStateEvents,
         resetClarification,
         clearElementRefs,
         cancelElementPicker,
@@ -1198,10 +1213,7 @@ const AppGenerate: FC = () => {
         onSourcesExpired: reloadPreviewForExpiredSources,
         openThread: openAnalysisThread,
     });
-    const showAnalysisInPreview =
-        analysisAvailability.status === 'available' ||
-        (analysisAvailability.status === 'unavailable' &&
-            analysisAvailability.reason !== 'not_rolled_out');
+    const showAnalysisInPreview = analysisAvailability.status !== 'loading';
     // The rendered bundle told us it subscribes to analysis. Scoped to the
     // previewed version so a rebuild that drops it clears the note.
     const previewScope = previewApp
@@ -1315,6 +1327,7 @@ const AppGenerate: FC = () => {
         if (persistLogs) {
             interruptInFlightQueries();
             interruptInFlightRequests();
+            interruptInFlightAppStateEvents();
             versionQueryBoundaryRef.current = trackedQueriesRef.current.filter(
                 (q) => q.status === 'ready',
             ).length;
@@ -1324,6 +1337,7 @@ const AppGenerate: FC = () => {
             // query's late terminal event must not resurrect as a phantom row.
             resetQueries();
             clearExternalRequests();
+            clearAppStateEvents();
             versionQueryBoundaryRef.current = 0;
         }
     }, [
@@ -1332,7 +1346,9 @@ const AppGenerate: FC = () => {
         interruptInFlightQueries,
         resetQueries,
         interruptInFlightRequests,
+        interruptInFlightAppStateEvents,
         clearExternalRequests,
+        clearAppStateEvents,
     ]);
 
     // Manual refresh counter for the preview iframe. The iframe URL embeds
@@ -1431,19 +1447,23 @@ const AppGenerate: FC = () => {
         if (persistLogs) {
             interruptInFlightQueries();
             interruptInFlightRequests();
+            interruptInFlightAppStateEvents();
         } else {
             // resetQueries (not clearQueries): the reload leaves the
             // parent-owned fetch/poll running, so a late terminal event would
             // otherwise land as a phantom row.
             resetQueries();
             clearExternalRequests();
+            clearAppStateEvents();
         }
     }, [
         persistLogs,
         interruptInFlightQueries,
         resetQueries,
         interruptInFlightRequests,
+        interruptInFlightAppStateEvents,
         clearExternalRequests,
+        clearAppStateEvents,
     ]);
     refreshPreviewRef.current = handleRefreshPreview;
 
@@ -1601,19 +1621,17 @@ const AppGenerate: FC = () => {
         ? ability.can(
               'manage',
               subject('DataApp', {
-                  organizationUuid: user.data?.organizationUuid,
-                  projectUuid,
+                  ...dataAppProjectContext,
                   access: userSpaceAccess ? [userSpaceAccess] : [],
                   createdByUserUuid: appCreatedByUserUuid,
               }),
           )
         : ability.can(
               'create',
-              subject('DataApp', {
-                  organizationUuid: user.data?.organizationUuid,
-                  projectUuid,
-              }),
+              subject('DataApp', { ...dataAppProjectContext }),
           );
+    // Preview-only grants need the project's type and creator before they match.
+    if (isProjectLoading) return null;
     if (!canAccessApp) {
         return <Navigate to={`/projects/${projectUuid}/home`} replace />;
     }
@@ -3371,6 +3389,10 @@ const AppGenerate: FC = () => {
                                         views: appViews,
                                         slug: appSlug,
                                         verification: appVerification,
+                                        consumerAccess:
+                                            appData?.pages[0]
+                                                ?.latestReadyVersionConsumerAccess ??
+                                            null,
                                     }}
                                     rightSection={
                                         <AppHeaderActions
@@ -3556,6 +3578,7 @@ const AppGenerate: FC = () => {
                                         onExternalRequestEvent={
                                             handleExternalRequestEvent
                                         }
+                                        onAppStateEvent={handleAppStateEvent}
                                         {...elementPicker.iframeProps}
                                         onElementSelected={(event) => {
                                             elementPicker.select(event);
@@ -3622,6 +3645,10 @@ const AppGenerate: FC = () => {
                                         externalRequests={externalRequests}
                                         onClearExternalRequests={
                                             clearExternalRequests
+                                        }
+                                        appStateEvents={appStateEvents}
+                                        onClearAppStateEvents={
+                                            clearAppStateEvents
                                         }
                                         persistLogs={persistLogs}
                                         onPersistLogsChange={setPersistLogs}

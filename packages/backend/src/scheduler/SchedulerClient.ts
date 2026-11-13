@@ -522,6 +522,9 @@ export class SchedulerClient {
                 projectId: scheduler.projectUuid,
                 schedulerId: schedulerUuid,
                 groupId: id,
+                ...(isCreateScheduler(scheduler) && {
+                    useCachedResults: scheduler.useCachedResults === true,
+                }),
             },
         });
 
@@ -1575,6 +1578,34 @@ export class SchedulerClient {
         return { jobId };
     }
 
+    async warmWarehouseTablesCache(payload: TraceTaskBase) {
+        const graphileClient = await this.graphileUtils;
+        const now = new Date();
+        const jobId = await SchedulerClient.addJob(
+            graphileClient,
+            SCHEDULER_TASKS.WARM_WAREHOUSE_TABLES_CACHE,
+            payload,
+            now,
+            JobPriority.LOW,
+            1,
+        );
+
+        await this.schedulerModel.logSchedulerJob({
+            task: SCHEDULER_TASKS.WARM_WAREHOUSE_TABLES_CACHE,
+            jobId,
+            scheduledTime: now,
+            status: SchedulerJobStatus.SCHEDULED,
+            details: {
+                userUuid: payload.userUuid,
+                organizationUuid: payload.organizationUuid,
+                projectUuid: payload.projectUuid,
+                createdByUserUuid: payload.userUuid,
+            },
+        });
+
+        return { jobId };
+    }
+
     async backfillDefaultUserSpaces(payload: BackfillDefaultUserSpacesPayload) {
         const graphileClient = await this.graphileUtils;
         const now = new Date();
@@ -1796,7 +1827,8 @@ export class SchedulerClient {
             {
                 queueName: 'usage-events-compaction',
                 jobKey: `initial-usage-processing:${payload.organizationUuid}`,
-                jobKeyMode: 'unsafe_dedupe',
+                // Recreating the project must revive failed initial processing.
+                jobKeyMode: 'preserve_run_at',
                 maxAttempts: 1,
                 priority: JobPriority.LOW,
             },

@@ -5,13 +5,12 @@ import {
     getDefaultChartTileSize,
     getItemId,
     getShadowedReservedNames,
+    isDashboardControlOrder,
     mergeDashboardCustomMetrics,
-    normalizeDateZoomConfig,
     removeDateZoomTileTargets,
     ChartType,
     ContentType,
     DashboardTileTypes,
-    DateGranularity,
     FeatureFlags,
     type AdditionalMetric,
     type DashboardFilterRule,
@@ -60,22 +59,30 @@ import {
     useReopenDraftMutation,
 } from '../features/contentAsCode/hooks/useContentDrafts';
 import {
+    settingChange,
+    type PendingChange,
+} from '../features/dashboard/pendingChanges/getPendingChanges';
+import {
     getSafeTemporaryFilters,
     selectActiveTab,
     selectDashboardCustomMetrics,
     selectDashboardFilters,
     selectDashboardParameterDefinitions,
     selectDashboardParameterReferences,
+    selectAreParameterControlsSaved,
     selectDashboardParameters,
     selectDashboardTabs,
     selectDashboardTiles,
+    selectControlOrder,
     selectControlSections,
+    selectHasControlOrderChanged,
     selectHasDefaultDateZoomGranularityChanged,
     selectHasParameterOrderChanged,
     selectHaveControlSectionsChanged,
     selectHaveCustomMetricsChanged,
     selectHaveDateZoomGranularitiesChanged,
     selectHaveFiltersChanged,
+    selectHaveParameterControlsChanged,
     selectHavePinnedParametersChanged,
     selectHaveTabsChanged,
     selectHaveTilesChanged,
@@ -83,12 +90,15 @@ import {
     selectIsDateZoomDisabled,
     selectMissingRequiredParameters,
     selectOldestCacheTime,
+    selectParameterControls,
     selectParameterOrder,
+    selectParameterPicks,
     selectParametersHaveChanged,
     selectParameterValues,
     selectPinnedParameters,
     selectRawTemporaryFilters,
     dashboardEditActions,
+    dashboardParametersActions,
     useAreAllChartsLoaded,
     useDashboardDateZoomConfig,
     useDashboardDateZoomGranularities,
@@ -101,11 +111,14 @@ import {
     useRequiredFiltersNote,
 } from '../features/dashboard/store';
 import TileQueryQueueProvider from '../features/dashboard/tileQueryQueue/TileQueryQueueProvider';
-import { ControlsSidebarPage } from '../features/dashboardControls/ControlsSidebarPage';
+import { ControlsEditorPage } from '../features/dashboardControls/ControlsEditorPage';
 import { DashboardHeaderGuard } from '../features/dashboardControls/DashboardHeaderGuard';
+import { useControlDraftResets } from '../features/dashboardControls/useControlDraftResets';
+import { type EditFiltersVisibility } from '../features/dashboardFilters/EditFiltersVisibilityControl';
 import { getDimensionFiltersToSave } from '../features/dashboardFilters/FilterConfiguration/utils';
 import { FilterBarPopoversProvider } from '../features/dashboardFilters/FilterRequirements/FilterBarPopoversProvider';
 import DashboardTabs from '../features/dashboardTabs';
+import { ACTUAL_SIZE_ZOOM } from '../features/dashboardTabs/canvasZoomUtils';
 import { useFitToScreen } from '../features/dashboardTabs/useFitToScreen';
 import { isLeavingTrainingCopy } from '../features/scopeTours/trainingCopy';
 import {
@@ -134,7 +147,11 @@ import useDashboardTileStatusContext from '../providers/Dashboard/useDashboardTi
 import useNativeFullscreenToggle from '../providers/Fullscreen/useNativeFullscreenToggle';
 import useTracking from '../providers/Tracking/useTracking';
 import { EventName } from '../types/Events';
-import { buildDashboardConfig } from '../utils/dashboardConfig';
+import {
+    buildDashboardConfig,
+    getControlsToSave,
+    getDateZoomConfigToSave,
+} from '../utils/dashboardConfig';
 import { isSameDashboardRoute } from '../utils/dashboardRoutes';
 import '../styles/react-grid.css';
 
@@ -243,6 +260,9 @@ const Dashboard: FC = () => {
     const parametersHaveChanged = useDashboardSelector(
         selectParametersHaveChanged,
     );
+    const haveParameterControlsChanged = useDashboardSelector(
+        selectHaveParameterControlsChanged,
+    );
     const parameterValues = useDashboardSelector(selectParameterValues);
     const clearAllParameters = useDashboardContext((c) => c.clearAllParameters);
     const hasDateZoomDisabledChanged = useMemo(() => {
@@ -287,16 +307,17 @@ const Dashboard: FC = () => {
         (c) => c.setHasParameterOrderChanged,
     );
     const dashboardDispatch = useDashboardDispatch();
+    const { resetControlDrafts } = useControlDraftResets();
     const controlSections = useDashboardSelector(selectControlSections);
     const haveControlSectionsChanged = useDashboardSelector(
         selectHaveControlSectionsChanged,
     );
+    const hasControlOrderChanged = useDashboardSelector(
+        selectHasControlOrderChanged,
+    );
     const dateZoomGranularities = useDashboardDateZoomGranularities();
     const haveDateZoomGranularitiesChanged = useDashboardSelector(
         selectHaveDateZoomGranularitiesChanged,
-    );
-    const setDateZoomGranularities = useDashboardContext(
-        (c) => c.setDateZoomGranularities,
     );
     const setHaveDateZoomGranularitiesChanged = useDashboardContext(
         (c) => c.setHaveDateZoomGranularitiesChanged,
@@ -304,9 +325,6 @@ const Dashboard: FC = () => {
     const defaultDateZoomGranularity = useDefaultDateZoomGranularity();
     const hasDefaultDateZoomGranularityChanged = useDashboardSelector(
         selectHasDefaultDateZoomGranularityChanged,
-    );
-    const setDefaultDateZoomGranularity = useDashboardContext(
-        (c) => c.setDefaultDateZoomGranularity,
     );
     const setHasDefaultDateZoomGranularityChanged = useDashboardContext(
         (c) => c.setHasDefaultDateZoomGranularityChanged,
@@ -353,8 +371,21 @@ const Dashboard: FC = () => {
         (updatedDashboard: IDashboard) => {
             setDashboardTiles(updatedDashboard.tiles);
             setDashboardTabs(updatedDashboard.tabs);
+            // The order as saved (reconciled), not the editor's draft of it
+            dashboardDispatch(
+                dashboardEditActions.setHasControlOrderChanged(false),
+            );
+            dashboardDispatch(
+                dashboardEditActions.syncControlOrder(
+                    isDashboardControlOrder(
+                        updatedDashboard.config?.controlOrder,
+                    )
+                        ? updatedDashboard.config.controlOrder
+                        : undefined,
+                ),
+            );
         },
-        [setDashboardTiles, setDashboardTabs],
+        [setDashboardTiles, setDashboardTabs, dashboardDispatch],
     );
 
     const {
@@ -488,31 +519,19 @@ const Dashboard: FC = () => {
 
     const handleUpdateTiles = useCallback(
         async (layout: Layout[]) => {
-            setDashboardTiles((currentDashboardTiles) =>
-                currentDashboardTiles?.map((tile) => {
-                    const layoutTile = layout.find(({ i }) => i === tile.uuid);
-                    if (
-                        layoutTile &&
-                        (tile.x !== layoutTile.x ||
-                            tile.y !== layoutTile.y ||
-                            tile.h !== layoutTile.h ||
-                            tile.w !== layoutTile.w)
-                    ) {
-                        return {
-                            ...tile,
-                            x: layoutTile.x,
-                            y: layoutTile.y,
-                            h: layoutTile.h,
-                            w: layoutTile.w,
-                        };
-                    }
-                    return tile;
-                }),
+            dashboardDispatch(
+                dashboardEditActions.moveTiles(
+                    layout.map(({ i, x, y, w, h }) => ({
+                        uuid: i,
+                        x,
+                        y,
+                        w,
+                        h,
+                    })),
+                ),
             );
-
-            setHaveTilesChanged(true);
         },
-        [setDashboardTiles, setHaveTilesChanged],
+        [dashboardDispatch],
     );
 
     const handleAddTiles = useCallback(
@@ -745,26 +764,7 @@ const Dashboard: FC = () => {
         setPinnedParameters(dashboard.config?.pinnedParameters ?? []);
         setHavePinnedParametersChanged(false);
         setHasParameterOrderChanged(false);
-        dashboardDispatch(
-            dashboardEditActions.setHaveControlSectionsChanged(false),
-        );
-        dashboardDispatch(
-            dashboardEditActions.syncControlSections(
-                dashboard.config?.controlSections ?? [],
-            ),
-        );
-        setDateZoomGranularities(
-            dashboard.config?.dateZoomGranularities ??
-                Object.values(DateGranularity),
-        );
-        setHaveDateZoomGranularitiesChanged(false);
-        setDefaultDateZoomGranularity(
-            dashboard.config?.defaultDateZoomGranularity,
-        );
-        setHasDefaultDateZoomGranularityChanged(false);
-        setDateZoomConfig(normalizeDateZoomConfig(dashboard.config));
-        setHasDateZoomConfigChanged(false);
-        setRequiredFiltersNote(undefined);
+        resetControlDrafts(dashboard.config);
 
         if (dashboardTabs.length > 0) {
             void navigate(
@@ -795,15 +795,8 @@ const Dashboard: FC = () => {
         setSavedParameters,
         setPinnedParameters,
         setHavePinnedParametersChanged,
-        setDateZoomGranularities,
-        setHaveDateZoomGranularitiesChanged,
-        setDefaultDateZoomGranularity,
-        setHasDefaultDateZoomGranularityChanged,
-        setDateZoomConfig,
-        setHasDateZoomConfigChanged,
         setHasParameterOrderChanged,
-        setRequiredFiltersNote,
-        dashboardDispatch,
+        resetControlDrafts,
     ]);
 
     const handleMoveDashboardToSpace = useCallback(
@@ -847,22 +840,113 @@ const Dashboard: FC = () => {
         isEditMode,
     ]);
 
+    // Areas that only track a changed flag; the rest is diffed item by item
+    const settingsChanges = useMemo(
+        () =>
+            (
+                [
+                    [
+                        haveCustomMetricsChanged,
+                        settingChange('custom-metrics', 'Custom metrics'),
+                    ],
+                    [
+                        hasDateZoomDisabledChanged,
+                        settingChange(
+                            'date-zoom-disabled',
+                            'Date zoom for viewers',
+                        ),
+                    ],
+                    [
+                        hasAddFilterDisabledChanged,
+                        settingChange(
+                            'add-filter-disabled',
+                            'Add filter for viewers',
+                        ),
+                    ],
+                    [
+                        hasRequiredFiltersNoteChanged,
+                        settingChange(
+                            'required-filters-note',
+                            'Filter rules note for viewers',
+                        ),
+                    ],
+                    [
+                        haveDateZoomGranularitiesChanged,
+                        settingChange(
+                            'date-zoom-granularities',
+                            'Date zoom granularities',
+                        ),
+                    ],
+                    [
+                        hasDefaultDateZoomGranularityChanged,
+                        settingChange(
+                            'default-date-zoom',
+                            'Default date zoom granularity',
+                        ),
+                    ],
+                    [
+                        hasDateZoomConfigChanged,
+                        settingChange('date-zoom-config', 'Date zoom controls'),
+                    ],
+                    [
+                        haveControlSectionsChanged,
+                        settingChange(
+                            'control-sections',
+                            'Filter bar sections',
+                        ),
+                    ],
+                    [
+                        hasControlOrderChanged,
+                        settingChange(
+                            'control-order',
+                            'Filter bar order',
+                            'reordered',
+                        ),
+                    ],
+                    [
+                        haveParameterControlsChanged,
+                        settingChange(
+                            'parameter-controls',
+                            'Parameter controls',
+                        ),
+                    ],
+                    [
+                        havePinnedParametersChanged,
+                        settingChange('pinned-parameters', 'Pinned parameters'),
+                    ],
+                    [
+                        hasParameterOrderChanged,
+                        settingChange(
+                            'parameter-order',
+                            'Parameter order',
+                            'reordered',
+                        ),
+                    ],
+                ] satisfies [boolean, PendingChange][]
+            ).flatMap(([hasChanged, pending]) => (hasChanged ? [pending] : [])),
+        [
+            haveCustomMetricsChanged,
+            hasDateZoomDisabledChanged,
+            hasAddFilterDisabledChanged,
+            hasRequiredFiltersNoteChanged,
+            haveDateZoomGranularitiesChanged,
+            hasDefaultDateZoomGranularityChanged,
+            hasDateZoomConfigChanged,
+            haveControlSectionsChanged,
+            hasControlOrderChanged,
+            haveParameterControlsChanged,
+            havePinnedParametersChanged,
+            hasParameterOrderChanged,
+        ],
+    );
+
     const hasDashboardChanged =
         haveTilesChanged ||
-        haveCustomMetricsChanged ||
         haveFiltersChanged ||
         hasTemporaryFilters ||
         haveTabsChanged ||
-        hasDateZoomDisabledChanged ||
-        hasAddFilterDisabledChanged ||
-        hasRequiredFiltersNoteChanged ||
         parametersHaveChanged ||
-        havePinnedParametersChanged ||
-        hasParameterOrderChanged ||
-        haveControlSectionsChanged ||
-        haveDateZoomGranularitiesChanged ||
-        hasDefaultDateZoomGranularityChanged ||
-        hasDateZoomConfigChanged;
+        settingsChanges.length > 0;
 
     // Block navigating away if there are unsaved changes
     const blocker = useBlocker(({ nextLocation }) => {
@@ -908,6 +992,14 @@ const Dashboard: FC = () => {
             setHasDateZoomConfigChanged(false);
             dashboardDispatch(
                 dashboardEditActions.setHaveControlSectionsChanged(false),
+            );
+            dashboardDispatch(
+                dashboardEditActions.setHasControlOrderChanged(false),
+            );
+            dashboardDispatch(
+                dashboardParametersActions.setHaveParameterControlsChanged(
+                    false,
+                ),
             );
             // The saved config is the source of truth again
             setRequiredFiltersNote(undefined);
@@ -956,6 +1048,7 @@ const Dashboard: FC = () => {
 
     const handleEnterEditMode = useCallback(async () => {
         resetDashboardFilters();
+        dashboardDispatch(dashboardEditActions.setCanvasZoom(ACTUAL_SIZE_ZOOM));
 
         await refreshDashboardVersion();
 
@@ -976,6 +1069,7 @@ const Dashboard: FC = () => {
         projectUrlIdentifier,
         dashboardIdentifier,
         resetDashboardFilters,
+        dashboardDispatch,
         refreshDashboardVersion,
         navigate,
         activeTab?.uuid,
@@ -999,7 +1093,7 @@ const Dashboard: FC = () => {
     const isDashboardControlsEnabled =
         dashboardControlsFlag.data?.enabled === true;
     const DashboardPage = isDashboardControlsEnabled
-        ? ControlsSidebarPage
+        ? ControlsEditorPage
         : Page;
     const dashboardCustomMetricsFlag = useServerFeatureFlag(
         FeatureFlags.DashboardCustomMetrics,
@@ -1059,8 +1153,24 @@ const Dashboard: FC = () => {
         CREATE_SAVED_CHART_VERSION_SEARCH_PARAM,
     );
 
+    const editErgonomicsFlag = useServerFeatureFlag(
+        FeatureFlags.DashboardEditErgonomics,
+    );
+    const [editFiltersVisibility, setEditFiltersVisibility] =
+        useState<EditFiltersVisibility>('all');
+    const effectiveEditFiltersVisibility: EditFiltersVisibility | null =
+        isEditMode && editErgonomicsFlag.data?.enabled === true
+            ? editFiltersVisibility
+            : null;
+
+    // With the flag on, dashboards always fit and viewers get no toggle
+    const fitToScreenDefaultFlag = useServerFeatureFlag(
+        FeatureFlags.DashboardFitToScreenDefault,
+    );
+    const isFitToScreenDefault = fitToScreenDefaultFlag.data?.enabled === true;
     // A viewer-side layout option, kept in the url so a fitted link can be shared
     const isFitToScreen =
+        isFitToScreenDefault ||
         searchParams.get(FIT_TO_SCREEN_SEARCH_PARAM) === 'true';
     const handleToggleFitToScreen = useCallback(() => {
         setSearchParams(
@@ -1078,6 +1188,7 @@ const Dashboard: FC = () => {
     const [gridElement, setGridElement] = useState<HTMLDivElement | null>(null);
     const fitToScreen = useFitToScreen({
         isFitToScreen,
+        isAutoFit: isFitToScreenDefault,
         isEditMode,
         gridElement,
         tiles: dashboardTiles,
@@ -1362,14 +1473,41 @@ const Dashboard: FC = () => {
             isDashboardControlsEnabled,
         );
 
+        const controlsToSave = getControlsToSave({
+            controlOrder: selectControlOrder(dashboardState),
+            hasControlOrderChanged:
+                selectHasControlOrderChanged(dashboardState),
+            dimensions: dimensionFiltersToSave,
+            metrics: [
+                ...dashboardFilters.metrics,
+                ...dashboardTemporaryFilters.metrics,
+            ],
+            controlSections,
+            haveControlSectionsChanged,
+            dateZoomConfigToSave: getDateZoomConfigToSave({
+                existingConfig: dashboard.config,
+                dateZoomConfig,
+                hasDateZoomConfigChanged,
+            }),
+            parameterInputs: {
+                parameterControls: selectParameterControls(dashboardState),
+                areParameterControlsSaved:
+                    selectAreParameterControlsSaved(dashboardState),
+                haveParameterControlsChanged:
+                    selectHaveParameterControlsChanged(dashboardState),
+                existingParameterControls:
+                    dashboard.config?.parameterControls ?? null,
+                parameterPicks: selectParameterPicks(dashboardState),
+                appliedParameters: selectDashboardParameters(dashboardState),
+                savedParameters: dashboard.parameters ?? {},
+            },
+        });
+
         const dashboardUpdate: UpdateDashboard = {
             tiles: dashboardTiles,
             filters: {
-                dimensions: dimensionFiltersToSave,
-                metrics: [
-                    ...dashboardFilters.metrics,
-                    ...dashboardTemporaryFilters.metrics,
-                ],
+                dimensions: controlsToSave.dimensions,
+                metrics: controlsToSave.metrics,
                 tableCalculations: [
                     ...dashboardFilters.tableCalculations,
                     ...dashboardTemporaryFilters.tableCalculations,
@@ -1394,10 +1532,13 @@ const Dashboard: FC = () => {
                 stagedCustomMetrics: haveCustomMetricsChanged
                     ? dashboardCustomMetrics
                     : undefined,
-                controlSections,
-                haveControlSectionsChanged,
+                controlSections: controlsToSave.controlSections,
+                haveControlSectionsChanged:
+                    controlsToSave.haveControlSectionsChanged,
+                parameterControlsToSave: controlsToSave.parameterControlsToSave,
+                controlOrderToSave: controlsToSave.controlOrderToSave,
             }),
-            parameters: selectDashboardParameters(dashboardState),
+            parameters: controlsToSave.parameters,
             ...(preserveVerification !== undefined
                 ? { preserveVerification }
                 : {}),
@@ -1436,8 +1577,15 @@ const Dashboard: FC = () => {
         isFullScreenFeatureEnabled,
         onToggleFullscreen: handleToggleFullscreen,
         isFitToScreen,
-        isFitToScreenAvailable: fitToScreen.isAvailable,
+        isFitToScreenAvailable:
+            fitToScreen.isAvailable && !isFitToScreenDefault,
         onToggleFitToScreen: handleToggleFitToScreen,
+        editFiltersVisibility: effectiveEditFiltersVisibility,
+        pendingSettingsChanges:
+            isEditMode && editErgonomicsFlag.data?.enabled === true
+                ? settingsChanges
+                : null,
+        onEditFiltersVisibilityChange: setEditFiltersVisibility,
         hasDashboardChanged,
         onAddTiles: handleAddTiles,
         onNewChart:
@@ -1650,6 +1798,12 @@ const Dashboard: FC = () => {
                         <FilterBarPopoversProvider>
                             <DashboardTabs
                                 isEditMode={isEditMode}
+                                editFiltersVisibility={
+                                    effectiveEditFiltersVisibility ?? 'all'
+                                }
+                                onEditFiltersVisibilityChange={
+                                    setEditFiltersVisibility
+                                }
                                 hasTilesThatSupportFilters={
                                     hasTilesThatSupportFilters
                                 }
@@ -1678,6 +1832,7 @@ const Dashboard: FC = () => {
                                 setGridWidth={setGridWidth}
                                 setAddingTab={setAddingTab}
                                 fitToScreenRowHeight={fitToScreen.rowHeight}
+                                isFitToScreenSnapping={fitToScreen.isSnapping}
                                 gridContainerRef={setGridElement}
                                 onNewChart={
                                     isChartEditorEnabled && isEditMode

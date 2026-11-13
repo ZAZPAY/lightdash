@@ -1,10 +1,15 @@
 import {
+    DashboardControlRefKind,
+    DashboardTileTypes,
     FilterOperator,
     type DashboardFilterRule,
+    type DashboardTile,
     type DashboardFilters,
+    type DashboardParameterControl,
 } from '@lightdash/common';
 import { describe, expect, it } from 'vitest';
-import { type DashboardStoreState } from '.';
+import { selectParameterControlInputs, type DashboardStoreState } from '.';
+import { buildInitialDashboardState } from './buildInitialState';
 import { initialDashboardChartSortState } from './dashboardChartSortReducer';
 import { initialDashboardDateZoomState } from './dashboardDateZoomReducer';
 import { initialDashboardEditState } from './dashboardEditReducer';
@@ -15,15 +20,22 @@ import {
 } from './dashboardParametersReducer';
 import { initialDashboardSourceState } from './dashboardSourceReducer';
 import { initialDashboardTileStatusState } from './dashboardTileStatusReducer';
+import { getTileDashboardParameterInputs } from './parameterControls';
 import {
     combineDashboardFilters,
     getSafeTemporaryFilters,
     selectAppliedParameterValues,
     selectDashboardParameterDefinitions,
     selectDashboardParameterReferences,
+    selectDashboardWideParameterValues,
+    selectIsDateZoomRefusedOnAllChartTiles,
+    selectMissingParametersByTile,
     selectMissingRequiredParameters,
+    selectOrderedControls,
     selectParameterValues,
 } from './selectors';
+
+const valueType = { type: 'string', multiple: false } as const;
 
 const stateWith = (
     parameters: Partial<DashboardParametersState>,
@@ -162,6 +174,58 @@ describe('parameter selectors', () => {
             ).toEqual([]);
         });
 
+        describe('a tile listed but not run', () => {
+            const listed = {
+                ...base,
+                tileQueryParameterReferences: {},
+                tileListedParameterReferences: { 'tile-1': ['status'] },
+                tileVirtualViewSavedParameters: { 'tile-1': {} },
+            };
+
+            it('counts as missing without a value', () => {
+                const state = stateWith({
+                    ...listed,
+                    tileChartSavedParameters: { 'tile-1': {} },
+                });
+                expect(selectMissingRequiredParameters(state)).toEqual([
+                    'status',
+                ]);
+                expect(selectMissingParametersByTile(state)).toEqual({
+                    'tile-1': ['status'],
+                });
+            });
+
+            it('is not known while its latest listing failed, until it runs', () => {
+                const failed = stateWith({
+                    ...listed,
+                    tileChartSavedParameters: { 'tile-1': {} },
+                    tileFailedParameterSources: { 'tile-1': 'chart-2' },
+                });
+                expect(selectMissingRequiredParameters(failed)).toEqual([]);
+                expect(selectMissingParametersByTile(failed)).toEqual({});
+                const ran = stateWith({
+                    ...failed.parameters,
+                    tileQueryParameterReferences: { 'tile-1': ['status'] },
+                });
+                expect(selectMissingRequiredParameters(ran)).toEqual([
+                    'status',
+                ]);
+            });
+
+            it('is satisfied by its listed chart value', () => {
+                const state = stateWith({
+                    ...listed,
+                    tileChartSavedParameters: {
+                        'tile-1': { status: 'Shipped' },
+                    },
+                });
+                expect(selectMissingRequiredParameters(state)).toEqual([]);
+                expect(selectMissingParametersByTile(state)).toEqual({
+                    'tile-1': [],
+                });
+            });
+        });
+
         it('is satisfied by a chart-saved value', () => {
             expect(
                 selectMissingRequiredParameters(
@@ -186,6 +250,156 @@ describe('parameter selectors', () => {
                     }),
                 ),
             ).toEqual([]);
+        });
+
+        it('checks each tile against the control that sets it', () => {
+            const state = stateWith({
+                ...base,
+                tileParameterReferences: {
+                    'tile-1': ['status'],
+                    'tile-2': ['status'],
+                },
+                tileQueryParameterReferences: {
+                    'tile-1': ['status'],
+                    'tile-2': ['status'],
+                },
+                tileChartSavedParameters: { 'tile-2': { status: 'Shipped' } },
+                parameters: {
+                    status: { parameterName: 'status', value: 'x' },
+                },
+                // The dashboard value applies only to tile-1; tile-2 keeps its chart value
+                areParameterControlsSaved: true,
+                parameterControls: [
+                    {
+                        id: 'a',
+                        label: 'A',
+                        value: 'x',
+                        valueType,
+                        parameters: { status: { only: ['tile-1'] } },
+                    },
+                    {
+                        id: 'b',
+                        label: 'B',
+                        value: null,
+                        valueType,
+                        parameters: { status: { only: [] } },
+                    },
+                ],
+            });
+            expect(selectMissingRequiredParameters(state)).toEqual([]);
+            expect(
+                selectMissingRequiredParameters(
+                    stateWith({
+                        ...state.parameters,
+                        tileChartSavedParameters: {},
+                    }),
+                ),
+            ).toEqual(['status']);
+        });
+    });
+
+    describe('selectParameterControlInputs', () => {
+        it('is null with the flag off', () => {
+            expect(selectParameterControlInputs(stateWith({}))).toBeNull();
+        });
+
+        it('is null while the list is only filled from the tiles', () => {
+            const filled = stateWith({
+                parameterControls: [
+                    {
+                        id: 'a',
+                        label: 'A',
+                        value: 'x',
+                        valueType,
+                        parameters: { status: 'all' },
+                    },
+                ],
+            });
+            expect(selectParameterControlInputs(filled)).toBeNull();
+            expect(
+                selectParameterControlInputs(
+                    stateWith({
+                        ...filled.parameters,
+                        haveParameterControlsChanged: true,
+                    }),
+                ),
+            ).not.toBeNull();
+        });
+
+        it('passes the picks as overrides, leaving the controls as saved', () => {
+            const savedList: DashboardParameterControl[] = [
+                {
+                    id: 'a',
+                    label: 'A',
+                    value: 'Saved',
+                    valueType,
+                    parameters: { status: 'all' },
+                },
+            ];
+            const state = stateWith({
+                parameters: {
+                    status: { parameterName: 'status', value: 'Picked' },
+                },
+                parameterPicks: { status: 'Picked', region: null },
+                areParameterControlsSaved: true,
+                parameterControls: savedList,
+            });
+            expect(selectParameterControlInputs(state)).toEqual({
+                controls: savedList,
+                overrides: { status: 'Picked' },
+                tilePicks: {},
+                userParameterNames: [],
+            });
+            expect(selectParameterControlInputs(state)).toBe(
+                selectParameterControlInputs(state),
+            );
+        });
+    });
+
+    describe('selectDashboardWideParameterValues', () => {
+        const list: DashboardParameterControl[] = [
+            {
+                id: 'a',
+                label: 'A',
+                value: 'Saved',
+                valueType,
+                parameters: { status: 'all' },
+            },
+        ];
+        const parameters = {
+            status: { parameterName: 'status', value: 'Saved' },
+            region: { parameterName: 'region', value: 'US' },
+        };
+
+        it('sends the full map without controls', () => {
+            expect(
+                selectDashboardWideParameterValues(stateWith({ parameters })),
+            ).toEqual({ status: 'Saved', region: 'US' });
+        });
+
+        it('sends the full map when the controls are not saved', () => {
+            expect(
+                selectDashboardWideParameterValues(
+                    stateWith({
+                        parameters,
+                        parameterControls: list,
+                        areParameterControlsSaved: false,
+                    }),
+                ),
+            ).toEqual({ status: 'Saved', region: 'US' });
+        });
+
+        it('sends only the picks when the controls are saved', () => {
+            expect(
+                selectDashboardWideParameterValues(
+                    stateWith({
+                        parameters,
+                        parameterControls: list,
+                        areParameterControlsSaved: true,
+                        parameterPicks: { region: 'EU', status: null },
+                    }),
+                ),
+            ).toEqual({ region: 'EU' });
         });
     });
 });
@@ -249,5 +463,187 @@ describe('filter helpers', () => {
             metrics: [a, b],
             tableCalculations: [a, b],
         });
+    });
+});
+
+describe('parameter picks reaching shared-key controls', () => {
+    const sharedKeyControls: DashboardParameterControl[] = [
+        {
+            id: 'sales',
+            label: 'Sales',
+            value: 'monday',
+            valueType,
+            parameters: { week_start: { except: ['ops'] } },
+        },
+        {
+            id: 'ops',
+            label: 'Ops',
+            value: 'sunday',
+            valueType,
+            parameters: { week_start: { only: ['ops'] } },
+        },
+    ];
+    const tileValues = (state: DashboardStoreState) =>
+        ['sales', 'ops'].map(
+            (tileUuid) =>
+                getTileDashboardParameterInputs({
+                    controlInputs: selectParameterControlInputs(state),
+                    tileUuid,
+                    tileParameterReferences: {
+                        sales: ['week_start'],
+                        ops: ['week_start'],
+                    },
+                    dashboardValues: {},
+                }).dashboardValues,
+        );
+
+    it('a URL value equal to the first control value still sets the second', () => {
+        const { state } = buildInitialDashboardState({
+            search: `?parameters=${encodeURIComponent(
+                JSON.stringify({ week_start: 'monday' }),
+            )}`,
+            isEditMode: false,
+            parameterLabelOverrides: undefined,
+            dateZoom: undefined,
+            invalidateCache: false,
+        });
+        expect(
+            tileValues({
+                ...state,
+                parameters: {
+                    ...state.parameters,
+                    parameterControls: sharedKeyControls,
+                    areParameterControlsSaved: true,
+                },
+            }),
+        ).toEqual([{ week_start: 'monday' }, { week_start: 'monday' }]);
+    });
+
+    it('without a pick each control keeps its own value', () => {
+        expect(
+            tileValues(
+                stateWith({
+                    parameters: {
+                        week_start: {
+                            parameterName: 'week_start',
+                            value: 'monday',
+                        },
+                    },
+                    parameterControls: sharedKeyControls,
+                    areParameterControlsSaved: true,
+                }),
+            ),
+        ).toEqual([{ week_start: 'monday' }, { week_start: 'sunday' }]);
+    });
+});
+
+describe('selectIsDateZoomRefusedOnAllChartTiles', () => {
+    const tile = (uuid: string, type: DashboardTileTypes) =>
+        ({ uuid, type, properties: {} }) as DashboardTile;
+    const stateWithTiles = (
+        tiles: DashboardTile[],
+        dateZoomRefusedByTileUuid: Record<string, boolean>,
+    ): DashboardStoreState => {
+        const state = stateWith({});
+        return {
+            ...state,
+            edit: { ...state.edit, tiles },
+            dateZoom: { ...state.dateZoom, dateZoomRefusedByTileUuid },
+        };
+    };
+
+    it('is true when every chart tile keeps its saved grain', () => {
+        expect(
+            selectIsDateZoomRefusedOnAllChartTiles(
+                stateWithTiles(
+                    [
+                        tile('live', DashboardTileTypes.SAVED_CHART),
+                        tile('note', DashboardTileTypes.MARKDOWN),
+                    ],
+                    { live: true },
+                ),
+            ),
+        ).toBe(true);
+    });
+
+    it('is false while a chart tile zooms or has not reported', () => {
+        const tiles = [
+            tile('live', DashboardTileTypes.SAVED_CHART),
+            tile('warehouse', DashboardTileTypes.SAVED_CHART),
+        ];
+        expect(
+            selectIsDateZoomRefusedOnAllChartTiles(
+                stateWithTiles(tiles, { live: true, warehouse: false }),
+            ),
+        ).toBe(false);
+        expect(
+            selectIsDateZoomRefusedOnAllChartTiles(
+                stateWithTiles(tiles, { live: true }),
+            ),
+        ).toBe(false);
+    });
+
+    it('is false with a SQL chart tile or no chart tiles', () => {
+        expect(
+            selectIsDateZoomRefusedOnAllChartTiles(
+                stateWithTiles(
+                    [
+                        tile('live', DashboardTileTypes.SAVED_CHART),
+                        tile('sql', DashboardTileTypes.SQL_CHART),
+                    ],
+                    { live: true },
+                ),
+            ),
+        ).toBe(false);
+        expect(
+            selectIsDateZoomRefusedOnAllChartTiles(stateWithTiles([], {})),
+        ).toBe(false);
+    });
+});
+
+describe('selectOrderedControls', () => {
+    const zoom = { uuid: 'z1', name: 'Revenue zoom', granularity: 'Week' };
+    const withDashboardZoom = (sectionId?: string): DashboardStoreState => {
+        const state = stateWith({});
+        return {
+            ...state,
+            source: {
+                ...state.source,
+                embedDashboard: {
+                    config: {
+                        isDateZoomDisabled: false,
+                        dateZoomConfig: {
+                            controls: [{ ...zoom, sectionId }],
+                            tileTargets: {},
+                        },
+                    },
+                } as unknown as DashboardStoreState['source']['embedDashboard'],
+            },
+        };
+    };
+
+    it("places the loaded dashboard's date zooms on the bar", () => {
+        expect(
+            selectOrderedControls(withDashboardZoom()).map(
+                ({ kind, id }) => `${kind}:${id}`,
+            ),
+        ).toEqual([`${DashboardControlRefKind.DATE_ZOOM}:z1`]);
+    });
+
+    it("follows the editor's draft of the date zoom config", () => {
+        const loaded = withDashboardZoom();
+        const saved = loaded.source.embedDashboard!.config!.dateZoomConfig!;
+        const state: DashboardStoreState = {
+            ...loaded,
+            edit: {
+                ...loaded.edit,
+                dateZoomConfig: {
+                    value: { controls: [], tileTargets: {} },
+                    changed: true,
+                    basedOn: saved,
+                },
+            },
+        };
+        expect(selectOrderedControls(state)).toEqual([]);
     });
 });

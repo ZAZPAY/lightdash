@@ -1,12 +1,14 @@
 import { Ability } from '@casl/ability';
 import {
     ContentType,
+    DashboardControlRefKind,
     DashboardTileTypes,
     defineUserAbility,
     FilterOperator,
     ForbiddenError,
     NotFoundError,
     OrganizationMemberRole,
+    ParameterError,
     PossibleAbilities,
     ProjectMemberRole,
     SCHEDULER_TASKS,
@@ -19,7 +21,9 @@ import {
     type ContentVerificationInfo,
     type Dashboard,
     type DashboardChartTile,
+    type DashboardControlRef,
     type DashboardFilterRule,
+    type DashboardParameterControl,
     type Explore,
     type UpdateDashboard,
 } from '@lightdash/common';
@@ -29,6 +33,7 @@ import { SlackClient } from '../../clients/Slack/SlackClient';
 import { lightdashConfigMock } from '../../config/lightdashConfig.mock';
 import { AnalyticsModel } from '../../models/AnalyticsModel';
 import type { CatalogModel } from '../../models/CatalogModel/CatalogModel';
+import { type ComposerChartModel } from '../../models/ComposerChartModel';
 import { ContentVerificationModel } from '../../models/ContentVerificationModel';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
 import { OrganizationMemberProfileModel } from '../../models/OrganizationMemberProfileModel';
@@ -174,6 +179,13 @@ const searchModel = {
 const contentAsCodeProjectSettingsModel = { get: vi.fn() };
 const contentAsCodeSnapshotModel = { get: vi.fn() };
 
+const organizationMemberProfileModel = {
+    getOrganizationMemberByUuid: vi.fn(async () => ({
+        organizationUuid: user.organizationUuid,
+        userUuid: 'target-user-uuid',
+    })),
+};
+
 const contentVerificationModel = {
     getByContentUuids: vi.fn(
         async (): Promise<Map<string, ContentVerificationInfo>> => new Map(),
@@ -241,14 +253,14 @@ const catalogModel = {
     updateFieldsChartUsage: vi.fn(async () => undefined),
 };
 
+const featureFlagModel = { get: vi.fn().mockResolvedValue({ enabled: false }) };
+
 vi.spyOn(analyticsMock, 'track');
 describe('DashboardService', () => {
     const projectUuid = 'projectUuid';
     const { uuid: dashboardUuid } = dashboard;
     const service = new DashboardService({
-        featureFlagModel: {
-            get: vi.fn().mockResolvedValue({ enabled: false }),
-        },
+        featureFlagModel,
         agentActionLogModel: { insert: vi.fn().mockResolvedValue(undefined) },
         lightdashConfig: lightdashConfigMock,
         analytics: analyticsMock,
@@ -263,6 +275,9 @@ describe('DashboardService', () => {
         } as unknown as SchedulerService,
         savedChartModel: savedChartModel as unknown as SavedChartModel,
         savedSqlModel: savedSqlModel as unknown as SavedSqlModel,
+        composerChartModel: {
+            deleteOrphans: vi.fn(async () => {}),
+        } as unknown as ComposerChartModel,
         savedChartService: {} as SavedChartService, // Mock for test
         projectModel: projectModel as unknown as ProjectModel,
         slackClient: slackClient as unknown as SlackClient,
@@ -278,12 +293,8 @@ describe('DashboardService', () => {
         organizationModel: {
             findColorPalette: vi.fn(async () => null),
         } as unknown as OrganizationModel,
-        organizationMemberProfileModel: {
-            getOrganizationMemberByUuid: vi.fn(async () => ({
-                organizationUuid: user.organizationUuid,
-                userUuid: 'target-user-uuid',
-            })),
-        } as unknown as OrganizationMemberProfileModel,
+        organizationMemberProfileModel:
+            organizationMemberProfileModel as unknown as OrganizationMemberProfileModel,
         spacePermissionService:
             spacePermissionService as unknown as SpacePermissionService,
         projectService: {} as never,
@@ -1205,7 +1216,7 @@ describe('DashboardService', () => {
         expect(dashboardModel.create).toHaveBeenCalledTimes(1);
         expect(dashboardModel.create).toHaveBeenCalledWith(
             publicSpace.uuid,
-            createDashboardWithSlug,
+            { ...createDashboardWithSlug, ownerUserUuid: user.userUuid },
             user,
             projectUuid,
         );
@@ -1247,6 +1258,12 @@ describe('DashboardService', () => {
                                 name: 'Order date',
                                 granularity: 'Week',
                             },
+                            {
+                                uuid: 'hidden-control-uuid',
+                                name: 'Ship date',
+                                granularity: 'Month',
+                                hidden: true,
+                            },
                         ],
                         tileTargets: {
                             'tile-1': {
@@ -1267,7 +1284,8 @@ describe('DashboardService', () => {
             isDateZoomDisabled: true,
             dateZoomGranularitiesCount: 3,
             defaultDateZoomGranularity: 'Week',
-            dateZoomControlsCount: 1,
+            dateZoomControlsCount: 2,
+            hiddenDateZoomControlsCount: 1,
             dateZoomTileTargetsCount: 2,
         });
     });
@@ -1282,11 +1300,76 @@ describe('DashboardService', () => {
             dateZoomGranularitiesCount: 0,
             defaultDateZoomGranularity: null,
             dateZoomControlsCount: 0,
+            hiddenDateZoomControlsCount: 0,
             dateZoomTileTargetsCount: 0,
             sectionsCount: 0,
             sectionedFiltersCount: 0,
             collapsedByDefaultSectionsCount: 0,
+            parameterControlsCount: 0,
+            parameterControlsWithNonAllTargetsCount: 0,
+            filtersWithCustomTileTargetsCount: 0,
         });
+    });
+    test('should include parameter mapping and filter tile target counts in create analytics, never names', () => {
+        const control = {
+            label: 'Region picker',
+            value: 'emea',
+            valueType: { type: 'string', multiple: false },
+        } as const;
+        const properties = DashboardService.getCreateEventProperties({
+            ...dashboard,
+            filters: {
+                dimensions: [
+                    {
+                        tileTargets: { 'tile-a': false },
+                    } as unknown as DashboardFilterRule,
+                    { tileTargets: {} } as DashboardFilterRule,
+                    {} as DashboardFilterRule,
+                ],
+                metrics: [
+                    {
+                        tileTargets: {
+                            'tile-b': {
+                                fieldId: 'orders_total',
+                                tableName: 'orders',
+                            },
+                        },
+                    } as unknown as DashboardFilterRule,
+                ],
+                tableCalculations: [],
+            },
+            config: {
+                isDateZoomDisabled: false,
+                parameterControls: [
+                    {
+                        ...control,
+                        id: 'all',
+                        parameters: { region_param: 'all' },
+                    },
+                    {
+                        ...control,
+                        id: 'only',
+                        parameters: {
+                            region_param: 'all',
+                            other_param: { only: ['tile-a'] },
+                        },
+                    },
+                    {
+                        ...control,
+                        id: 'except',
+                        parameters: { region_param: { except: ['tile-b'] } },
+                    },
+                ],
+            },
+        });
+        expect(properties).toMatchObject({
+            parameterControlsCount: 3,
+            parameterControlsWithNonAllTargetsCount: 2,
+            filtersWithCustomTileTargetsCount: 2,
+        });
+        expect(JSON.stringify(properties)).not.toMatch(
+            /Region picker|emea|region_param|tile-a|tile-b/,
+        );
     });
     test('should include control section counts in create analytics, never names', () => {
         const properties = DashboardService.getCreateEventProperties({
@@ -1332,7 +1415,7 @@ describe('DashboardService', () => {
         expect(dashboardModel.create).toHaveBeenCalledTimes(1);
         expect(dashboardModel.create).toHaveBeenCalledWith(
             publicSpace.uuid,
-            createDashboardWithTileIds,
+            { ...createDashboardWithTileIds, ownerUserUuid: user.userUuid },
             user,
             projectUuid,
         );
@@ -1342,6 +1425,124 @@ describe('DashboardService', () => {
                 event: 'dashboard.created',
             }),
         );
+    });
+    describe('control order on create', () => {
+        const controlOrder = [
+            { kind: DashboardControlRefKind.SECTION, id: 'section-1' },
+        ];
+        test('strips the order when dashboard controls are off', async () => {
+            await service.create(user, projectUuid, {
+                ...createDashboard,
+                config: { isDateZoomDisabled: false, controlOrder },
+            });
+            expect(dashboardModel.create).toHaveBeenCalledWith(
+                publicSpace.uuid,
+                expect.objectContaining({
+                    config: { isDateZoomDisabled: false },
+                }),
+                user,
+                projectUuid,
+            );
+        });
+        test('keeps the order when dashboard controls are on', async () => {
+            featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+            await service.create(user, projectUuid, {
+                ...createDashboard,
+                config: { isDateZoomDisabled: false, controlOrder },
+            });
+            expect(dashboardModel.create).toHaveBeenCalledWith(
+                publicSpace.uuid,
+                expect.objectContaining({
+                    config: { isDateZoomDisabled: false, controlOrder },
+                }),
+                user,
+                projectUuid,
+            );
+        });
+        test('rejects an order with an unknown kind', async () => {
+            featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+            await expect(
+                service.create(user, projectUuid, {
+                    ...createDashboard,
+                    config: {
+                        isDateZoomDisabled: false,
+                        controlOrder: [
+                            {
+                                kind: 'button' as DashboardControlRefKind,
+                                id: 'x',
+                            },
+                        ],
+                    },
+                }),
+            ).rejects.toThrow(ParameterError);
+            expect(dashboardModel.create).not.toHaveBeenCalled();
+        });
+    });
+    describe('default owner on create', () => {
+        test('should make the creator the owner when no owner is given', async () => {
+            await service.create(user, projectUuid, createDashboard);
+
+            expect(dashboardModel.create).toHaveBeenCalledWith(
+                publicSpace.uuid,
+                expect.objectContaining({ ownerUserUuid: user.userUuid }),
+                user,
+                projectUuid,
+            );
+            expect(
+                organizationMemberProfileModel.getOrganizationMemberByUuid,
+            ).not.toHaveBeenCalled();
+        });
+        test('should leave the dashboard unowned when owner is null', async () => {
+            await service.create(user, projectUuid, {
+                ...createDashboard,
+                ownerUserUuid: null,
+            });
+
+            expect(dashboardModel.create).toHaveBeenCalledWith(
+                publicSpace.uuid,
+                expect.objectContaining({ ownerUserUuid: null }),
+                user,
+                projectUuid,
+            );
+        });
+        test('should keep and validate an explicit owner', async () => {
+            await service.create(user, projectUuid, {
+                ...createDashboard,
+                ownerUserUuid: 'target-user-uuid',
+            });
+
+            expect(
+                organizationMemberProfileModel.getOrganizationMemberByUuid,
+            ).toHaveBeenCalledWith(
+                publicSpace.organizationUuid,
+                'target-user-uuid',
+            );
+            expect(dashboardModel.create).toHaveBeenCalledWith(
+                publicSpace.uuid,
+                expect.objectContaining({ ownerUserUuid: 'target-user-uuid' }),
+                user,
+                projectUuid,
+            );
+        });
+        test('should not make a service account the owner', async () => {
+            const serviceAccountUser = {
+                ...user,
+                serviceAccount: { uuid: 'service-account-uuid' },
+            };
+
+            await service.create(
+                serviceAccountUser,
+                projectUuid,
+                createDashboard,
+            );
+
+            expect(dashboardModel.create).toHaveBeenCalledWith(
+                publicSpace.uuid,
+                expect.objectContaining({ ownerUserUuid: null }),
+                serviceAccountUser,
+                projectUuid,
+            );
+        });
     });
     test('should update dashboard details', async () => {
         (dashboardModel.update as import('vitest').Mock).mockResolvedValueOnce({
@@ -1379,6 +1580,9 @@ describe('DashboardService', () => {
                     sectionsCount: 0,
                     sectionedFiltersCount: 0,
                     collapsedByDefaultSectionsCount: 0,
+                    parameterControlsCount: 0,
+                    parameterControlsWithNonAllTargetsCount: 0,
+                    filtersWithCustomTileTargetsCount: 0,
                 }),
             }),
         );
@@ -1458,6 +1662,91 @@ describe('DashboardService', () => {
             });
         });
 
+        test('derives the mirror from an explicit control list when enabled', async () => {
+            featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+            await service.update(user, dashboardUuid, {
+                ...updateDashboardTiles,
+                parameters: savedParameters,
+                config: {
+                    ...savedConfig,
+                    parameterControls: [
+                        {
+                            id: 'region',
+                            label: 'Region',
+                            value: 'US',
+                            valueType: { type: 'string', multiple: false },
+                            parameters: { region: 'all' },
+                        },
+                    ],
+                },
+            });
+            expect(dashboardModel.addVersion).toHaveBeenCalledWith(
+                dashboardUuid,
+                expect.objectContaining({
+                    parameters: {
+                        region: { parameterName: 'region', value: 'US' },
+                    },
+                }),
+                user,
+                projectUuid,
+            );
+        });
+
+        test('an explicit empty list clears the parameter mirror', async () => {
+            featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+            await service.update(user, dashboardUuid, {
+                ...updateDashboardTiles,
+                config: { ...savedConfig, parameterControls: [] },
+                parameters: savedParameters,
+            });
+            expect(dashboardModel.addVersion).toHaveBeenCalledWith(
+                dashboardUuid,
+                expect.objectContaining({ parameters: {} }),
+                user,
+                projectUuid,
+            );
+        });
+
+        test('keeps saved controls and legacy parameters when controls are disabled', async () => {
+            const controls: DashboardParameterControl[] = [
+                {
+                    id: 'region',
+                    label: 'Region',
+                    value: 'US',
+                    valueType: { type: 'string', multiple: false },
+                    parameters: { region: 'all' },
+                },
+            ];
+            (dashboardModel.getByIdOrSlug as import('vitest').Mock)
+                .mockReset()
+                .mockResolvedValueOnce({
+                    ...dashboard,
+                    config: { ...savedConfig, parameterControls: controls },
+                    parameters: savedParameters,
+                });
+            await service.update(user, dashboardUuid, {
+                ...updateDashboardTiles,
+                parameters: {
+                    region: { parameterName: 'region', value: 'APAC' },
+                },
+                config: { isDateZoomDisabled: true, parameterControls: [] },
+            });
+            expect(dashboardModel.addVersion).toHaveBeenCalledWith(
+                dashboardUuid,
+                expect.objectContaining({
+                    config: {
+                        isDateZoomDisabled: true,
+                        parameterControls: controls,
+                    },
+                    parameters: {
+                        region: { parameterName: 'region', value: 'APAC' },
+                    },
+                }),
+                user,
+                projectUuid,
+            );
+        });
+
         test('keeps the saved config and parameters when the update omits them', async () => {
             await service.update(user, dashboardUuid, updateDashboardTiles);
 
@@ -1470,6 +1759,130 @@ describe('DashboardService', () => {
                 user,
                 projectUuid,
             );
+        });
+
+        describe('control order', () => {
+            const savedOrder = [
+                { kind: DashboardControlRefKind.FILTER, id: 'filter-1' },
+            ];
+            const sentOrder = [
+                { kind: DashboardControlRefKind.SECTION, id: 'section-1' },
+            ];
+            beforeEach(() => {
+                (dashboardModel.getByIdOrSlug as import('vitest').Mock)
+                    .mockReset()
+                    .mockResolvedValueOnce({
+                        ...dashboard,
+                        config: { ...savedConfig, controlOrder: savedOrder },
+                        parameters: savedParameters,
+                    });
+            });
+            const savedWith = (config: Dashboard['config']) =>
+                expect(dashboardModel.addVersion).toHaveBeenCalledWith(
+                    dashboardUuid,
+                    expect.objectContaining({ config }),
+                    user,
+                    projectUuid,
+                );
+
+            test('carries the saved order forward when the update omits it', async () => {
+                await service.update(user, dashboardUuid, {
+                    ...updateDashboardTiles,
+                    config: { isDateZoomDisabled: true },
+                });
+                savedWith({
+                    isDateZoomDisabled: true,
+                    controlOrder: savedOrder,
+                });
+            });
+
+            test('writes the sent order when dashboard controls are on', async () => {
+                featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+                await service.update(user, dashboardUuid, {
+                    ...updateDashboardTiles,
+                    config: {
+                        isDateZoomDisabled: true,
+                        controlOrder: sentOrder,
+                    },
+                });
+                savedWith({
+                    isDateZoomDisabled: true,
+                    controlOrder: sentOrder,
+                });
+            });
+
+            test('keeps the saved order over a sent one when dashboard controls are off', async () => {
+                await service.update(user, dashboardUuid, {
+                    ...updateDashboardTiles,
+                    config: {
+                        isDateZoomDisabled: true,
+                        controlOrder: sentOrder,
+                    },
+                });
+                savedWith({
+                    isDateZoomDisabled: true,
+                    controlOrder: savedOrder,
+                });
+            });
+
+            test('rejects a malformed order when dashboard controls are on', async () => {
+                featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+                await expect(
+                    service.update(user, dashboardUuid, {
+                        ...updateDashboardTiles,
+                        config: {
+                            isDateZoomDisabled: true,
+                            controlOrder:
+                                'filter-1' as unknown as DashboardControlRef[],
+                        },
+                    }),
+                ).rejects.toThrow(ParameterError);
+                expect(dashboardModel.addVersion).not.toHaveBeenCalled();
+            });
+
+            test('rejects an order with an unknown kind', async () => {
+                featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+                await expect(
+                    service.update(user, dashboardUuid, {
+                        ...updateDashboardTiles,
+                        config: {
+                            isDateZoomDisabled: true,
+                            controlOrder: [
+                                {
+                                    kind: 'button' as DashboardControlRefKind,
+                                    id: 'x',
+                                },
+                            ],
+                        },
+                    }),
+                ).rejects.toThrow(ParameterError);
+                expect(dashboardModel.addVersion).not.toHaveBeenCalled();
+            });
+
+            test('accepts a resent copy of a saved order with an unknown kind', async () => {
+                const newerOrder = [
+                    { kind: 'button' as DashboardControlRefKind, id: 'x' },
+                ];
+                (dashboardModel.getByIdOrSlug as import('vitest').Mock)
+                    .mockReset()
+                    .mockResolvedValueOnce({
+                        ...dashboard,
+                        config: { ...savedConfig, controlOrder: newerOrder },
+                        parameters: savedParameters,
+                    });
+                featureFlagModel.get.mockResolvedValueOnce({ enabled: true });
+                await service.update(user, dashboardUuid, {
+                    ...updateDashboardTiles,
+                    config: {
+                        isDateZoomDisabled: true,
+                        controlOrder: structuredClone(newerOrder),
+                    },
+                });
+                savedWith({
+                    isDateZoomDisabled: true,
+                    controlOrder: newerOrder,
+                });
+            });
         });
 
         test('uses the config and parameters sent with the update', async () => {
@@ -2123,6 +2536,32 @@ describe('DashboardService', () => {
             ).mockResolvedValue('new-duplicated-chart-uuid');
         });
 
+        test('should make whoever duplicates the owner of the copy', async () => {
+            (
+                dashboardModel.getByIdOrSlug as import('vitest').Mock
+            ).mockResolvedValue({
+                ...dashboardWithScopedCharts,
+                owner: {
+                    userUuid: 'original-owner-uuid',
+                    firstName: 'Original',
+                    lastName: 'Owner',
+                    email: 'original-owner@example.com',
+                },
+            });
+
+            await service.duplicate(user, projectUuid, dashboard.uuid, {
+                dashboardName: 'Duplicated',
+                dashboardDesc: 'desc',
+            });
+
+            expect(dashboardModel.create).toHaveBeenCalledWith(
+                expect.anything(),
+                expect.objectContaining({ ownerUserUuid: user.userUuid }),
+                expect.anything(),
+                projectUuid,
+            );
+        });
+
         test('should remap filter tileTargets when duplicating dashboard-scoped charts', async () => {
             await service.duplicate(user, projectUuid, dashboard.uuid, {
                 dashboardName: 'Duplicated',
@@ -2200,6 +2639,9 @@ describe('DashboardService', () => {
                     },
                 },
             };
+            (
+                dashboardModel.getByIdOrSlug as import('vitest').Mock
+            ).mockResolvedValue(withConfig);
             (dashboardModel.create as import('vitest').Mock).mockResolvedValue(
                 withConfig,
             );
@@ -2231,6 +2673,58 @@ describe('DashboardService', () => {
                     tableName: 't',
                 },
             });
+        });
+
+        test('should remap the tile uuids of parameter control tile targets', async () => {
+            const control: DashboardParameterControl = {
+                id: 'p1',
+                label: 'Region',
+                value: 'EU',
+                valueType: { type: 'string', multiple: false },
+                sectionId: 's1',
+                parameters: {
+                    region: {
+                        except: [dashboardScopedTileUuid, spaceTileUuid],
+                    },
+                    'orders.region': { only: [dashboardScopedTileUuid] },
+                },
+            };
+            const withControls: Dashboard = {
+                ...dashboardWithScopedCharts,
+                config: {
+                    isDateZoomDisabled: false,
+                    parameterControls: [control],
+                },
+            };
+            (
+                dashboardModel.getByIdOrSlug as import('vitest').Mock
+            ).mockResolvedValue(withControls);
+            (dashboardModel.create as import('vitest').Mock).mockResolvedValue(
+                withControls,
+            );
+
+            await service.duplicate(user, projectUuid, dashboard.uuid, {
+                dashboardName: 'Dup',
+                dashboardDesc: '',
+            });
+
+            const versionData = (
+                dashboardModel.addVersion as import('vitest').Mock
+            ).mock.calls[0][1];
+            const newTileUuid = versionData.tiles.find(
+                (t: DashboardChartTile) =>
+                    t.properties.savedChartUuid === 'new-duplicated-chart-uuid',
+            ).uuid;
+
+            expect(versionData.config.parameterControls).toEqual([
+                {
+                    ...control,
+                    parameters: {
+                        region: { except: [newTileUuid, spaceTileUuid] },
+                        'orders.region': { only: [newTileUuid] },
+                    },
+                },
+            ]);
         });
 
         test('should preserve undefined tileTargets on filters', async () => {
@@ -2568,6 +3062,29 @@ describe('DashboardService', () => {
                         event: 'scheduler.created',
                         properties: expect.objectContaining({
                             isThresholdAlert,
+                        }),
+                    }),
+                );
+            },
+        );
+
+        test.each([
+            [true, true],
+            [false, false],
+            [undefined, false],
+        ])(
+            'tracks scheduler.created with useCachedResults %s as %s',
+            async (useCachedResults, expected) => {
+                await service.createScheduler(editorUser, dashboard.slug, {
+                    ...newScheduler,
+                    useCachedResults,
+                } as Parameters<typeof service.createScheduler>[2]);
+
+                expect(analyticsMock.track).toHaveBeenCalledWith(
+                    expect.objectContaining({
+                        event: 'scheduler.created',
+                        properties: expect.objectContaining({
+                            useCachedResults: expected,
                         }),
                     }),
                 );

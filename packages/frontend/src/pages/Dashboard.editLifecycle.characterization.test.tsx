@@ -15,6 +15,10 @@ import { type Layout } from 'react-grid-layout';
 import { createMemoryRouter, RouterProvider, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type LightdashApi } from '../api';
+import {
+    dashboardParametersActions,
+    useDashboardDispatch,
+} from '../features/dashboard/store';
 import { AbilityContext } from '../providers/Ability/context';
 import { manageChartRule } from '../testing/savedChartResponse.mock';
 import { renderWithProviders } from '../testing/testUtils';
@@ -155,9 +159,34 @@ type TabsProps = {
         mapping?: Record<string, string>,
     ) => void;
 };
+const TestControlButton = () => {
+    const dispatch = useDashboardDispatch();
+    return (
+        <button
+            type="button"
+            onClick={() =>
+                dispatch(
+                    dashboardParametersActions.setParameterControls([
+                        {
+                            id: 'unset-control',
+                            label: null,
+                            value: null,
+                            valueType: { type: 'string', multiple: false },
+                            parameters: { status: 'all' },
+                        },
+                    ]),
+                )
+            }
+        >
+            Add unset control
+        </button>
+    );
+};
+
 vi.mock('../features/dashboardTabs', () => ({
     default: (props: TabsProps) => (
         <div>
+            <TestControlButton />
             <output data-testid="tiles">
                 {JSON.stringify(props.dashboardTiles ?? null)}
             </output>
@@ -471,12 +500,12 @@ describe('edit lifecycle: layout edits and save', () => {
         await waitFor(() => expect(changed()).toBe('false'));
     });
 
-    it('a drop back in place still marks the dashboard dirty', async () => {
+    it('a drop back in place leaves nothing to save', async () => {
         renderDashboard(`${DASHBOARD_PATH}/edit`);
         await waitForLoaded();
 
         await click('Drop in place');
-        expect(changed()).toBe('true');
+        expect(changed()).toBe('false');
         expect(tiles()).toEqual(makeDashboard().tiles);
     });
 
@@ -557,8 +586,8 @@ describe('edit lifecycle: tiles', () => {
             'tile-new',
         ]);
         expect(payload.tiles[0].properties.title).toBe('Renamed');
-        // New tiles go one row below the lowest tile origin
-        expect(payload.tiles[1].y).toBe(1);
+        // New tiles go below the bottom edge of the lowest tile
+        expect(payload.tiles[1].y).toBe(3);
         // Deleting the only targeted tile drops its date zoom target and the
         // now-empty control
         expect(payload.config.dateZoomConfig).toBeUndefined();
@@ -722,6 +751,37 @@ describe('edit lifecycle: refetches and drafts', () => {
 });
 
 describe('dashboard controls flag', () => {
+    it('marks an unset parameter control as a change and saves it', async () => {
+        server.isControlsFlagOn = true;
+        server.dashboard = makeDashboard({
+            config: { isDateZoomDisabled: false, parameterControls: [] },
+        });
+        renderDashboard(`${DASHBOARD_PATH}/edit`);
+        await waitForLoaded();
+        expect(changed()).toBe('false');
+
+        await click('Add unset control');
+        expect(changed()).toBe('true');
+        await click('Save');
+        await waitFor(() => expect(patches()).toHaveLength(1));
+        expect(patches()[0].config.parameterControls).toEqual([
+            {
+                id: 'unset-control',
+                label: null,
+                value: null,
+                valueType: { type: 'string', multiple: false },
+                parameters: { status: 'all' },
+            },
+        ]);
+        expect(patches()[0].parameters).toEqual({});
+    });
+
+    it('ignores parameter control edits when the flag is off', async () => {
+        renderDashboard(`${DASHBOARD_PATH}/edit`);
+        await waitForLoaded();
+        await click('Add unset control');
+        expect(changed()).toBe('false');
+    });
     const required: DashboardFilterRule = {
         id: 'required-filter',
         label: undefined,

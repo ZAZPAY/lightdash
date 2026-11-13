@@ -33,11 +33,47 @@ export type Ga4ApiSource = {
     propertyId: string;
 };
 
+export type MetaAdsApiSource = {
+    connector: ApiConnectorType.META_ADS;
+    /** The numeric ad account id, without the act_ prefix. */
+    adAccountId: string;
+};
+
+export type GoogleAdsApiSource = {
+    connector: ApiConnectorType.GOOGLE_ADS;
+    /** The 10-digit Google Ads customer id, without dashes. */
+    customerId: string;
+    /** The manager account the sign-in reaches the customer through, if any. */
+    loginCustomerId: string | null;
+};
+
+export type YoutubeAnalyticsApiSource = {
+    connector: ApiConnectorType.YOUTUBE_ANALYTICS;
+    /** The YouTube channel id, starting with UC. */
+    channelId: string;
+};
+
+export type LinkedInAdsApiSource = {
+    connector: ApiConnectorType.LINKEDIN_ADS;
+    /** The numeric LinkedIn ad account id, as shown in Campaign Manager. */
+    adAccountId: string;
+};
+
 /** Connector settings of a live source; the server fixes its access rules. */
 export type ExternalConnectionApiSource =
     | PostHogApiSource
     | SearchConsoleApiSource
-    | Ga4ApiSource;
+    | Ga4ApiSource
+    | MetaAdsApiSource
+    | GoogleAdsApiSource
+    | YoutubeAnalyticsApiSource
+    | LinkedInAdsApiSource;
+
+/** The settings of one integration's sources. */
+export type ApiSourceOf<C extends ApiConnectorType> = Extract<
+    ExternalConnectionApiSource,
+    { connector: C }
+>;
 
 /** A Google property the signed-in account can query, offered after sign-in. */
 export type GoogleLiveSourceChoice = {
@@ -58,6 +94,12 @@ export const POSTHOG_REGION_ORIGINS = {
     us: 'https://us.posthog.com',
     eu: 'https://eu.posthog.com',
 } as const;
+
+export const META_ADS_ORIGIN = 'https://graph.facebook.com';
+export const META_ADS_API_VERSION = 'v25.0';
+
+export const getMetaAdsInsightsPath = (adAccountId: string) =>
+    `/${META_ADS_API_VERSION}/act_${adAccountId}/insights`;
 
 /** HTTP methods an admin can opt a connection into. Single source of truth for
  *  the backend validation allowlist and the frontend method pickers. */
@@ -165,6 +207,10 @@ export type ExternalConnection = {
      * Optional for compatibility with older servers during rolling upgrades.
      */
     liveSourceName?: string | null;
+    /** What an admin says this live source is for. Reaches the AI agent. */
+    aiHint?: string | null;
+    /** The name the connection picker showed for the source's target. */
+    targetLabel?: string | null;
     hasSecret: boolean;
     createdByUserUuid: string | null;
     updatedByUserUuid: string | null;
@@ -226,11 +272,61 @@ export type CreateExternalConnection = {
     oauthClientAuthMethod?: OAuthClientAuthMethod | null;
     customHeaders?: Record<string, string> | null; // static non-secret headers sent on every request
     apiSource?: ExternalConnectionApiSource | null;
+    /**
+     * Prefix of a new live source's explore names. Defaults to one derived
+     * from the name. It is set once and can't be changed afterwards.
+     */
+    explorePrefix?: string;
     secret?: string | null; // bearer token, api key, client secret, or service-account keyfile JSON; null for type 'none'
 };
 
 /** Omitted/blank `secret` means the stored secret is left unchanged. */
-export type UpdateExternalConnection = Partial<CreateExternalConnection>;
+export const LIVE_SOURCE_AI_HINT_MAX_LENGTH = 500;
+
+export type UpdateExternalConnection = Partial<
+    Omit<CreateExternalConnection, 'explorePrefix'>
+> & {
+    /** Live sources only. Empty or null clears it. */
+    aiHint?: string | null;
+};
+
+/** Whether a new live source can use an explore prefix. */
+export type ExplorePrefixCheck = {
+    prefix: string;
+    /** The explore names the prefix gives; empty when its format is invalid. */
+    exploreNames: string[];
+    error: string | null;
+    /** A free prefix close to the one asked for, when it's taken. */
+    suggestion: string | null;
+    suggestionExploreNames: string[];
+};
+
+export type ApiExplorePrefixCheckResponse = {
+    status: 'ok';
+    results: ExplorePrefixCheck;
+};
+
+/** A deleted live source whose explore prefix a new source can take over. */
+export type ReattachableLiveSource = {
+    externalConnectionUuid: string;
+    name: string;
+    explorePrefix: string;
+    exploreNames: string[];
+    apiSource: ExternalConnectionApiSource;
+    deletedAt: Date;
+    usedByChartCount: number;
+    /** Reads the same target as the source being reattached. */
+    isSameTarget: boolean;
+};
+
+export type ApiReattachableLiveSourcesResponse = {
+    status: 'ok';
+    results: ReattachableLiveSource[];
+};
+
+export type ApiReattachLiveSourceRequest = {
+    deletedConnectionUuid: string;
+};
 
 export type AppExternalConnectionLink = {
     externalConnectionUuid: string;
@@ -399,4 +495,30 @@ export type ExternalConnectionApiUsage = {
 export type ApiExternalConnectionApiUsageResponse = {
     status: 'ok';
     results: ExternalConnectionApiUsage[];
+};
+
+export type ApiSourceSchemaEvent = {
+    name: string;
+    count: number;
+};
+
+/** What a live source's schema scan found, kept so onboarding and the AI agent know its data up front. */
+export type ApiSourceSchemaScan =
+    | { status: 'pending'; requestedAt: Date }
+    | {
+          status: 'ready';
+          scannedAt: Date;
+          windowDays: number;
+          /** Busiest first; capped, see eventsTruncated. */
+          events: ApiSourceSchemaEvent[];
+          eventsTruncated: boolean;
+          /** Null when the property scan failed. */
+          propertyKeys: string[] | null;
+      }
+    | { status: 'failed'; scannedAt: Date; error: string };
+
+export type ApiExternalConnectionSchemaResponse = {
+    status: 'ok';
+    /** Null when the connection was never scanned. */
+    results: ApiSourceSchemaScan | null;
 };

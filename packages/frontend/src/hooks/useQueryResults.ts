@@ -157,12 +157,13 @@ export const scheduleDownloadQuery = async (
             attachmentDownloadName: options.attachmentDownloadName,
             conditionalFormattings: options.conditionalFormattings,
             showColumnTotals: options.showColumnTotals,
+            showSubtotals: options.showSubtotals,
         }),
         version: 'v2',
     });
 };
 
-const executeAsyncQuery = (
+export const executeAsyncQuery = (
     lightdashApi: LightdashApi,
     data?: QueryResultsProps | null,
     signal?: AbortSignal,
@@ -187,7 +188,9 @@ const executeAsyncQuery = (
             lightdashApi,
             data.projectUuid,
             {
-                context: QueryExecutionContext.CHART,
+                // Screenshot renders pass context=scheduledDelivery so the
+                // query is attributed to the delivery, as dashboards do.
+                context: data.context ?? QueryExecutionContext.CHART,
                 chartUuid: data.chartUuid,
                 limit: data.csvLimit,
                 invalidateCache: data.invalidateCache,

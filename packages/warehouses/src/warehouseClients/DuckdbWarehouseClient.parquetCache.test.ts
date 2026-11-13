@@ -1,5 +1,7 @@
 import { DuckDBConnection, DuckDBInstance } from '@duckdb/node-api';
 import fs from 'fs/promises';
+import { createServer } from 'http';
+import { type AddressInfo } from 'net';
 import os from 'os';
 import path from 'path';
 import {
@@ -47,6 +49,175 @@ describe('private query staging of cached Parquet', () => {
             type: 'duckdb_parquet',
             resolveSource: async () => manifest,
         });
+    const bufferedSource = () => {
+        const manifest = source('buffered');
+        const url = manifest.tables[0].urls[0].split('?')[0];
+        const getSignedUrls = vi.fn(async (urls: readonly string[]) =>
+            urls.map((objectUrl) => `${objectUrl}?X-Amz-Signature=test`),
+        );
+        return {
+            ...manifest,
+            tables: [{ name: 'query_events', urls: [url] }],
+            fileBuffers: new Map([[url, bytes]]),
+            getSignedUrls,
+        };
+    };
+
+    it('reads unsigned buffered objects without signing them', async () => {
+        const manifest = bufferedSource();
+        expect(
+            (
+                await reader(manifest).runQuery(
+                    'SELECT value, org_id, CAST(dt AS VARCHAR) AS day FROM query_events',
+                )
+            ).rows,
+        ).toEqual([{ value: 42, org_id: 'buffered', day: '2026-10-08' }]);
+        expect(manifest.getSignedUrls).not.toHaveBeenCalled();
+        expect(manifest.tables[0].urls[0]).not.toContain('?');
+    });
+
+    it.each([
+        [
+            'SELECT value + FROM query_events',
+            'sql_parser_error',
+            'The analytics query contains malformed SQL. Check any custom column expressions.',
+        ],
+        [
+            'SELECT private_column FROM query_events',
+            'unknown_field',
+            'The analytics query references an unknown field. Check the fields in your custom columns.',
+        ],
+    ])('reports invalid SQL safely (%s)', async (sql, code, message) => {
+        await expect(
+            reader(bufferedSource()).runQuery(sql),
+        ).rejects.toMatchObject({
+            message,
+            code,
+        });
+    });
+
+    it('signs only unsigned objects and reads the whole table remotely after a staging failure', async () => {
+        const requests: string[] = [];
+        const server = createServer((request, response) => {
+            requests.push(request.url!);
+            if (!request.url!.includes('X-Amz-Signature=test')) {
+                response.writeHead(403).end();
+                return;
+            }
+            const range = /^bytes=(\d+)-(\d*)$/.exec(
+                request.headers.range ?? '',
+            );
+            const start = range ? Number(range[1]) : 0;
+            const end = range?.[2] ? Number(range[2]) : bytes.length - 1;
+            response.writeHead(range ? 206 : 200, {
+                'Content-Length': end - start + 1,
+                'Accept-Ranges': 'bytes',
+                ...(range
+                    ? {
+                          'Content-Range': `bytes ${start}-${end}/${bytes.length}`,
+                      }
+                    : {}),
+            });
+            response.end(
+                request.method === 'HEAD'
+                    ? undefined
+                    : bytes.subarray(start, end + 1),
+            );
+        });
+        await new Promise<void>((resolve) => {
+            server.listen(0, '127.0.0.1', resolve);
+        });
+        try {
+            const manifest = bufferedSource();
+            const { port } = server.address() as AddressInfo;
+            const endpoint = `http://127.0.0.1:${port}`;
+            manifest.scope = manifest.scope.replace(
+                'https://storage.example',
+                endpoint,
+            );
+            const unsigned = manifest.tables[0].urls[0].replace(
+                'https://storage.example',
+                endpoint,
+            );
+            const signed = `${unsigned.replace('part.parquet', 'other.parquet')}?X-Amz-Signature=test`;
+            manifest.tables[0].urls = [unsigned, signed];
+            manifest.fileBuffers = new Map([
+                [unsigned, bytes],
+                [signed, bytes],
+            ]);
+            const { writeFile } = fs;
+            const writes = vi
+                .spyOn(fs, 'writeFile')
+                .mockImplementationOnce(writeFile)
+                .mockRejectedValueOnce(
+                    new Error('Temporary storage unavailable'),
+                );
+            expect(
+                (
+                    await reader(manifest).runQuery(
+                        'SELECT SUM(value) AS total FROM query_events',
+                    )
+                ).rows,
+            ).toEqual([{ total: '84' }]);
+            expect(manifest.getSignedUrls).toHaveBeenCalledExactlyOnceWith([
+                unsigned,
+            ]);
+            expect(requests.length).toBeGreaterThan(0);
+            expect(
+                requests.every((url) => url.includes('X-Amz-Signature=test')),
+            ).toBe(true);
+            expect(manifest.tables[0].urls).toEqual([unsigned, signed]);
+            await expect(
+                fs.stat(String(writes.mock.calls[0][0])),
+            ).rejects.toThrow();
+        } finally {
+            server.closeAllConnections();
+            await new Promise<void>((resolve, reject) => {
+                server.close((error) => (error ? reject(error) : resolve()));
+            });
+        }
+    });
+
+    it.each(['buffer', 'signer', 'signed mode'])(
+        'rejects unsigned object URLs without %s',
+        async (missing) => {
+            const manifest: DuckdbParquetSource = bufferedSource();
+            if (missing === 'buffer') manifest.fileBuffers = new Map();
+            if (missing === 'signer') delete manifest.getSignedUrls;
+            if (missing === 'signed mode') manifest.signedUrls = false;
+            await expect(
+                reader(manifest).runQuery('SELECT * FROM query_events'),
+            ).rejects.toThrow();
+        },
+    );
+
+    it.each(['count', 'object', 'scope', 'signature', 'encoding'] as const)(
+        'rejects an invalid fallback URL %s',
+        async (invalid) => {
+            const manifest = bufferedSource();
+            vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(
+                new Error('Temporary storage unavailable'),
+            );
+            manifest.getSignedUrls.mockImplementation(async ([url]) => {
+                const signed = `${url}?X-Amz-Signature=test`;
+                return {
+                    count: [],
+                    object: [signed.replace('part.parquet', 'other.parquet')],
+                    scope: [
+                        signed.replace('org_id%3Dbuffered', 'org_id%3Dother'),
+                    ],
+                    signature: [url],
+                    encoding: [
+                        signed.replace('part.parquet', '%70art.parquet'),
+                    ],
+                }[invalid];
+            });
+            await expect(
+                reader(manifest).runQuery('SELECT * FROM query_events'),
+            ).rejects.toThrow();
+            expect(manifest.getSignedUrls).toHaveBeenCalledOnce();
+        },
+    );
 
     it('reads cached bytes, preserves hive columns and removes private files after each query', async () => {
         const writes = vi.spyOn(fs, 'writeFile');
@@ -71,7 +242,7 @@ describe('private query staging of cached Parquet', () => {
         expect(manifest.tables[0].urls[0]).toMatch(/^https:/);
     });
 
-    it('stages a complete cached table larger than 8 MiB without remote reads', async () => {
+    it('stages a complete cached table larger than 32 MiB without remote reads', async () => {
         const file = path.join(directory, 'large-fixture.parquet');
         const instance = await DuckDBInstance.create(':memory:', {
             memory_limit: '256MB',
@@ -89,14 +260,14 @@ describe('private query staging of cached Parquet', () => {
         const part = await fs.readFile(file);
         expect(part.length).toBeLessThan(1024 * 1024);
         const manifest = source('large');
-        const urls = Array.from({ length: 40 }, (_, i) =>
+        const urls = Array.from({ length: 100 }, (_, i) =>
             manifest.tables[0].urls[0].replace(
                 'part.parquet',
                 `part-${i}.parquet`,
             ),
         );
-        expect(part.length * urls.length).toBeGreaterThan(8 * 1024 * 1024);
-        expect(part.length * urls.length).toBeLessThan(32 * 1024 * 1024);
+        expect(part.length * urls.length).toBeGreaterThan(32 * 1024 * 1024);
+        expect(part.length * urls.length).toBeLessThan(64 * 1024 * 1024);
         manifest.tables[0].urls = urls;
         manifest.fileBuffers = new Map(urls.map((url) => [url, part]));
         const writes = vi.spyOn(fs, 'writeFile');
@@ -107,7 +278,7 @@ describe('private query staging of cached Parquet', () => {
                     'SELECT count(*) AS total, sum(value) AS sum FROM query_events',
                 )
             ).rows,
-        ).toEqual([{ total: '400000', sum: '1999800000' }]);
+        ).toEqual([{ total: '1000000', sum: '4999500000' }]);
         expect(writes).toHaveBeenCalledTimes(urls.length);
         await Promise.all(
             writes.mock.calls.map(([staged]) =>

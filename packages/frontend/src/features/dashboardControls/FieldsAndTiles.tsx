@@ -1,7 +1,6 @@
 import { type DashboardFilterableField } from '@lightdash/common';
-import { Stack } from '@mantine/core';
+import { Box, Group, Stack } from '@mantine/core';
 import { useMemo, type FC } from 'react';
-import { useUiStrings } from '../../ee/providers/Embed/useUiStrings';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import {
     selectActiveTabUuid,
@@ -10,22 +9,23 @@ import {
     selectSqlChartTilesMetadata,
     useDashboardSelector,
 } from '../dashboard/store';
-import FilterFieldSelect from '../dashboardFilters/FilterConfiguration/FilterFieldSelect';
 import SqlColumnSelect from '../dashboardFilters/FilterConfiguration/SqlColumnSelect';
 import { getUniqueSqlColumns } from '../dashboardFilters/FilterConfiguration/utils';
+import { useAddMenuBack } from './addMenuBack';
+import { useControlContractClasses } from './controlContractClasses';
+import { FieldPicker, PickerBack } from './ControlPickers';
 import { DropdownClass } from './DropdownClass';
-import { useRailContractClasses } from './railContractClasses';
-import { useControlsSidebar } from './useControlsSidebar';
+import { useControlsEditor } from './useControlsEditor';
 
 const NO_FIELDS: DashboardFilterableField[] = [];
 const NO_TILE_FIELDS: Record<string, DashboardFilterableField[]> = {};
 
 // A filter with no field yet: the shipped field search, opened
 export const FieldsAndTiles: FC = () => {
-    const { editingRule, addFirstField, addFirstSqlColumn } =
-        useControlsSidebar();
-    const getUiString = useUiStrings();
-    const contractClasses = useRailContractClasses();
+    const { editingRule, addFirstField, addFirstSqlColumn, isViewer } =
+        useControlsEditor();
+    const onBack = useAddMenuBack();
+    const contractClasses = useControlContractClasses();
     const dashboardTiles = useDashboardSelector(selectDashboardTiles);
     const dashboardTabs = useDashboardSelector(selectDashboardTabs);
     const activeTabUuid = useDashboardSelector(selectActiveTabUuid);
@@ -65,37 +65,40 @@ export const FieldsAndTiles: FC = () => {
                 className={contractClasses?.addFilterDropdown ?? null}
             >
                 {starterFields.length > 0 ? (
-                    <FilterFieldSelect
+                    <FieldPicker
                         fields={starterFields}
                         availableTileFilters={availableTileFilters}
                         tiles={tiles}
                         tabs={dashboardTabs}
                         activeTabUuid={activeTabUuid}
-                        selectedField={undefined}
-                        withLabel={false}
-                        placeholder={getUiString('filters.rail.searchFields')}
+                        onBack={onBack}
                         withinPortal
-                        defaultOpened
-                        onChange={addFirstField}
+                        isViewer={isViewer}
+                        onPick={addFirstField}
                     />
                 ) : (
-                    <SqlColumnSelect
-                        columns={sqlColumnOptions}
-                        value={undefined}
-                        onChange={(column) => {
-                            addFirstSqlColumn(
-                                column,
-                                Object.fromEntries(
-                                    Object.entries(sqlChartTilesMetadata).map(
-                                        ([tileUuid, metadata]) => [
-                                            tileUuid,
-                                            metadata.columns,
-                                        ],
-                                    ),
-                                ),
-                            );
-                        }}
-                    />
+                    <Group gap="xs" wrap="nowrap">
+                        {onBack !== null && <PickerBack onBack={onBack} />}
+                        <Box flex={1}>
+                            <SqlColumnSelect
+                                columns={sqlColumnOptions}
+                                value={undefined}
+                                onChange={(column) => {
+                                    addFirstSqlColumn(
+                                        column,
+                                        Object.fromEntries(
+                                            Object.entries(
+                                                sqlChartTilesMetadata,
+                                            ).map(([tileUuid, metadata]) => [
+                                                tileUuid,
+                                                metadata.columns,
+                                            ]),
+                                        ),
+                                    );
+                                }}
+                            />
+                        </Box>
+                    </Group>
                 )}
             </DropdownClass>
         </Stack>

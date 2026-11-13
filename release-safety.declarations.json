@@ -172,6 +172,123 @@
         "organization-warehouse-credentials-api-retired": {
             "reason": "The deprecated organization warehouse credential REST endpoints and CLI organization-credentials option are removed. Callers of those endpoints receive 404 and older CLI commands using that option must configure warehouse credentials on the project instead. Existing project credentials, personal sign-ins and service accounts retain their current behavior. Legacy storage and shared compatibility types remain unchanged.",
             "requiredStop": false
+        },
+        "dashboard-control-section-slugs-experimental-exports": {
+            "reason": "Experimental dashboard section downloads use slugs when dashboard-controls is enabled. The flag defaults off on Cloud and self-hosted; disabled exports retain IDs, including previously saved sections. Legacy ID uploads and stored identities remain supported. Experimental readers must adopt slugs. POST findings are allOf restructuring; existing request fields and requirements are unchanged.",
+            "requiredStop": false,
+            "impact": {
+                "kind": "no-external-callers",
+                "featureFlag": "dashboard-controls",
+                "covers": {
+                    "rest": [
+                        "GET /api/v1/projects/{projectUuid}/code/dashboards",
+                        "GET /api/v1/projects/{projectUuid}/dashboards/code",
+                        "POST /api/v1/projects/{projectUuid}/code/dashboards/{slug}",
+                        "POST /api/v1/projects/{projectUuid}/dashboards/{slug}/code"
+                    ],
+                    "mcp": []
+                }
+            }
+        },
+        "onboarding-agent-endpoints-removed": {
+            "reason": "The onboarding agent is removed. Its six REST endpoints under /api/v1/ee/projects/{projectUuid}/agent-onboarding now return 404, and POST /api/v1/org/playground-projects/ensure no longer accepts the agent_onboarding_wait trigger. Project admins scripting these undocumented onboarding endpoints would see the errors; every other playground trigger behaves as before.",
+            "requiredStop": false,
+            "impact": {
+                "kind": "no-external-callers",
+                "firstPartyOnly": "The web app's onboarding screens are the only client of these operations, and they are removed in the same change. During a rolling update an old homepage tab gets a 404 for the latest run and falls back to generated suggestion chips, while an old run page shows its not-found state until refresh, which is safe because no onboarding work depends on it.",
+                "covers": {
+                    "rest": [
+                        "POST /api/v1/ee/projects/{projectUuid}/agent-onboarding",
+                        "GET /api/v1/ee/projects/{projectUuid}/agent-onboarding",
+                        "GET /api/v1/ee/projects/{projectUuid}/agent-onboarding/latest",
+                        "GET /api/v1/ee/projects/{projectUuid}/agent-onboarding/{agentOnboardingRunUuid}",
+                        "GET /api/v1/ee/projects/{projectUuid}/agent-onboarding/{agentOnboardingRunUuid}/file",
+                        "POST /api/v1/ee/projects/{projectUuid}/agent-onboarding/{agentOnboardingRunUuid}/cancel",
+                        "POST /api/v1/org/playground-projects/ensure"
+                    ],
+                    "mcp": []
+                }
+            }
+        },
+        "results-cache-enabled-flag-removed": {
+            "reason": "The ResultsCacheEnabled member is removed from the exported FeatureFlags enum. TypeScript consumers referencing this rollout flag must remove it when upgrading; results caching is now a per-project setting, and the migration copies each organization's flag value into its projects.",
+            "requiredStop": false
+        },
+        "agent-permissions-per-role-fields-removed": {
+            "reason": "The per-role agent limits are removed. GET /api/v2/org/agent-permissions no longer returns results.defaults or results.systemRoleMatrix. PUT and POST /api/v2/org/agent-permissions/reset no longer return results.systemRoleMatrix. PUT no longer takes systemRoleMatrix; a request that still sends it gets no error and the server ignores it. The agent-identity feature flag is off by default on Cloud and on self-hosted instances and is set per organization. With the flag off, agent enforcement does not change. For organizations with the flag on and agent limits on, a person with a built-in role gets every agent capability that the organization setting allows, and per-role limits saved earlier no longer apply. The stored per-role rows stay in the database, unread and unchanged. During a rolling update an old settings page tab or an old UI pod reads the missing matrix and shows an error until refresh, and a save from the new page that reaches an old API pod is refused until the rollout ends. This is accepted because the settings page is the only client and a refresh or retry after the rollout fixes both.",
+            "requiredStop": false,
+            "impact": {
+                "kind": "no-external-callers",
+                "firstPartyOnly": "The organization Agents settings page in the Lightdash web app is the only client of these operations, and it no longer reads or sends the per-role fields. An old tab of that page shows an error until refresh.",
+                "covers": {
+                    "rest": [
+                        "GET /api/v2/org/agent-permissions",
+                        "PUT /api/v2/org/agent-permissions",
+                        "POST /api/v2/org/agent-permissions/reset"
+                    ],
+                    "mcp": []
+                }
+            }
+        },
+        "ai-agent-message-query-routes-replaced-by-node-routes": {
+            "reason": "The AI agent message query pipeline REST routes under /messages/{messageUuid}/queries are removed in favour of node-addressed routes. Anything calling them now gets 404. No shipped UI opens these routes: the footer that used them was removed earlier, so an old browser tab or UI pod never requests them during a rolling update, and only the removed routes are affected.",
+            "requiredStop": false,
+            "impact": {
+                "kind": "no-external-callers",
+                "firstPartyOnly": "The web app's AI agent message footer was the only client of these operations and was removed before this change; nothing in the web app, SDK or CLI calls them today, so during a rolling update an old tab behaves exactly as before and never hits the removed routes.",
+                "covers": {
+                    "rest": [
+                        "GET /api/v1/projects/{projectUuid}/aiAgents/{agentUuid}/threads/{threadUuid}/messages/{messageUuid}/queries",
+                        "GET /api/v1/projects/{projectUuid}/aiAgents/{agentUuid}/threads/{threadUuid}/messages/{messageUuid}/queries/{queryUuid}/viz-query",
+                        "GET /api/v1/projects/{projectUuid}/aiAgents/{agentUuid}/threads/{threadUuid}/messages/{messageUuid}/queries/{queryUuid}/query-results"
+                    ],
+                    "mcp": []
+                }
+            }
+        },
+        "data-app-custom-dependencies-flag-removed": {
+            "reason": "The EnableDataAppCustomDependencies member is removed from the exported FeatureFlags enum. TypeScript consumers referencing this rollout flag must remove it when upgrading. Whether an organization may upload custom data app dependencies is now the dataAppCustomDependenciesEnabled organization setting, which a migration seeds from the flag, so self-hosters who listed enable-data-app-custom-dependencies in LIGHTDASH_ENABLE_FEATURE_FLAGS keep access and later changes are made by an org admin in the data apps settings.",
+            "requiredStop": false
+        },
+        "org-settings-data-app-automatic-thumbnails-removed": {
+            "reason": "GET and PATCH /api/v1/org/settings no longer return dataAppAutomaticThumbnailsEnabled, and PATCH ignores it if sent, because automatic data app thumbnails are removed. The field only controlled a capture gated by a feature flag that was off by default, and only the data apps settings page read or wrote it. During a rolling update an old settings tab reads the missing field as on and its toggle has no effect until refresh; nothing else on the page changes.",
+            "requiredStop": false,
+            "impact": {
+                "kind": "no-external-callers",
+                "firstPartyOnly": "The data apps General settings page in the Lightdash web app is the only client that reads or writes dataAppAutomaticThumbnailsEnabled; it showed the control only behind the enable-data-app-automatic-thumbnails flag. Every other field of these operations is unchanged.",
+                "covers": {
+                    "rest": [
+                        "GET /api/v1/org/settings",
+                        "PATCH /api/v1/org/settings"
+                    ],
+                    "mcp": []
+                }
+            }
+        },
+        "deep-research-legacy-report-api-removed": {
+            "reason": "The legacy Deep Research report is removed now that every run publishes its report as a Document and the last legacy reports passed their 30-day retention. GET /api/v1/ee/projects/{projectUuid}/ai-deep-research/{aiDeepResearchRunUuid}/charts/{queryUuid}, POST .../charts/{chartKey}/refresh and GET .../queries/{queryUuid}/results now return 404. Run responses (create, get, list and cancel) no longer include resultMarkdown, reportExpiresAt, reportExpiredAt or isReportExpired, and @lightdash/common no longer exports AI_DEEP_RESEARCH_REPORT_RETENTION_DAYS or ApiAiDeepResearchChartResponse. During a rolling update an old report page tab shows its not-ready state or redirects to the run's Document, and an old run card shows the Document card or the unavailable notice; both are safe because no legacy report content remains to show.",
+            "requiredStop": false,
+            "impact": {
+                "kind": "no-external-callers",
+                "firstPartyOnly": "The Lightdash web app's legacy Deep Research report viewer was the only client of the report chart routes and of the report fields, and it is removed in the same change; the run card and the old report URL now use the run's Document instead.",
+                "covers": {
+                    "rest": [
+                        "GET /api/v1/ee/projects/{projectUuid}/ai-deep-research/{aiDeepResearchRunUuid}/charts/{queryUuid}",
+                        "POST /api/v1/ee/projects/{projectUuid}/ai-deep-research/{aiDeepResearchRunUuid}/charts/{chartKey}/refresh",
+                        "GET /api/v1/ee/projects/{projectUuid}/ai-deep-research/{aiDeepResearchRunUuid}/queries/{queryUuid}/results",
+                        "POST /api/v1/ee/projects/{projectUuid}/ai-deep-research",
+                        "GET /api/v1/ee/projects/{projectUuid}/ai-deep-research",
+                        "GET /api/v1/ee/projects/{projectUuid}/ai-deep-research/{aiDeepResearchRunUuid}",
+                        "POST /api/v1/ee/projects/{projectUuid}/ai-deep-research/{aiDeepResearchRunUuid}/cancel"
+                    ],
+                    "mcp": []
+                }
+            }
+        },
+        "deep-research-legacy-report-columns-dropped": {
+            "reason": "Drops the legacy Deep Research report columns result_markdown, report_expires_at and report_expired_at on ai_deep_research_runs, with their expiry index. Ships in the same release as the legacy Deep Research report removal (lightdash/lightdash#32457), which stops reading and writing them. During a rolling upgrade from an earlier release, old pods still read these columns when loading Deep Research runs and write them when completing, cancelling or sweeping runs, so those requests fail until the rollout finishes; a run that completes in that window may end up failed. Use the Recreate strategy to avoid the window.",
+            "requiredStop": false,
+            "migration": "packages/backend/src/ee/database/migrations/20261112120000_drop_ai_deep_research_legacy_report_columns.ts"
         }
     }
 }

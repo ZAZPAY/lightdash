@@ -5,8 +5,9 @@ with DuckDB joining or transforming the results of the other queries. The
 result is shown in the thread as a chart artifact with the pipeline beside it.
 
 Sibling of merge queries: both run on the compose engine, but a composer query
-is an agent-authored pipeline of any shape, while a merge is a two-query join
-in the Explorer.
+is an agent-authored pipeline of any shape, while a merge is a join of
+explore queries in the Explorer. A merge node brings that join into a
+pipeline through the same compiler.
 
 ## Language
 
@@ -70,6 +71,17 @@ SQL on the compose engine, or Python in a sandbox. Grouped under
 _Avoid_: duckdb node, python node (in user-facing copy), join node,
 post-processing step
 
+**Merge node**:
+A transformation that joins two or more semanticLayer nodes on dimensions
+they share at the same grain, declared in the merge vocabulary (sources,
+join key, join type, calculations, repeat values, sort, limit) with no SQL.
+It runs through the merge compiler, so its columns keep each governed
+field's label, format, description and provenance, and the merge refusals
+(fan-out, key type or grain mismatch, a source cut off at its limit) reach
+the agent as correctable errors. Its sources are its legs, read as they
+ran: each must select its join keys and return fewer rows than its limit.
+_Avoid_: join node, merge step, merged query (the Explorer's)
+
 **Thread composer query nodes**:
 The nodes that succeeded in a thread's composer queries, each under its node
 id, with its node columns. A failed node is never registered, so its node id
@@ -100,29 +112,36 @@ title, never by node id.
 _Avoid_: depends on, inputs, references (in user-facing copy)
 
 **Unread node**:
-A node of a submission that no other node of the same submission reads. A
-submission has exactly one; a submission with several is rejected before it
-runs.
+A node of a submission that no other node of the same submission reads. The
+tool returns the rows of every unread node, which share the preview rows. A
+submission has at most five; one with more is rejected before it runs.
 _Avoid_: sink, end node, orphan, leaf
 
 **Terminal node**:
-The node whose result the tool returns to the agent. The submission's unread
-node by default, or any node of the pipeline chosen explicitly. Labelled
-"Final result" in the Lineage.
+The node whose result the tool returns to the agent as its preview. The
+submission's last unread node by default, or any node of the pipeline chosen explicitly.
+Labelled "Final result" in the Lineage.
 _Avoid_: output node, final node, sink
 
 **Present**:
 The agent's act of making an artifact from a node so its result is shown to
 the user: a visualize call, on any node of the thread, from this turn or an
 earlier one. Results the agent does not present stay exploration, visible only
-in the pipeline card. Slack still presents with `<slack-table queryUuid>` in
-the final answer.
+in the pipeline card or through a node citation. Slack still presents with
+`<slack-table queryUuid>` in the final answer.
 _Avoid_: select (the Slack vocabulary), show, publish, render
 
 **Presented node**:
 A node the agent presented. Its result is what the composer artifact version
 displays by default.
 _Avoid_: selected node, displayed node (which may be any node of the panel)
+
+**Node citation**:
+A reference in the agent's answer from a figure to the thread composer query
+node that produced it, shown to users as a dotted underline on the figure that
+opens that node's result and everything it reads. One that names no thread
+composer query node shows as plain text, as it does in Slack.
+_Avoid_: query link, query node citation, chip (the web form only)
 
 **Snapshot**:
 The closed pipeline stored in an artifact version: the presented node and
@@ -145,7 +164,8 @@ _Avoid_: node run, query status, limit reached flag
 
 **Node sample**:
 The first few rows of a non-terminal node's result, shown to the agent in the
-composer query tool's result beside its node columns. Never shown to users.
+composer query tool's result beside its node columns; for another unread node,
+its share of the preview rows. Never shown to users.
 _Avoid_: preview (the terminal node's rows), peek, head
 
 **Node columns**:
@@ -199,7 +219,25 @@ The chart artifact created when the agent presents a node: the presented
 node's result plus the snapshot that produces it. One per thread, one version
 per presented node. A version is declarative: its snapshot, presented node
 and viz config. It holds no results, and a run never changes it.
-_Avoid_: composer chart, result artifact
+_Avoid_: composer chart (the saved chart made from a version), result
+artifact
+
+**Composer chart**:
+A saved chart whose definition is a pipeline and a chart config. It is saved
+from a composer artifact version and keeps no link to the thread or the
+agent. It belongs to a dashboard. Running it never changes it.
+_Avoid_: pipeline chart, saved composer query, composer tile (the dashboard
+tile that shows one)
+
+**Bound run**:
+A run of a stored chart's pipeline for someone viewing it. Only the stored
+nodes run, and the viewer's own write permissions are not checked.
+_Avoid_: viewer run, document run
+
+**Run binding**:
+The server-only proof a bound run carries: who is viewing, which stored chart,
+and the nodes resolved from it. No API can create one.
+_Avoid_: query context, token
 
 **Lineage**:
 The composer artifact view beside the chart that shows the pipeline: a graph
@@ -212,7 +250,7 @@ card (that is the live tool-call card)
 The body of the "Ran query" tool-call row ("Ran composer queries" on calls
 recorded before the rename), shown for every
 submission: expanded while its run is in flight or has failed, collapsed once
-it completes. The only record of a submission the agent did not present.
+it completes. The only full record of a submission the agent did not present.
 _Avoid_: tool-call description, Lineage
 
 ## Boundaries

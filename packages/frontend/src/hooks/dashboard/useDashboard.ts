@@ -13,6 +13,7 @@ import {
     type DashboardVersion,
     type DateGranularity,
     type ExportContentFormat,
+    type ExportContentRequest,
     type ParametersValuesMap,
     type SavedChartsInfoForDashboardAvailableFilters,
     type SchedulerCsvOptions,
@@ -274,6 +275,10 @@ const exportDashboardContent = async (
         customViewportWidth?: number;
         selectedTabs?: string[] | null;
         parameters?: ParametersValuesMap;
+        tileParameters?: Record<
+            string,
+            { parameters: ParametersValuesMap; excludedParameterKeys: string[] }
+        >;
     },
 ) =>
     lightdashApi<ApiJobScheduledResponse['results']>({
@@ -311,6 +316,13 @@ export const useExportDashboardContent = () => {
             customViewportWidth?: number;
             selectedTabs?: string[] | null;
             parameters?: ParametersValuesMap;
+            tileParameters?: Record<
+                string,
+                {
+                    parameters: ParametersValuesMap;
+                    excludedParameterKeys: string[];
+                }
+            >;
         }
     >(
         (data) =>
@@ -326,6 +338,9 @@ export const useExportDashboardContent = () => {
                     customViewportWidth: data.customViewportWidth,
                     selectedTabs: data.selectedTabs,
                     parameters: data.parameters,
+                    ...(data.tileParameters !== undefined && {
+                        tileParameters: data.tileParameters,
+                    }),
                 },
             ),
         {
@@ -426,6 +441,7 @@ export const useExportDashboardContentPreview = () => {
             customViewportWidth?: number;
             selectedTabs?: string[] | null;
             parameters?: ParametersValuesMap;
+            tileParameters?: ExportContentRequest['tileParameters'];
         }
     >(
         async (data) => {
@@ -441,6 +457,9 @@ export const useExportDashboardContentPreview = () => {
                     customViewportWidth: data.customViewportWidth,
                     selectedTabs: data.selectedTabs,
                     parameters: data.parameters,
+                    ...(data.tileParameters !== undefined && {
+                        tileParameters: data.tileParameters,
+                    }),
                 },
             );
             const details = (await pollJobStatus(
@@ -917,21 +936,26 @@ export const useDashboardVersionRollbackMutation = (
     );
 };
 
-export const appendNewTilesToBottom = <T extends Pick<DashboardTile, 'y'>>(
+// Each tab is its own canvas, so a new tile goes below the tiles of its own tab
+export const appendNewTilesToBottom = <
+    T extends Pick<DashboardTile, 'y' | 'h'> &
+        Partial<Pick<DashboardTile, 'tabUuid'>>,
+>(
     existingTiles: T[] | undefined,
     newTiles: T[],
 ): T[] => {
-    const tilesY =
-        existingTiles &&
-        existingTiles.map(function (tile) {
-            return tile.y;
-        });
-    const maxY =
-        tilesY && tilesY.length > 0 ? Math.max.apply(Math, tilesY) : -1;
     const reorderedTiles = newTiles.map((tile) => ({
         ...tile,
-        y: maxY + 1,
-    })); //add to the bottom
+        y: (existingTiles ?? [])
+            .filter(
+                (existing) =>
+                    (existing.tabUuid ?? null) === (tile.tabUuid ?? null),
+            )
+            .reduce(
+                (bottom, existing) => Math.max(bottom, existing.y + existing.h),
+                0,
+            ),
+    }));
 
     return [...(existingTiles ?? []), ...reorderedTiles];
 };

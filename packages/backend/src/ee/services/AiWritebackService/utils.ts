@@ -13,6 +13,7 @@ import {
 } from '@lightdash/common';
 import type { AiWritebackFailureStage } from '../../../analytics/LightdashAnalytics';
 import type { LightdashConfig } from '../../../config/parseConfig';
+import { normalizeCredentialHost } from '../../../utils/credentialDestination';
 import type { ClaudeCodeAnthropicConfig } from '../AppGenerateService/claudeCodeEnv';
 import {
     COMPILE_WRAPPER_PATH,
@@ -218,9 +219,12 @@ export const parseMergeRequestUrl = (
     } catch {
         throw new ParameterError(`"${raw}" is not a valid merge request URL.`);
     }
-    if (url.hostname !== hostDomain) {
+    if (
+        normalizeCredentialHost(url.host) !==
+        normalizeCredentialHost(hostDomain)
+    ) {
         throw new ParameterError(
-            `Only ${hostDomain} merge request links are supported (got "${url.hostname}").`,
+            `Only ${hostDomain} merge request links are supported (got "${url.host}").`,
         );
     }
     const match = url.pathname.match(/^\/(.+?)\/-\/merge_requests\/(\d+)/);
@@ -683,8 +687,8 @@ export const dbtSandboxVenvBin = (version: SupportedDbtVersions): string =>
     `${DBT_VENV_BIN_PREFIX}${version.slice(1)}/bin`;
 
 /**
- * Anthropic credentials for the sandboxed `claude` CLI. Writeback and the
- * onboarding agent share the data-apps credentials (`ANTHROPIC_API_KEY`); the
+ * Anthropic credentials for the sandboxed `claude` CLI. Writeback uses the
+ * data-apps credentials (`ANTHROPIC_API_KEY`); the
  * writeback-specific `AI_WRITEBACK_ANTHROPIC_API_KEY` is deprecated and only
  * honoured while the shared key is unset.
  */

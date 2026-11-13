@@ -1,4 +1,4 @@
-import { CallSettings } from 'ai';
+import { LanguageModelCallOptions, type RequestOptions } from 'ai';
 import { ProviderOptionsMap } from './types';
 
 export type ModelPresetProvider = 'openai' | 'anthropic' | 'google' | 'bedrock';
@@ -17,8 +17,13 @@ export const XHIGH_MAX_OUTPUT_TOKENS = 24_000;
 // `budget + 4096` and other Bedrock requests omit the output cap entirely.
 export const BEDROCK_MAX_OUTPUT_TOKENS = 24_000;
 
+/** What a preset is for. Within a provider, presets are listed newest first, so the first of a tier is its latest. */
+export type ModelTier = 'frontier' | 'balanced' | 'fast';
+
 export type ModelPreset<P extends SelectableModelProvider> = {
     name: string;
+    // Unset on a deprecated or instance-configured model, which nothing should prefer.
+    tier?: ModelTier;
     provider: P;
     modelId: string;
     displayName: string;
@@ -35,8 +40,10 @@ export type ModelPreset<P extends SelectableModelProvider> = {
     deprecated?: boolean;
     // Name of the same-provider preset that replaces a deprecated one
     supersededBy?: string;
-    callOptions: CallSettings;
+    callOptions: LanguageModelCallOptions & Omit<RequestOptions, 'timeout'>;
     providerOptions: ProviderOptionsMap[P] | undefined;
+    // Merged in for latency-bound calls that opt into minimal reasoning
+    minimalReasoningProviderOptions?: ProviderOptionsMap[P];
 } & (
     | { custom?: false; contextWindowTokens: number }
     // Instance-configured models may have an unknown context window.
@@ -52,6 +59,7 @@ export const MODEL_PRESETS: {
     openai: [
         {
             name: 'gpt-6.1-sol',
+            tier: 'frontier',
             provider: 'openai',
             modelId: 'gpt-6.1-sol',
             displayName: 'GPT-6.1 Sol',
@@ -66,6 +74,7 @@ export const MODEL_PRESETS: {
         },
         {
             name: 'gpt-6.1-terra',
+            tier: 'balanced',
             provider: 'openai',
             modelId: 'gpt-6.1-terra',
             displayName: 'GPT-6.1 Terra',
@@ -79,6 +88,7 @@ export const MODEL_PRESETS: {
         },
         {
             name: 'gpt-6-luna',
+            tier: 'fast',
             provider: 'openai',
             modelId: 'gpt-6-luna',
             displayName: 'GPT-6 Luna',
@@ -90,6 +100,8 @@ export const MODEL_PRESETS: {
                 // strictJsonSchema: provider default is true
                 parallelToolCalls: false,
             },
+            // Low effort still reasons past a 5 s budget on field mapping
+            minimalReasoningProviderOptions: { reasoningEffort: 'none' },
         },
         {
             name: 'gpt-6-sol',
@@ -228,6 +240,7 @@ export const MODEL_PRESETS: {
     anthropic: [
         {
             name: 'claude-opus-5-5',
+            tier: 'frontier',
             provider: 'anthropic',
             modelId: 'claude-opus-5-5',
             displayName: 'Claude Opus 5.5',
@@ -241,6 +254,7 @@ export const MODEL_PRESETS: {
         },
         {
             name: 'claude-sonnet-5-5',
+            tier: 'balanced',
             provider: 'anthropic',
             modelId: 'claude-sonnet-5-5',
             displayName: 'Claude Sonnet 5.5',
@@ -362,6 +376,7 @@ export const MODEL_PRESETS: {
         },
         {
             name: 'claude-haiku-5-5',
+            tier: 'fast',
             provider: 'anthropic',
             modelId: 'claude-haiku-5-5',
             displayName: 'Claude Haiku 5.5',
@@ -371,6 +386,12 @@ export const MODEL_PRESETS: {
             reasoningStyle: 'adaptive',
             callOptions: {},
             providerOptions: undefined,
+            // Thinks by default and spends short caps on thinking; low-effort
+            // adaptive thinking still did on field mapping
+            minimalReasoningProviderOptions: {
+                thinking: { type: 'disabled' },
+                effort: 'low',
+            },
         },
         {
             name: 'claude-haiku-4-5',
@@ -439,6 +460,7 @@ export const MODEL_PRESETS: {
         },
         {
             name: 'claude-opus-5-5',
+            tier: 'frontier',
             provider: 'bedrock',
             modelId: 'anthropic.claude-opus-5-5',
             displayName: 'Claude Opus 5.5',
@@ -452,6 +474,7 @@ export const MODEL_PRESETS: {
         },
         {
             name: 'claude-sonnet-5-5',
+            tier: 'balanced',
             provider: 'bedrock',
             modelId: 'anthropic.claude-sonnet-5-5',
             displayName: 'Claude Sonnet 5.5',
@@ -516,6 +539,7 @@ export const MODEL_PRESETS: {
         },
         {
             name: 'claude-haiku-5-5',
+            tier: 'fast',
             provider: 'bedrock',
             modelId: 'anthropic.claude-haiku-5-5',
             displayName: 'Claude Haiku 5.5',

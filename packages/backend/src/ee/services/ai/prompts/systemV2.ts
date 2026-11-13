@@ -45,6 +45,7 @@ import { getRequestingUserSection } from './systemV2RequestingUser';
 import { getRunSqlSection } from './systemV2RunSql';
 import { getSchedulingToolsSection } from './systemV2SchedulingTools';
 import { SEARCH_SEMANTIC_LAYER_SECTION } from './systemV2SearchSemanticLayer';
+import { getSemanticStudioSystemPrompt } from './systemV2SemanticStudio';
 import { renderAvailableSkills } from './systemV2Skills';
 import { getSlackLinksOnlySection } from './systemV2SlackLinksOnly';
 import {
@@ -85,6 +86,8 @@ export type CapabilitySectionArgs = {
     // Sections the loadout renders; everything else in the prompt is wording.
     promptSections?: ReadonlySet<PromptSection>;
     availableSkills?: AiAgentSkillReference[];
+    // False when the content tools load for Documents alone. Defaults to true.
+    canSaveCharts?: boolean;
     enableDocumentNudges?: boolean;
     enableDocumentCustomCharts?: boolean;
     slackChannelId?: string | null;
@@ -105,6 +108,7 @@ const getCapabilitySections = (
 ): Record<DeferredPromptSection, string> => {
     const sections = args.promptSections ?? NO_PROMPT_SECTIONS;
     const canRunQuery = args.canRunQuery ?? false;
+    const canSaveCharts = args.canSaveCharts ?? true;
     const composer = sections.has('queryingComposer');
     return {
         runSql: sections.has('runSql')
@@ -118,10 +122,12 @@ const getCapabilitySections = (
             : '',
         contentTools: sections.has('contentTools')
             ? [
-                  getContentToolsSection({
-                      canRunQuery,
-                      viaComposerQueries: composer,
-                  }),
+                  canSaveCharts
+                      ? getContentToolsSection({
+                            canRunQuery,
+                            viaComposerQueries: composer,
+                        })
+                      : '',
                   sections.has('documents')
                       ? getDocumentToolsSection({
                             customCharts:
@@ -157,6 +163,15 @@ export const getDeferredToolInstructions = (
         .filter(Boolean)
         .join('\n\n');
 };
+
+const toSystemMessage = (content: string): SystemModelMessage => ({
+    role: 'system',
+    content,
+    providerOptions: {
+        anthropic: { cacheControl: { type: 'ephemeral' } },
+        bedrock: { cachePoint: { type: 'default' } },
+    },
+});
 
 export const getSystemPromptV2 = (
     args: CapabilitySectionArgs & {
@@ -218,7 +233,10 @@ export const getSystemPromptV2 = (
     } = args;
 
     const capabilitySections = getCapabilitySections(args);
-    const contentToolsEnabled = promptSections.has('contentTools');
+    const contentToolsEnabled =
+        promptSections.has('contentTools') && (args.canSaveCharts ?? true);
+    const documentToolsEnabled =
+        promptSections.has('contentTools') && promptSections.has('documents');
     const composer = promptSections.has('queryingComposer');
     const getCapabilitySection = (section: DeferredPromptSection) =>
         deferredSections.has(section) ? '' : capabilitySections[section];
@@ -262,7 +280,7 @@ export const getSystemPromptV2 = (
                   '## Deep Research in this conversation',
                   'This state is current for this user turn. Keep active progress separate from report findings: present findings only from an available report, and let a running investigation continue without implicitly starting a duplicate run or offering to cancel, restart or change it.',
                   'For questions about report findings, call `listKnowledgeDocuments`, identify the matching Deep Research report, then call `getKnowledgeDocumentContent`. If more than one report could match, ask which research question the user means.',
-                  contentToolsEnabled
+                  documentToolsEnabled
                       ? 'A published report is a Document you can update. Only when the user clearly asks to change the report itself (for example to add, extend or fix a section or chart), `readContent` it by its Document slug, then `editContent` it: change only what was asked and keep every other section and chart exactly as it is. Each edit saves a new version of the same Document. Otherwise answer in the conversation; if it is unclear whether the user wants the report updated, ask.'
                       : 'You cannot update a published report here. If the user asks to change one, say that updating reports requires the "Create and edit content" setting on this agent, which an admin can turn on, and that they can also edit the Document directly. Do not offer to rewrite or regenerate the report.',
                   xmlBuilder(
@@ -318,6 +336,63 @@ export const getSystemPromptV2 = (
         ).toString();
     } else {
         availableExploresContent = `This agent has access to ${args.availableExplores.length} explores. Use grepFields to discover the relevant one for each request.`;
+    }
+
+    // Semantic Studio edits models and answers no questions, so it shares nothing below.
+    if (promptSections.has('semanticStudio')) {
+        return toSystemMessage(
+            getSemanticStudioSystemPrompt({
+                agentName,
+                date,
+                instructions,
+                // The shared wording for no explores tells the agent to answer from SQL or give up.
+                availableExplores:
+                    args.availableExplores.length === 0
+                        ? 'None yet: this project has no models.'
+                        : availableExploresContent,
+                projectContext:
+                    promptSections.has('projectContext') &&
+                    args.hasProjectContext
+                        ? projectContextContent
+                        : null,
+                warehouse: promptSections.has('runSql')
+                    ? {
+                          type: args.warehouseType ?? null,
+                          schema: args.warehouseSchema ?? null,
+                      }
+                    : null,
+                // Only a dbt project's Studio thread reads the repository; the writeback tools join the turn that opens the pull request.
+                dbt:
+                    promptSections.has('repoFs') ||
+                    promptSections.has('aiWriteback')
+                        ? {
+                              opensPullRequest:
+                                  promptSections.has('aiWriteback'),
+                              sections: [
+                                  ...(promptSections.has('aiWriteback')
+                                      ? [
+                                            getAiWritebackSection({
+                                                // The pull request card offers linking, so the reply stays short.
+                                                attribution: null,
+                                                siteUrl,
+                                                canEditContent: false,
+                                            }),
+                                        ]
+                                      : []),
+                                  ...(promptSections.has('repoFs')
+                                      ? [
+                                            getRepoFsSection({
+                                                root: repoFsRoot,
+                                                supportsCodeSearch:
+                                                    repoFsSupportsCodeSearch,
+                                            }),
+                                        ]
+                                      : []),
+                              ],
+                          }
+                        : null,
+            }),
+        );
     }
 
     const allowMarkdownTables = !slackChannelId && !slackLinksOnly;
@@ -433,6 +508,7 @@ export const getSystemPromptV2 = (
             '{{memories_section}}',
             promptSections.has('memories') ? MEMORIES_SECTION : '',
         )
+        .replace('{{row_limit_sql_suffix}}', canRunSql ? ', then SQL' : '')
         .replace('{{custom_sql_limitation}}', customSqlLimitation)
         // Composer chart types come from the visualize tool's schema.
         .replace(
@@ -536,12 +612,5 @@ export const getSystemPromptV2 = (
         .filter(Boolean)
         .join('\n\n');
 
-    return {
-        role: 'system',
-        content: finalContent,
-        providerOptions: {
-            anthropic: { cacheControl: { type: 'ephemeral' } },
-            bedrock: { cachePoint: { type: 'default' } },
-        },
-    };
+    return toSystemMessage(finalContent);
 };

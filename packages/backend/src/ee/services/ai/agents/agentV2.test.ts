@@ -196,7 +196,13 @@ describe('flags-off agent turns', () => {
                         options = captured;
                         return {
                             text: 'Answer',
-                            steps: [{ usage: { totalTokens: 1 } }],
+                            steps: [
+                                {
+                                    toolCalls: [],
+                                    toolResults: [],
+                                    usage: { totalTokens: 1 },
+                                },
+                            ],
                             finalStep: { usage: { totalTokens: 1 } },
                             usage: { totalTokens: 1 },
                             finishReason: 'stop',
@@ -310,7 +316,13 @@ describe('MCP context preparation at the agent boundary', () => {
                     options = captured;
                     return {
                         text: 'Answer',
-                        steps: [{ usage: { totalTokens: 1 } }],
+                        steps: [
+                            {
+                                toolCalls: [],
+                                toolResults: [],
+                                usage: { totalTokens: 1 },
+                            },
+                        ],
                         finalStep: { usage: { totalTokens: 1 } },
                         usage: { totalTokens: 1 },
                         finishReason: 'stop',
@@ -448,7 +460,13 @@ describe('MCP context preparation at the agent boundary', () => {
                     options = captured;
                     return {
                         text: 'Answer',
-                        steps: [{ usage: { totalTokens: 1 } }],
+                        steps: [
+                            {
+                                toolCalls: [],
+                                toolResults: [],
+                                usage: { totalTokens: 1 },
+                            },
+                        ],
                         finalStep: { usage: { totalTokens: 1 } },
                         usage: { totalTokens: 1 },
                         finishReason: 'stop',
@@ -630,7 +648,7 @@ describe('unknown error copy at the agent boundary', () => {
 describe('empty finishes and interrupts', () => {
     const emptyGenerateResult = {
         text: '',
-        steps: [{ usage: { totalTokens: 10 } }],
+        steps: [{ toolCalls: [], toolResults: [], usage: { totalTokens: 10 } }],
         finalStep: { usage: { totalTokens: 10 } },
         usage: { totalTokens: 10 },
         finishReason: 'tool-calls',
@@ -827,6 +845,179 @@ describe('empty finishes and interrupts', () => {
         });
     });
 
+    it('generate: tracks a tool call the SDK rejects before executing it', async () => {
+        const { generateText: generateWithSdk } =
+            await vi.importActual<typeof import('ai')>('ai');
+        vi.mocked(generateText).mockImplementationOnce(generateWithSdk);
+        const { dependencies } = buildInterruptibleDependencies(false);
+        const trackEvent = vi.fn();
+        Object.assign(dependencies, {
+            consumePromptSteers: async () => [],
+            updateProgress: vi.fn().mockResolvedValue(undefined),
+            trackEvent,
+        });
+        const args = buildAgentArgs();
+        Object.assign(args, {
+            organizationId: '00000000-0000-4000-8000-000000000001',
+            threadUuid: '00000000-0000-4000-8000-000000000004',
+            promptUuid: '00000000-0000-4000-8000-000000000005',
+            agentSettings: {
+                ...args.agentSettings,
+                projectUuid: '00000000-0000-4000-8000-000000000002',
+                uuid: '00000000-0000-4000-8000-000000000003',
+            },
+        });
+        let calls = 0;
+        args.model = new MockLanguageModelV4({
+            doGenerate: async () => {
+                calls += 1;
+                return {
+                    content:
+                        calls === 1
+                            ? [
+                                  {
+                                      type: 'tool-call' as const,
+                                      toolCallId: 'invalid-call',
+                                      toolName: 'runSql',
+                                      input: '{"limit":"ten"}',
+                                  },
+                              ]
+                            : [{ type: 'text' as const, text: 'Done.' }],
+                    finishReason: {
+                        unified: calls === 1 ? 'tool-calls' : 'stop',
+                        raw: undefined,
+                    },
+                    usage: {
+                        inputTokens: {
+                            total: 1,
+                            noCache: 1,
+                            cacheRead: 0,
+                            cacheWrite: 0,
+                        },
+                        outputTokens: { total: 1, text: 1, reasoning: 0 },
+                    },
+                    warnings: [],
+                };
+            },
+        });
+
+        await generateAgentResponse({
+            args,
+            dependencies,
+            mcpToolSetup: mcpToolSetup(),
+        });
+
+        expect(trackEvent).toHaveBeenCalledWith(
+            expect.objectContaining({
+                event: 'ai_agent.tool_call_completed',
+                properties: expect.objectContaining({
+                    toolCallId: 'invalid-call',
+                    toolName: 'runSql',
+                    status: 'error',
+                    attempt: 1,
+                }),
+            }),
+        );
+    });
+
+    it('stream: tracks a tool call the SDK rejects before executing it', async () => {
+        const { streamText: streamWithSdk } =
+            await vi.importActual<typeof import('ai')>('ai');
+        vi.mocked(streamText).mockImplementationOnce(streamWithSdk);
+        const { dependencies } = buildInterruptibleDependencies(false);
+        const trackEvent = vi.fn();
+        Object.assign(dependencies, {
+            consumePromptSteers: async () => [],
+            updateProgress: vi.fn().mockResolvedValue(undefined),
+            trackEvent,
+        });
+        const args = buildAgentArgs();
+        Object.assign(args, {
+            organizationId: '00000000-0000-4000-8000-000000000001',
+            threadUuid: '00000000-0000-4000-8000-000000000004',
+            promptUuid: '00000000-0000-4000-8000-000000000005',
+            agentSettings: {
+                ...args.agentSettings,
+                projectUuid: '00000000-0000-4000-8000-000000000002',
+                uuid: '00000000-0000-4000-8000-000000000003',
+            },
+        });
+        const usage = {
+            inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 1, text: 1, reasoning: 0 },
+        };
+        let calls = 0;
+        args.model = new MockLanguageModelV4({
+            doStream: async () => {
+                calls += 1;
+                const first = calls === 1;
+                return {
+                    stream: new ReadableStream({
+                        start(controller) {
+                            controller.enqueue({
+                                type: 'stream-start',
+                                warnings: [],
+                            });
+                            if (first) {
+                                controller.enqueue({
+                                    type: 'tool-call',
+                                    toolCallId: 'invalid-call',
+                                    toolName: 'runSql',
+                                    input: '{"limit":"ten"}',
+                                });
+                            } else {
+                                controller.enqueue({
+                                    type: 'text-start',
+                                    id: 't',
+                                });
+                                controller.enqueue({
+                                    type: 'text-delta',
+                                    id: 't',
+                                    delta: 'Done.',
+                                });
+                                controller.enqueue({
+                                    type: 'text-end',
+                                    id: 't',
+                                });
+                            }
+                            controller.enqueue({
+                                type: 'finish',
+                                finishReason: {
+                                    unified: first ? 'tool-calls' : 'stop',
+                                    raw: undefined,
+                                },
+                                usage,
+                            });
+                            controller.close();
+                        },
+                    }),
+                };
+            },
+        });
+
+        try {
+            const result = await streamAgentResponse({
+                args,
+                dependencies,
+                mcpToolSetup: mcpToolSetup(),
+            });
+            await result.consumeStream();
+            expect(trackEvent).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    event: 'ai_agent.tool_call_completed',
+                    properties: expect.objectContaining({
+                        toolCallId: 'invalid-call',
+                        toolName: 'runSql',
+                        status: 'error',
+                        attempt: 1,
+                    }),
+                }),
+            );
+        } finally {
+            vi.mocked(streamText).mockReset();
+        }
+    });
+
     it('generate: replays a persisted rejected SQL approval without executing it again', async () => {
         const { generateText: generateWithSdk } =
             await vi.importActual<typeof import('ai')>('ai');
@@ -1006,10 +1197,17 @@ describe('empty finishes and interrupts', () => {
         });
         expect(capturedOptions.experimental_repairToolCall).toBeUndefined();
         // AI SDK 7: `usage` aggregates every step; the final step keeps its own usage.
-        await capturedOptions.onFinish({
+        await capturedOptions.onEnd({
             usage: { totalTokens: 100 },
             totalUsage: { totalTokens: 100 },
-            steps: [{ text: '', usage: { totalTokens: 10 } }],
+            steps: [
+                {
+                    text: '',
+                    toolCalls: [],
+                    toolResults: [],
+                    usage: { totalTokens: 10 },
+                },
+            ],
             finalStep: { reasoning: [], usage: { totalTokens: 10 } },
             finishReason: 'tool-calls',
         });
@@ -1161,6 +1359,123 @@ describe('empty finishes and interrupts', () => {
     });
 });
 
+describe('askUser', () => {
+    const usage = {
+        inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 1, text: 1, reasoning: 0 },
+    };
+    const questions = [
+        {
+            header: 'Period',
+            question: 'Which month should I use?',
+            options: [
+                { label: 'November 2022', description: 'Latest full month' },
+                { label: 'October 2022', description: 'Previous month' },
+            ],
+            multiSelect: false,
+        },
+    ];
+
+    it('is offered only when enabled', () => {
+        const args = buildAgentArgs();
+        expect(loadoutFor(args).toolNames.has('askUser')).toBe(false);
+        args.enableAskUser = true;
+        expect(loadoutFor(args).toolNames.has('askUser')).toBe(true);
+    });
+
+    it('generate: ends the turn and replies with the question', async () => {
+        const { generateText: generateWithSdk } =
+            await vi.importActual<typeof import('ai')>('ai');
+        vi.mocked(generateText).mockImplementationOnce(generateWithSdk);
+        const updatePrompt = vi.fn().mockResolvedValue(undefined);
+        const dependencies = buildAgentDependencies(updatePrompt);
+        Object.assign(dependencies, {
+            isPromptInterrupted: async () => false,
+            consumePromptSteers: async () => [],
+            updateProgress: vi.fn().mockResolvedValue(undefined),
+        });
+        const args = buildAgentArgs();
+        args.enableAskUser = true;
+        const doGenerate = vi.fn(async () => ({
+            content: [
+                {
+                    type: 'tool-call' as const,
+                    toolCallId: 'ask-call',
+                    toolName: 'askUser',
+                    input: JSON.stringify({ questions }),
+                },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage,
+            warnings: [],
+        }));
+        args.model = new MockLanguageModelV4({ doGenerate });
+
+        await expect(
+            generateAgentResponse({
+                args,
+                dependencies,
+                mcpToolSetup: mcpToolSetup(),
+            }),
+        ).resolves.toBe('Which month should I use?');
+        expect(doGenerate).toHaveBeenCalledTimes(1);
+        expect(updatePrompt).not.toHaveBeenCalledWith(
+            expect.objectContaining({ errorMessage: expect.any(String) }),
+        );
+    });
+
+    it('generate: keeps going when the model calls askUser while it is off', async () => {
+        const { generateText: generateWithSdk } =
+            await vi.importActual<typeof import('ai')>('ai');
+        vi.mocked(generateText).mockImplementationOnce(generateWithSdk);
+        const dependencies = buildAgentDependencies(
+            vi.fn().mockResolvedValue(undefined),
+        );
+        Object.assign(dependencies, {
+            isPromptInterrupted: async () => false,
+            consumePromptSteers: async () => [],
+        });
+        const args = buildAgentArgs();
+        let calls = 0;
+        args.model = new MockLanguageModelV4({
+            doGenerate: async () => {
+                calls += 1;
+                return {
+                    content:
+                        calls === 1
+                            ? [
+                                  {
+                                      type: 'tool-call' as const,
+                                      toolCallId: 'ask-call',
+                                      toolName: 'askUser',
+                                      input: JSON.stringify({ questions }),
+                                  },
+                              ]
+                            : [{ type: 'text' as const, text: 'Answer' }],
+                    finishReason: {
+                        unified:
+                            calls === 1
+                                ? ('tool-calls' as const)
+                                : ('stop' as const),
+                        raw: undefined,
+                    },
+                    usage,
+                    warnings: [],
+                };
+            },
+        });
+
+        await expect(
+            generateAgentResponse({
+                args,
+                dependencies,
+                mcpToolSetup: mcpToolSetup(),
+            }),
+        ).resolves.toBe('Answer');
+        expect(calls).toBe(2);
+    });
+});
+
 describe('generateAgentResponse token usage persistence', () => {
     const runWithSteps = async (
         execution: Record<string, unknown>,
@@ -1173,8 +1488,9 @@ describe('generateAgentResponse token usage persistence', () => {
             await stepTotals.reduce(
                 (chain, totalTokens) =>
                     chain.then(() =>
-                        options.onStepFinish({
+                        options.onStepEnd({
                             usage: { totalTokens },
+                            content: [],
                             toolCalls: [],
                             toolResults: [],
                             text: '',
@@ -1185,6 +1501,8 @@ describe('generateAgentResponse token usage persistence', () => {
             return {
                 text: 'Answer',
                 steps: stepTotals.map((totalTokens) => ({
+                    toolCalls: [],
+                    toolResults: [],
                     usage: { totalTokens },
                 })),
                 finalStep: { usage: { totalTokens: stepTotals.at(-1) ?? 0 } },
@@ -2488,7 +2806,7 @@ describe('getAgentTools workstream tool gate', () => {
         [true, true, false],
         [true, true, true],
     ])(
-        'gates Document schemas and instructions together (documents=%s, content=%s, data=%s)',
+        'gates Document and chart schemas and instructions separately (documents=%s, content=%s, data=%s)',
         (enableDocuments, enableContentTools, enableDataAccess) => {
             const args = buildArgs({
                 enableAiWriteback: false,
@@ -2497,8 +2815,8 @@ describe('getAgentTools workstream tool gate', () => {
                 enableDataAccess,
             });
             const tools = buildToolsForArgs(args);
-            const contentEnabled = enableContentTools && enableDataAccess;
-            const documentsEnabled = contentEnabled && enableDocuments;
+            const chartsEnabled = enableContentTools && enableDataAccess;
+            const documentsEnabled = enableDocuments && enableDataAccess;
             const systemMessage = getAgentMessages(
                 args,
                 loadoutFor(args, mcpStub),
@@ -2512,27 +2830,47 @@ describe('getAgentTools workstream tool gate', () => {
             if (!systemMessage || typeof systemMessage.content !== 'string') {
                 throw new Error('Expected a string system message');
             }
+            const contentTypes = (name: string): unknown[] => {
+                const { jsonSchema } = asSchema(tools[name].inputSchema);
+                const { type } = (
+                    jsonSchema as {
+                        properties: {
+                            type: { enum?: unknown[]; const?: unknown };
+                        };
+                    }
+                ).properties;
+                return type.enum ?? [type.const];
+            };
 
             expect(systemMessage.content.includes('## Documents')).toBe(
                 documentsEnabled,
             );
+            expect(systemMessage.content.includes('## Content tools')).toBe(
+                chartsEnabled,
+            );
             expect(
                 systemMessage.content.includes(
-                    'Want me to save this as a Document you can share?',
+                    'Want me to turn this analysis into a Document',
                 ),
             ).toBe(documentsEnabled);
-            for (const name of [
-                'createContent',
-                'readContent',
-                'editContent',
-            ]) {
-                expect(Object.hasOwn(tools, name)).toBe(contentEnabled);
-                if (contentEnabled) {
-                    expect(
-                        JSON.stringify(
-                            asSchema(tools[name].inputSchema).jsonSchema,
-                        ).includes('"document"'),
-                    ).toBe(documentsEnabled);
+            // buildArgs ties content reads to the content setting.
+            expect(Object.hasOwn(tools, 'readContent')).toBe(chartsEnabled);
+            if (chartsEnabled) {
+                expect(contentTypes('readContent').includes('document')).toBe(
+                    documentsEnabled,
+                );
+            }
+            for (const name of ['createContent', 'editContent']) {
+                expect(Object.hasOwn(tools, name)).toBe(
+                    chartsEnabled || documentsEnabled,
+                );
+                if (chartsEnabled || documentsEnabled) {
+                    expect(contentTypes(name).includes('document')).toBe(
+                        documentsEnabled,
+                    );
+                    expect(contentTypes(name).includes('chart')).toBe(
+                        chartsEnabled,
+                    );
                 }
             }
         },
@@ -3112,7 +3450,7 @@ describe('buildAgentMessages', () => {
         ).toBeNull();
     });
 
-    it('finishes a document write-up once the document saves cleanly', () => {
+    it('finishes a document write-up with an absolute link once the document saves cleanly', () => {
         const save = (
             output: unknown,
             input: unknown = { type: 'document' },
@@ -3123,6 +3461,7 @@ describe('buildAgentMessages', () => {
                 toolResults: [{ toolCallId: 'save-1', toolName, output }],
             },
         ];
+        const siteUrl = 'https://app.lightdash.cloud/';
         const saved = (warnings: string[] = []) => ({
             result: '<document />',
             metadata: {
@@ -3133,23 +3472,33 @@ describe('buildAgentMessages', () => {
             },
         });
 
-        expect(getDocumentWriteFastResponse(save(saved()))).toBe(
-            'Saved [Revenue \\[Q3\\]](/projects/p/documents/revenue).',
+        expect(getDocumentWriteFastResponse(save(saved()), siteUrl)).toBe(
+            'Saved [Revenue \\[Q3\\]](https://app.lightdash.cloud/projects/p/documents/revenue).',
         );
         expect(
             getDocumentWriteFastResponse(
                 save(saved(), { type: 'document' }, 'editContent'),
+                siteUrl,
             ),
-        ).toBe('Saved [Revenue \\[Q3\\]](/projects/p/documents/revenue).');
+        ).toBe(
+            'Saved [Revenue \\[Q3\\]](https://app.lightdash.cloud/projects/p/documents/revenue).',
+        );
         expect(
-            getDocumentWriteFastResponse(save(saved(['Chart 2 failed']))),
+            getDocumentWriteFastResponse(
+                save(saved(['Chart 2 failed'])),
+                siteUrl,
+            ),
         ).toBeNull();
         expect(
-            getDocumentWriteFastResponse(save(saved(), { type: 'chart' })),
+            getDocumentWriteFastResponse(
+                save(saved(), { type: 'chart' }),
+                siteUrl,
+            ),
         ).toBeNull();
         expect(
             getDocumentWriteFastResponse(
                 save({ result: 'failed', metadata: { status: 'error' } }),
+                siteUrl,
             ),
         ).toBeNull();
     });
@@ -3550,7 +3899,13 @@ describe('external MCP tool call activity', () => {
                     options = captured;
                     return {
                         text: 'Answer',
-                        steps: [{ usage: { totalTokens: 1 } }],
+                        steps: [
+                            {
+                                toolCalls: [],
+                                toolResults: [],
+                                usage: { totalTokens: 1 },
+                            },
+                        ],
                         finalStep: { usage: { totalTokens: 1 } },
                         usage: { totalTokens: 1 },
                         finishReason: 'stop',
@@ -3576,7 +3931,7 @@ describe('external MCP tool call activity', () => {
             }
 
             const finish = (event: Record<string, unknown>) =>
-                options.experimental_onToolCallFinish?.({
+                options.onToolExecutionEnd?.({
                     stepNumber: 0,
                     messages: [],
                     ...event,
@@ -3668,6 +4023,9 @@ describe('external MCP tool call activity', () => {
     );
 });
 
+const OFFER_LINE =
+    'Want me to turn this analysis into a Document, a shareable report with these charts and a written summary?';
+
 describe('shouldOfferDocument', () => {
     const chartTurn = (toolCallId: string): ModelMessage => ({
         role: 'assistant',
@@ -3681,7 +4039,7 @@ describe('shouldOfferDocument', () => {
         ],
     });
 
-    it('waits for a chart in an earlier reply', () => {
+    it('waits for two charts in earlier replies', () => {
         expect(
             shouldOfferDocument([
                 { role: 'user', content: 'Revenue by month' },
@@ -3693,10 +4051,22 @@ describe('shouldOfferDocument', () => {
                 chartTurn('chart-1'),
                 { role: 'user', content: 'Break it down by status' },
             ]),
+        ).toBe(false);
+        expect(
+            shouldOfferDocument([
+                { role: 'user', content: 'Revenue by month' },
+                chartTurn('chart-1'),
+                { role: 'user', content: 'Break it down by status' },
+                chartTurn('chart-2'),
+                { role: 'user', content: 'Which status grew fastest?' },
+            ]),
         ).toBe(true);
     });
 
-    it('offers only once per thread', () => {
+    it.each([
+        ['current', OFFER_LINE],
+        ['older', 'Want me to save this as a Document you can share?'],
+    ])('offers only once per thread, after the %s offer line', (_, offer) => {
         expect(
             shouldOfferDocument([
                 { role: 'user', content: 'Revenue by month' },
@@ -3705,9 +4075,9 @@ describe('shouldOfferDocument', () => {
                 chartTurn('chart-2'),
                 {
                     role: 'assistant',
-                    content:
-                        'Here it is.\n\nWant me to save this as a Document you can share?',
+                    content: `Here it is.\n\n${offer}`,
                 },
+                chartTurn('chart-3'),
                 { role: 'user', content: 'Which status grew fastest?' },
             ]),
         ).toBe(false);
@@ -3718,6 +4088,8 @@ describe('shouldOfferDocument', () => {
             { role: 'user', content: 'Revenue by month' },
             chartTurn('chart-1'),
             { role: 'user', content: 'Break it down by status' },
+            chartTurn('chart-2'),
+            { role: 'user', content: 'Which status grew fastest?' },
         ];
         const latestQuestion = (documents: boolean) => {
             const args = buildAgentArgs();
@@ -3738,10 +4110,10 @@ describe('shouldOfferDocument', () => {
         };
 
         expect(JSON.stringify(latestQuestion(true))).toContain(
-            'end it with this line on its own: \\"Want me to save this as a Document you can share?\\"',
+            `end it with this line on its own: \\"${OFFER_LINE}\\"`,
         );
         expect(JSON.stringify(latestQuestion(false))).not.toContain(
-            'save this as a Document',
+            'turn this analysis into a Document',
         );
     });
 
@@ -3750,6 +4122,7 @@ describe('shouldOfferDocument', () => {
             shouldOfferDocument([
                 { role: 'user', content: 'Revenue by month' },
                 chartTurn('chart-1'),
+                chartTurn('chart-2'),
                 { role: 'user', content: 'Write it up' },
                 {
                     role: 'assistant',
@@ -3769,7 +4142,7 @@ describe('shouldOfferDocument', () => {
 });
 
 describe('getDocumentNudgeOutcome', () => {
-    const offer = 'Want me to save this as a Document you can share?';
+    const offer = OFFER_LINE;
     const nudgedArgs = (messageHistory: ModelMessage[]) => {
         const args = buildAgentArgs();
         args.enableDataAccess = true;
@@ -3870,7 +4243,13 @@ describe.each(['generate', 'stream'] as const)(
                     options = captured;
                     return {
                         text: 'Answer',
-                        steps: [{ usage: { totalTokens: 1 } }],
+                        steps: [
+                            {
+                                toolCalls: [],
+                                toolResults: [],
+                                usage: { totalTokens: 1 },
+                            },
+                        ],
                         finalStep: { usage: { totalTokens: 1 } },
                         usage: { totalTokens: 1 },
                         finishReason: 'stop',
@@ -3899,7 +4278,7 @@ describe.each(['generate', 'stream'] as const)(
                     | { type: 'tool-result'; output: unknown }
                     | { type: 'tool-error'; error: unknown },
             ) =>
-                options.experimental_onToolCallFinish({
+                options.onToolExecutionEnd({
                     stepNumber: 0,
                     messages: [],
                     toolCall: {

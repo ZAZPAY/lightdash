@@ -311,7 +311,7 @@ describe('getSystemPromptV2 custom chart types', () => {
             enableDataAccess: true,
         };
         const offer =
-            'end the reply with this line on its own: "Want me to save this as a Document you can share?"';
+            'end the reply with this line on its own: "Want me to turn this analysis into a Document, a shareable report with these charts and a written summary?"';
 
         const nudged = promptText({
             ...documentArgs,
@@ -319,6 +319,10 @@ describe('getSystemPromptV2 custom chart types', () => {
         });
         expect(nudged).toContain(offer);
         expect(nudged).toContain('Offer only once per conversation');
+        expect(nudged).toContain('at least 3 charts across several turns');
+        expect(nudged).not.toContain(
+            'an earlier reply in this conversation also created one',
+        );
         expect(nudged).toContain(
             'When looking for existing content, include Documents',
         );
@@ -362,7 +366,7 @@ describe('getSystemPromptV2 custom chart types', () => {
 
         expect(content).not.toContain('## Documents');
         expect(content).toContain(
-            'Want me to save this as a Document you can share?',
+            'Want me to turn this analysis into a Document, a shareable report with these charts and a written summary?',
         );
     });
 });
@@ -431,7 +435,7 @@ describe('getSystemPromptV2 composer queries', () => {
     const composerSections = (...sections: PromptSection[]) =>
         new Set<PromptSection>(['queryingComposer', ...sections]);
 
-    test('directs cross-explore questions to a duckdb node over semanticLayer nodes', () => {
+    test('directs joins on shared dimensions to a merge node, and other combinations to duckdb', () => {
         const content = promptText({
             availableExplores: [],
             promptSections: composerSections('runSql'),
@@ -439,7 +443,10 @@ describe('getSystemPromptV2 composer queries', () => {
         });
 
         expect(content).toContain(
-            'combine explores that are not joined in the semantic layer with a duckdb node',
+            'Combine semanticLayer nodes that meet on dimensions they share at the same grain (both by month, both by customer) with a merge node.',
+        );
+        expect(content).toContain(
+            '- Combine results any other way with a duckdb node',
         );
     });
 
@@ -484,6 +491,19 @@ describe('getSystemPromptV2 composer queries', () => {
         );
         expect(content).not.toContain('<slack-table');
         expect(content).not.toContain('<slack-chart');
+    });
+
+    test('teaches node citations in web chat only', () => {
+        const prompt = (slackChannelId: string | null) =>
+            promptText({
+                availableExplores: [],
+                promptSections: composerSections(),
+                slackChannelId,
+                enableDataAccess: true,
+            });
+
+        expect(prompt(null)).toContain('#query-node-<nodeId>');
+        expect(prompt('channel')).not.toContain('#query-node-');
     });
 
     test.each([
@@ -759,10 +779,13 @@ describe('getSystemPromptV2 Deep Research context', () => {
         expect(content).not.toContain('`editContent` it');
     });
 
-    test('lets content tools update a published report in place', () => {
+    test('lets Document tools update a published report in place', () => {
         const content = promptText({
             availableExplores: [],
-            promptSections: new Set<PromptSection>(['contentTools']),
+            promptSections: new Set<PromptSection>([
+                'contentTools',
+                'documents',
+            ]),
             deepResearchRuns: [
                 {
                     uuid: 'run-1',
@@ -786,6 +809,29 @@ describe('getSystemPromptV2 Deep Research context', () => {
         expect(content).not.toContain(
             'You cannot update a published report here',
         );
+    });
+
+    test('does not offer report updates when only charts can be saved', () => {
+        const content = promptText({
+            availableExplores: [],
+            promptSections: new Set<PromptSection>(['contentTools']),
+            deepResearchRuns: [
+                {
+                    uuid: 'run-1',
+                    question: 'Why did revenue fall?',
+                    status: 'completed',
+                    phase: null,
+                    activity: null,
+                    progressCurrent: null,
+                    progressTotal: null,
+                    startedAt: '2026-07-29T10:00:00.000Z',
+                    elapsedSeconds: 600,
+                    hasReport: true,
+                },
+            ],
+        });
+
+        expect(content).toContain('You cannot update a published report here');
     });
 });
 

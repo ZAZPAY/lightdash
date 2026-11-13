@@ -1,4 +1,8 @@
-import { GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import {
+    GetObjectCommand,
+    ListObjectsV2Command,
+    S3ServiceException,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { DuckDBInstance } from '@duckdb/node-api';
 import { ParameterError } from '@lightdash/common';
@@ -11,6 +15,7 @@ import {
 } from '../../../analytics/eventStream/queryHistoryBackfill';
 import { usageHistoryKey } from '../../../analytics/eventStream/usageHistorySources';
 import { createS3ClientFromConfig } from '../../../clients/Aws/S3BaseClient';
+import { analyticsSignedUrlCache } from './AnalyticsSignedUrlCache';
 import { createS3AnalyticsSourceResolver } from './S3AnalyticsSource';
 
 vi.mock('../../../clients/Aws/S3BaseClient', () => ({
@@ -55,6 +60,8 @@ describe('signed analytics file manifests', () => {
     const destroy = vi.fn();
     const noDataMessage =
         'No analytics data is available yet. Newly captured events become available after daily processing. Try again after the next daily update.';
+    const storageReadMessage =
+        'Could not read analytics data from storage. Try again or contact your administrator.';
     const connection = { run: vi.fn(), closeSync: vi.fn() };
     const closeInstance = vi.fn();
 
@@ -66,9 +73,16 @@ describe('signed analytics file manifests', () => {
 
     beforeEach(() => {
         vi.resetAllMocks();
+        analyticsSignedUrlCache.clear();
         vi.mocked(createS3ClientFromConfig).mockReturnValue({
             send,
             destroy,
+            config: {
+                credentials: async () => ({
+                    accessKeyId: config.storage.accessKey,
+                    secretAccessKey: config.storage.secretKey,
+                }),
+            },
         } as unknown as ReturnType<typeof createS3ClientFromConfig>);
         send.mockResolvedValue({ Contents: [{ Key: key() }] });
         vi.mocked(getSignedUrl).mockResolvedValue('signed-url');
@@ -201,7 +215,7 @@ describe('signed analytics file manifests', () => {
                 ...config,
                 allowEmpty: true,
             })(),
-        ).rejects.toThrow('Analytics storage access failed');
+        ).rejects.toThrow(storageReadMessage);
     });
 
     it('signs only requested tables while preserving every retained date', async () => {
@@ -231,9 +245,42 @@ describe('signed analytics file manifests', () => {
         );
     });
 
-    it('reuses more than 8 MiB of bytes while keeping the per-query budget bounded and the manifest complete', async () => {
+    it('buffers a whole 36 MiB table with 4 MiB files and reuses downloads', async () => {
+        const body = Buffer.alloc(4 * 1024 * 1024);
+        const contents = Array.from({ length: 9 }, (_, i) => ({
+            Key: key().replace('part-1', `larger-${i}`),
+            ETag: 'larger-v1',
+            Size: body.length,
+        }));
+        send.mockImplementation(async (command) =>
+            command instanceof ListObjectsV2Command
+                ? { Contents: contents }
+                : {
+                      Body: Readable.from([body]),
+                      ETag: 'larger-v1',
+                      ContentLength: body.length,
+                  },
+        );
+        const resolve = createS3AnalyticsSourceResolver(config);
+        const first = await resolve(['query_events']);
+        expect(first.fileBuffers?.size).toBe(9);
+        const warm = await resolve(['query_events']);
+        expect(warm.fileBuffers?.size).toBe(9);
+        for (const [url, buffer] of first.fileBuffers!) {
+            expect(warm.fileBuffers?.get(url)).toBe(buffer);
+            expect(buffer.byteLength).toBe(body.length);
+        }
+        expect(
+            send.mock.calls.filter(
+                ([command]) => command instanceof GetObjectCommand,
+            ),
+        ).toHaveLength(9);
+        expect(getSignedUrl).not.toHaveBeenCalled();
+    });
+
+    it('avoids downloading a table that cannot fit the per-query budget', async () => {
         const body = Buffer.alloc(1024 * 1024);
-        const contents = Array.from({ length: 33 }, (_, i) => ({
+        const contents = Array.from({ length: 65 }, (_, i) => ({
             Key: key().replace('part-1', `budget-${i}`),
             ETag: 'budget-v1',
             Size: body.length,
@@ -253,17 +300,197 @@ describe('signed analytics file manifests', () => {
         );
         const resolve = createS3AnalyticsSourceResolver(config);
         const first = await resolve(['query_events']);
-        expect(first.fileBuffers?.size).toBe(32);
-        expect(first.tables[0].urls).toHaveLength(33);
+        expect(first.fileBuffers).toBeUndefined();
+        expect(first.tables[0].urls).toHaveLength(65);
         const downloads = () =>
             send.mock.calls.filter(
                 ([command]) => command instanceof GetObjectCommand,
             );
-        expect(downloads()).toHaveLength(32);
+        expect(downloads()).toHaveLength(0);
         const warm = await resolve(['query_events']);
-        expect(warm.fileBuffers?.size).toBe(32);
+        expect(warm.fileBuffers).toBeUndefined();
         expect(warm.tables[0].urls).toEqual(first.tables[0].urls);
-        expect(downloads()).toHaveLength(32);
+        expect(downloads()).toHaveLength(0);
+    });
+
+    it('skips signing downloaded files and signs exact objects lazily if staging fails', async () => {
+        const objectKey = key().replace('part-1', 'buffered');
+        const body = Buffer.from('buffered parquet');
+        send.mockImplementation(async (command) =>
+            command instanceof ListObjectsV2Command
+                ? {
+                      Contents: [
+                          {
+                              Key: objectKey,
+                              ETag: 'buffer-v1',
+                              Size: body.length,
+                          },
+                      ],
+                  }
+                : {
+                      Body: Readable.from([body]),
+                      ETag: 'buffer-v1',
+                      ContentLength: body.length,
+                  },
+        );
+        const source = await createS3AnalyticsSourceResolver(config)([
+            'query_events',
+        ]);
+        const url = source.tables[0].urls[0];
+        expect(source.fileBuffers?.get(url)).toEqual(body);
+        expect(new URL(url).search).toBe('');
+        expect(getSignedUrl).not.toHaveBeenCalled();
+        expect(destroy).toHaveBeenCalledOnce();
+        expect(await source.getSignedUrls!([url])).toEqual(['signed-url']);
+        expect(getSignedUrl).toHaveBeenCalledOnce();
+        expect(destroy).toHaveBeenCalledTimes(2);
+        await expect(
+            source.getSignedUrls!([url.replace('buffered', 'other')]),
+        ).rejects.toThrow(storageReadMessage);
+        expect(getSignedUrl).toHaveBeenCalledOnce();
+    });
+
+    it('shares remote signatures across concurrent queries but refreshes listing and object versions', async () => {
+        let etag = 'remote-v1';
+        const objectKey = key().replace('part-1', 'remote');
+        send.mockImplementation(async () => ({
+            Contents: [
+                { Key: objectKey, ETag: etag, Size: 4 * 1024 * 1024 + 1 },
+            ],
+        }));
+        const resolve = createS3AnalyticsSourceResolver(config);
+        const sources = await Promise.all(
+            Array.from({ length: 8 }, () => resolve()),
+        );
+        expect(
+            sources.every(
+                (source) => source.tables[0].urls[0] === 'signed-url',
+            ),
+        ).toBe(true);
+        expect(send).toHaveBeenCalledTimes(8);
+        expect(getSignedUrl).toHaveBeenCalledOnce();
+        await resolve();
+        expect(send).toHaveBeenCalledTimes(9);
+        expect(getSignedUrl).toHaveBeenCalledOnce();
+        etag = 'remote-v2';
+        await resolve();
+        expect(getSignedUrl).toHaveBeenCalledTimes(2);
+        send.mockResolvedValue({ Contents: [] });
+        await expect(resolve()).rejects.toThrow(noDataMessage);
+        expect(getSignedUrl).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps signature reuse separate across storage configurations and rejects revoked listing access', async () => {
+        send.mockResolvedValue({
+            Contents: [
+                { Key: key(), ETag: 'config-v1', Size: 4 * 1024 * 1024 + 1 },
+            ],
+        });
+        const resolve = createS3AnalyticsSourceResolver(config);
+        await resolve();
+        for (const changed of [
+            { bucket: 'another-bucket' },
+            { endpoint: 'https://another.example' },
+            { region: 'another-region' },
+            { accessKey: 'another-key', secretKey: 'another-secret' },
+        ]) {
+            // eslint-disable-next-line no-await-in-loop
+            await createS3AnalyticsSourceResolver({
+                ...config,
+                storage: { ...config.storage, ...changed },
+            })();
+        }
+        expect(getSignedUrl).toHaveBeenCalledTimes(5);
+        send.mockRejectedValue(new Error('AccessDenied secret'));
+        await expect(resolve()).rejects.toThrow(storageReadMessage);
+        expect(getSignedUrl).toHaveBeenCalledTimes(5);
+    });
+
+    it('falls back to a complete signed table after one authenticated download fails', async () => {
+        const contents = ['download-good', 'download-failed'].map((part) => ({
+            Key: key().replace('part-1', part),
+            ETag: 'download-v1',
+            Size: 4,
+        }));
+        send.mockImplementation(async (command) => {
+            if (command instanceof ListObjectsV2Command)
+                return { Contents: contents };
+            if (command.input.Key.includes('failed'))
+                throw new Error('unavailable');
+            return {
+                Body: Readable.from(['data']),
+                ETag: 'download-v1',
+                ContentLength: 4,
+            };
+        });
+        vi.mocked(getSignedUrl).mockImplementation(
+            async (_client, command) =>
+                `signed:${(command as GetObjectCommand).input.Key}`,
+        );
+        const source = await createS3AnalyticsSourceResolver(config)();
+        expect(source.fileBuffers).toBeUndefined();
+        expect(source.tables[0].urls).toEqual(
+            contents.map(({ Key }) => `signed:${Key}`).sort(),
+        );
+        expect(getSignedUrl).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not reuse signatures after credential rotation or near credential expiry', async () => {
+        let credentials = {
+            accessKeyId: 'temporary-key',
+            secretAccessKey: 'temporary-secret',
+            sessionToken: 'token-one',
+            expiration: new Date(Date.now() + 600_000),
+        };
+        vi.mocked(createS3ClientFromConfig).mockReturnValue({
+            send,
+            destroy,
+            config: { credentials: async () => credentials },
+        } as unknown as ReturnType<typeof createS3ClientFromConfig>);
+        send.mockResolvedValue({
+            Contents: [
+                {
+                    Key: key(),
+                    ETag: 'credential-v1',
+                    Size: 4 * 1024 * 1024 + 1,
+                },
+            ],
+        });
+        const resolve = createS3AnalyticsSourceResolver(config);
+        await resolve();
+        await resolve();
+        expect(getSignedUrl).toHaveBeenCalledOnce();
+        credentials = { ...credentials, sessionToken: 'token-two' };
+        await resolve();
+        expect(getSignedUrl).toHaveBeenCalledTimes(2);
+        credentials = {
+            ...credentials,
+            expiration: new Date(Date.now() + 60_000),
+        };
+        await resolve();
+        await resolve();
+        expect(getSignedUrl).toHaveBeenCalledTimes(4);
+    });
+
+    it('does not reject a small selected table because unrelated history exceeds the file limit', async () => {
+        const contents = Array.from({ length: 10_001 }, (_, i) => ({
+            Key: key().replace('part-1', `unrelated-${i}`),
+        }));
+        contents.push({ Key: `${prefix}dim=people/people.parquet` });
+        send.mockImplementation(async (command: ListObjectsV2Command) => {
+            const offset = Number(command.input.ContinuationToken ?? 0);
+            return {
+                Contents: contents.slice(offset, offset + 1000),
+                IsTruncated: offset + 1000 < contents.length,
+                NextContinuationToken: String(offset + 1000),
+            };
+        });
+        const source = await createS3AnalyticsSourceResolver(config)([
+            'lightdash_people',
+        ]);
+        expect(source.tables).toHaveLength(1);
+        expect(source.tables[0].urls).toHaveLength(1);
+        expect(getSignedUrl).toHaveBeenCalledOnce();
     });
 
     it.each([undefined, []])(
@@ -385,7 +612,31 @@ describe('signed analytics file manifests', () => {
         },
     );
 
-    it('drains in-flight signing before cleanup and never starts another batch after failure', async () => {
+    it('starts the next object when a slot opens, even if an earlier object is slow', async () => {
+        const keys = Array.from({ length: 9 }, (_, i) =>
+            key().replace('part-1', `part-${i}`),
+        );
+        send.mockResolvedValue({ Contents: keys.map((Key) => ({ Key })) });
+        const first = Promise.withResolvers<string>();
+        vi.mocked(getSignedUrl).mockImplementation(async (_client, command) => {
+            const objectKey = (command as GetObjectCommand).input.Key!;
+            if (objectKey === keys[0]) return first.promise;
+            return `signed:${objectKey}`;
+        });
+
+        const resolution = createS3AnalyticsSourceResolver(config)();
+        try {
+            await vi.waitFor(() =>
+                expect(getSignedUrl).toHaveBeenCalledTimes(keys.length),
+            );
+            expect(destroy).not.toHaveBeenCalled();
+        } finally {
+            first.resolve(`signed:${keys[0]}`);
+            await resolution;
+        }
+    });
+
+    it('drains in-flight signing before cleanup and starts no more objects after failure', async () => {
         send.mockResolvedValue({
             Contents: Array.from({ length: 20 }, (_, i) => ({
                 Key: key().replace('part-1', `part-${i}`),
@@ -407,11 +658,7 @@ describe('signed analytics file manifests', () => {
         await vi.waitFor(() => expect(getSignedUrl).toHaveBeenCalledTimes(8));
         expect(destroy).not.toHaveBeenCalled();
         release();
-        expect(await resolution).toEqual(
-            new Error(
-                'Analytics storage access failed. Check bucket credentials, organization and compacted data availability.',
-            ),
-        );
+        expect(await resolution).toMatchObject({ message: storageReadMessage });
         expect(getSignedUrl).toHaveBeenCalledTimes(8);
         expect(destroy).toHaveBeenCalledOnce();
     });
@@ -458,7 +705,7 @@ describe('signed analytics file manifests', () => {
             ],
         });
         await expect(createS3AnalyticsSourceResolver(config)()).rejects.toThrow(
-            'Analytics storage access failed',
+            storageReadMessage,
         );
         expect(getSignedUrl).not.toHaveBeenCalled();
         expect(destroy).toHaveBeenCalledOnce();
@@ -615,7 +862,56 @@ describe('signed analytics file manifests', () => {
         );
     });
 
-    it('refreshes the manifest and signatures on each query', async () => {
+    it('prepares only in-range activity files and keeps other sources available', async () => {
+        const activity = (day: string) =>
+            `${prefix}model=user_activity/stream=query_events/dt=${day}/activity.parquet`;
+        const selected = activity('2026-11-06');
+        const other = key('agent_steps', '2026-11-01');
+        send.mockResolvedValue({
+            Contents: [
+                { Key: activity('2026-11-05') },
+                { Key: selected },
+                { Key: activity('2026-11-13') },
+                { Key: other },
+            ],
+        });
+        const result = await createS3AnalyticsSourceResolver({
+            ...config,
+            activityWindow: { start: '2026-11-06', end: '2026-11-13' },
+        })(['user_activity', 'agent_steps']);
+        expect(result.tables.map(({ name }) => name)).toEqual([
+            'user_activity',
+            'agent_steps',
+        ]);
+        expect(
+            vi
+                .mocked(getSignedUrl)
+                .mock.calls.map(
+                    ([, command]) => (command as GetObjectCommand).input.Key,
+                ),
+        ).toEqual([selected, other]);
+    });
+
+    it('exposes a typed empty activity table for a date range without files', async () => {
+        send.mockResolvedValue({
+            Contents: [
+                {
+                    Key: `${prefix}model=user_activity/stream=query_events/dt=2026-11-05/activity.parquet`,
+                },
+            ],
+        });
+        const result = await createS3AnalyticsSourceResolver({
+            ...config,
+            activityWindow: { start: '2026-11-06', end: '2026-11-13' },
+        })(['user_activity']);
+        expect(result.tables).toEqual([]);
+        expect(result.emptyTables?.map(({ name }) => name)).toContain(
+            'user_activity',
+        );
+        expect(getSignedUrl).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the manifest and does not reuse unversioned signatures', async () => {
         const resolve = createS3AnalyticsSourceResolver(config);
         await resolve();
         await resolve();
@@ -633,9 +929,9 @@ describe('signed analytics file manifests', () => {
             NextContinuationToken: 'next',
         });
         await expect(createS3AnalyticsSourceResolver(config)()).rejects.toThrow(
-            'Analytics storage access failed',
+            'The analytics query exceeds the data file limit.',
         );
-        expect(getSignedUrl).toHaveBeenCalledTimes(10_000);
+        expect(getSignedUrl).not.toHaveBeenCalled();
         expect(destroy).toHaveBeenCalledOnce();
     });
 
@@ -672,7 +968,7 @@ describe('signed analytics file manifests', () => {
     ])('fails closed on invalid or incomplete manifests', async (response) => {
         send.mockResolvedValue(response);
         await expect(createS3AnalyticsSourceResolver(config)()).rejects.toThrow(
-            'Analytics storage access failed',
+            storageReadMessage,
         );
         expect(getSignedUrl).not.toHaveBeenCalled();
         expect(destroy).toHaveBeenCalledOnce();
@@ -725,21 +1021,50 @@ describe('signed analytics file manifests', () => {
                     NextContinuationToken: 'next',
                 }).mockRejectedValueOnce(new Error('writer-secret'));
             }
-            await expect(testConnection()).rejects.toThrow(
-                /^Internal analytics query failed\. Check storage access and query permissions\.$/,
-            );
+            await expect(testConnection()).rejects.toMatchObject({
+                message: storageReadMessage,
+                code: 'storage_read_failed',
+            });
             expect(getSignedUrl).not.toHaveBeenCalled();
             expect(destroy).toHaveBeenCalledOnce();
         },
     );
 
+    it.each([
+        {
+            error: new S3ServiceException({
+                name: 'AccessDenied',
+                message: 'writer-secret and X-Amz-Signature=secret',
+                $fault: 'client',
+                $metadata: { httpStatusCode: 403 },
+            }),
+            message: 'Access to analytics storage was denied.',
+            code: 'storage_access_denied',
+            storageStatus: 403,
+        },
+        {
+            error: Object.assign(new Error('private endpoint'), {
+                code: 'ECONNRESET',
+            }),
+            message:
+                'A network error interrupted access to analytics storage. Try again.',
+            code: 'storage_network_error',
+            storageStatus: null,
+        },
+    ])('returns a safe message for $code', async ({ error, ...expected }) => {
+        send.mockRejectedValue(error);
+        await expect(testConnection()).rejects.toMatchObject(expected);
+    });
+
     it('sanitizes SDK errors without falling back to bucket credentials', async () => {
         send.mockRejectedValue(
             new Error('writer-secret and X-Amz-Signature=secret'),
         );
-        await expect(createS3AnalyticsSourceResolver(config)()).rejects.toThrow(
-            /^Analytics storage access failed\. Check bucket credentials, organization and compacted data availability\.$/,
-        );
+        await expect(
+            createS3AnalyticsSourceResolver(config)(),
+        ).rejects.toMatchObject({
+            message: storageReadMessage,
+        });
         expect(getSignedUrl).not.toHaveBeenCalled();
         expect(destroy).toHaveBeenCalledOnce();
     });

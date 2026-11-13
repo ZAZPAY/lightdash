@@ -55,8 +55,11 @@ import {
     ForbiddenError,
     friendlyName,
     generateSlug,
+    getAllowedParameterValue,
     getContentAsCodePathFromLtreePath,
+    getControlledKeys,
     getLtreePathFromContentAsCodePath,
+    getParameterMirror,
     getParameterReferences,
     hasChartsInDashboard,
     isChartScheduler,
@@ -66,6 +69,7 @@ import {
     isExploreError,
     isGoogleChatTarget,
     isMsTeamsTarget,
+    isParameterCompatible,
     isSchedulerCsvOptions,
     isSchedulerGsheetsOptions,
     isSchedulerImageOptions,
@@ -103,15 +107,17 @@ import {
     type ContentAsCodeProjectSettings,
     type ContentAsCodeSettingsStamp,
     type ContentVerificationInfo,
+    type DashboardConfig,
     type DashboardTileWithSlug,
     type DirectAccessAssignment,
     type DirectAccessPrincipalRef,
     type Filters,
     type GoogleSheetsSyncAsCode,
     type MetricQuery,
+    type ParameterDefinitions,
     type SpaceSummaryBase,
 } from '@lightdash/common';
-import { isEqual, isPlainObject } from 'es-toolkit/compat';
+import { isEqual, isPlainObject, omit } from 'es-toolkit/compat';
 import type { Knex } from 'knex';
 import { v4 as uuidv4 } from 'uuid';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
@@ -130,7 +136,10 @@ import {
     type ContentAsCodeSnapshotType,
 } from '../../models/ContentAsCodeSnapshotModel';
 import { ContentVerificationModel } from '../../models/ContentVerificationModel';
-import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
+import {
+    assertValidParameterControls,
+    DashboardModel,
+} from '../../models/DashboardModel/DashboardModel';
 import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { GroupsModel } from '../../models/GroupsModel';
 import { type OnContentVersionCreated } from '../../models/OnContentVersionCreated';
@@ -162,6 +171,7 @@ import {
 import { BaseService } from '../BaseService';
 import { DashboardService } from '../DashboardService/DashboardService';
 import type { DirectAccessService } from '../DirectAccess/DirectAccessService';
+import { getAvailableParameterDefinitions } from '../ProjectService/parameters';
 import { ProjectService } from '../ProjectService/ProjectService';
 import { PromoteService } from '../PromoteService/PromoteService';
 import { mergeDraftIntoChart } from '../SavedChartsService/chartDraftOverlay';
@@ -177,20 +187,39 @@ import {
     type CurrentChartSqlItems,
 } from './chartPermissions';
 import {
+    assertNoComposerChartTilesToReplace,
+    isNotComposerChartTile,
+} from './composerChartTiles';
+import {
     buildContentAsCodeSnapshot,
     type SnapshotAsCodeContent,
 } from './contentAsCodeSnapshot';
 import {
+    assertValidFilterSlugs,
+    getControlOrderAsCode,
+    getControlOrderWithIds,
+    getFilterSlugsAsCode,
+    getUploadedControlSlugs,
+} from './controlOrder';
+import {
     getConfigWithDateZoomTileSlugs,
     getConfigWithDateZoomTileUuids,
+    getConfigWithParameterControlTileSlugs,
+    getConfigWithParameterControlTileUuids,
     getFiltersWithTileSlugs,
     getFiltersWithTileUuids,
+    getParameterControlTileSlugs,
     getTileSlugForTileUuid,
+    getTileSlugsByUuid,
     isAnyChartTile,
     withTileWarnings,
 } from './dashboardReferences';
 import { preserveDashboardTileUuids } from './dashboardTileIdentity';
 import { resolveDataAppVizBinding } from './dataAppVizBinding';
+import {
+    getDateZoomConfigWithoutSlugs,
+    getDateZoomConfigWithSlugs,
+} from './dateZoomControlSlugs';
 import { normalizeFilterIds, stripFilterIds } from './filterIds';
 import {
     getContentConnectionName,
@@ -201,6 +230,10 @@ import { ScheduledContentCoder } from './handlers/ScheduledContentCoder';
 import { VirtualViewCoder } from './handlers/VirtualViewCoder';
 import { paginateAsCode } from './pagination';
 import {
+    getParameterControlsWithIds,
+    getParameterControlsWithSlugs,
+} from './parameterControlSlugs';
+import {
     getDashboardScheduledDeliveryFiltersWithTileSlugs,
     getDashboardScheduledDeliveryFiltersWithTileUuids,
     getDashboardTabSlug,
@@ -209,6 +242,12 @@ import {
     getScheduledDeliveryTargetKey,
     getScheduledDeliveryTargetsAsCode,
 } from './scheduledContent';
+import {
+    getDashboardWithSectionIds,
+    getDashboardWithSectionSlugs,
+    withoutStoredOnlyKeys,
+    type DashboardWithSectionIds,
+} from './sectionSlugs';
 
 type RuntimeChartAsCode = Omit<ChartAsCode, 'chartConfig'> & {
     chartConfig: ChartConfig;
@@ -249,6 +288,19 @@ type CoderServiceArguments = {
         WarehouseConnectionModel,
         'getProject' | 'list'
     >;
+    // Lazy accessor (not the instance): AppGenerateService depends on
+    // CoderService, so resolving it eagerly here would cycle. Only wired when
+    // EE license is active; core builds resolve undefined and data-app slug
+    // renames stay unsupported.
+    getAppGenerateService?: () => DataAppSlugRenamer | undefined;
+};
+
+type DataAppSlugRenamer = {
+    renameAppSlug(
+        user: SessionUser,
+        projectUuid: string,
+        args: { from: string; to: string },
+    ): Promise<void>;
 };
 
 type SqlChartsAsCodeResult = {
@@ -344,6 +396,10 @@ export class CoderService extends BaseService {
 
     private readonly agentActionLogModel: Pick<AgentActionLogModel, 'insert'>;
 
+    private readonly getAppGenerateService?: () =>
+        | DataAppSlugRenamer
+        | undefined;
+
     constructor({
         agentActionLogModel,
         lightdashConfig,
@@ -370,6 +426,7 @@ export class CoderService extends BaseService {
         userModel,
         directAccessService,
         warehouseConnectionModel,
+        getAppGenerateService,
     }: CoderServiceArguments) {
         super();
         this.agentActionLogModel = agentActionLogModel;
@@ -398,6 +455,7 @@ export class CoderService extends BaseService {
         this.organizationMemberProfileModel = organizationMemberProfileModel;
         this.userModel = userModel;
         this.warehouseConnectionModel = warehouseConnectionModel;
+        this.getAppGenerateService = getAppGenerateService;
         this.virtualViewCoder = new VirtualViewCoder({
             projectModel,
             projectService,
@@ -1954,6 +2012,8 @@ export class CoderService extends BaseService {
         dashboard: DashboardDAO,
         spaceSummary: Pick<SpaceSummaryBase, 'uuid' | 'name' | 'path'>[],
         verificationMap: Map<string, ContentVerificationInfo>,
+        controlsEnabled = false,
+        withFilterSlugs = false,
     ): DashboardAsCode {
         const contentSpace = spaceSummary.find(
             (space) => space.uuid === dashboard.spaceUuid,
@@ -1971,8 +2031,22 @@ export class CoderService extends BaseService {
             tabs: sortedTabs,
         };
 
-        const tilesWithoutUuids: DashboardTileAsCode[] = dashboard.tiles.map(
-            (tile): DashboardTileAsCode => {
+        const controlTileSlugs =
+            dashboard.config?.parameterControls !== undefined
+                ? getParameterControlTileSlugs(dashboard)
+                : undefined;
+        const controlledTileUuids = new Set(
+            (dashboard.config?.parameterControls ?? []).flatMap((control) =>
+                Object.values(control.parameters).flatMap((target) => {
+                    if (target === 'all') return [];
+                    return 'only' in target ? target.only : target.except;
+                }),
+            ),
+        );
+        // Composer chart tiles have no as-code shape yet; upload refuses them.
+        const tilesWithoutUuids: DashboardTileAsCode[] = dashboard.tiles
+            .filter(isNotComposerChartTile)
+            .map((tile): DashboardTileAsCode => {
                 const tabSlug = tile.tabUuid
                     ? getDashboardTabSlug(dashboardWithSortedTabs, tile.tabUuid)
                     : null;
@@ -1984,10 +2058,12 @@ export class CoderService extends BaseService {
                             uuid: undefined,
                             tabUuid: undefined,
                             tabSlug,
-                            tileSlug: CoderService.getTileSlugForTileUuid(
-                                dashboard,
-                                tile.uuid,
-                            ),
+                            tileSlug:
+                                controlTileSlugs?.get(tile.uuid) ??
+                                CoderService.getTileSlugForTileUuid(
+                                    dashboard,
+                                    tile.uuid,
+                                ),
                             properties: {
                                 title: tile.properties.title,
                                 hideTitle: tile.properties.hideTitle,
@@ -2005,10 +2081,12 @@ export class CoderService extends BaseService {
                         uuid: undefined,
                         tabUuid: undefined,
                         tabSlug,
-                        tileSlug: CoderService.getTileSlugForTileUuid(
-                            dashboard,
-                            tile.uuid,
-                        ),
+                        tileSlug:
+                            controlTileSlugs?.get(tile.uuid) ??
+                            CoderService.getTileSlugForTileUuid(
+                                dashboard,
+                                tile.uuid,
+                            ),
                         properties: {
                             title: tile.properties.title,
                             hideTitle: tile.properties.hideTitle,
@@ -2026,7 +2104,9 @@ export class CoderService extends BaseService {
                         uuid: undefined,
                         tabUuid: undefined,
                         tabSlug,
-                        tileSlug: undefined,
+                        tileSlug: controlledTileUuids.has(tile.uuid)
+                            ? controlTileSlugs?.get(tile.uuid)
+                            : undefined,
                         properties: {
                             title: tile.properties.title,
                             content: tile.properties.content,
@@ -2043,10 +2123,12 @@ export class CoderService extends BaseService {
                         uuid: undefined,
                         tabUuid: undefined,
                         tabSlug,
-                        tileSlug: CoderService.getTileSlugForTileUuid(
-                            dashboard,
-                            tile.uuid,
-                        ),
+                        tileSlug:
+                            controlTileSlugs?.get(tile.uuid) ??
+                            CoderService.getTileSlugForTileUuid(
+                                dashboard,
+                                tile.uuid,
+                            ),
                         properties: {
                             title: tile.properties.title,
                             hideTitle: tile.properties.hideTitle,
@@ -2059,14 +2141,14 @@ export class CoderService extends BaseService {
                 // Other non-chart tiles already match the as-code shape
                 return {
                     ...tile,
-                    tileSlug: undefined,
+                    tileSlug: controlledTileUuids.has(tile.uuid)
+                        ? controlTileSlugs?.get(tile.uuid)
+                        : undefined,
                     uuid: undefined,
                     tabUuid: undefined,
                     tabSlug,
                 };
-            },
-            [],
-        );
+            });
         tilesWithoutUuids.sort(
             (left, right) =>
                 left.y - right.y ||
@@ -2079,13 +2161,42 @@ export class CoderService extends BaseService {
                 ),
         );
 
-        const dashboardAsCode: DashboardAsCode = {
+        const config = getConfigWithParameterControlTileSlugs(
+            dashboard,
+            CoderService.getConfigWithDateZoomTileSlugs(
+                dashboard,
+                controlTileSlugs,
+            ),
+        );
+        // A stored empty order renders as none
+        const storedOrder = config?.controlOrder?.length
+            ? config.controlOrder
+            : undefined;
+        // The order appears only once stored; agents also get filter slugs so they can write one
+        const orderedControls =
+            controlsEnabled && (withFilterSlugs || storedOrder !== undefined)
+                ? {
+                      filters: {
+                          dimensions: dashboard.filters.dimensions,
+                          // Stored filters can predate the metric list
+                          metrics: dashboard.filters.metrics ?? [],
+                      },
+                      parameterControls: config?.parameterControls ?? [],
+                      sections: config?.controlSections ?? [],
+                      dateZoomControls: config?.dateZoomConfig?.controls ?? [],
+                  }
+                : undefined;
+        const dashboardAsCode: DashboardWithSectionIds = {
             name: dashboard.name,
             description: dashboard.description,
             updatedAt: dashboard.updatedAt,
             tiles: tilesWithoutUuids,
 
-            filters: CoderService.getFiltersWithTileSlugs(dashboard),
+            filters: CoderService.getFiltersWithTileSlugs(
+                dashboard,
+                controlTileSlugs,
+                orderedControls ? getFilterSlugsAsCode(orderedControls) : null,
+            ),
             tabs: sortedTabs.map(({ uuid, name, order, hidden }) => ({
                 slug: getDashboardTabSlug(dashboardWithSortedTabs, uuid),
                 name,
@@ -2093,13 +2204,30 @@ export class CoderService extends BaseService {
                 hidden,
             })),
             slug: dashboard.slug,
-            ...(dashboard.config
-                ? {
-                      config: CoderService.getConfigWithDateZoomTileSlugs(
-                          dashboard,
-                      ),
-                  }
-                : {}),
+            ...(config && {
+                config: {
+                    ...withoutStoredOnlyKeys(config),
+                    ...(config?.parameterControls !== undefined && {
+                        parameterControls: getParameterControlsWithSlugs(
+                            config.parameterControls,
+                        ),
+                    }),
+                    // Zoom slugs appear under the same condition as filter slugs
+                    ...(orderedControls &&
+                        config.dateZoomConfig && {
+                            dateZoomConfig: getDateZoomConfigWithSlugs(
+                                config.dateZoomConfig,
+                            ),
+                        }),
+                    ...(orderedControls &&
+                        storedOrder !== undefined && {
+                            controlOrder: getControlOrderAsCode({
+                                ...orderedControls,
+                                controlOrder: storedOrder,
+                            }),
+                        }),
+                },
+            }),
             ...(dashboard.parameters
                 ? { parameters: dashboard.parameters }
                 : {}),
@@ -2113,7 +2241,7 @@ export class CoderService extends BaseService {
             verification: verificationMap.get(dashboard.uuid) ?? null,
         };
 
-        return dashboardAsCode;
+        return getDashboardWithSectionSlugs(dashboardAsCode);
     }
 
     private static convertTabsWithSlugsToUuids(
@@ -2493,6 +2621,9 @@ export class CoderService extends BaseService {
             user,
             projectUuid,
             slugs,
+            undefined,
+            undefined,
+            { withFilterSlugs: true },
         );
         const chartSlugs = [
             ...new Set(
@@ -2588,7 +2719,10 @@ export class CoderService extends BaseService {
         // Access blocks are export-only: the AI/MCP read path enforces
         // per-item view access, which is not enough to see who a resource
         // is shared with.
-        { includeAccess = false }: { includeAccess?: boolean } = {},
+        {
+            includeAccess = false,
+            withFilterSlugs = false,
+        }: { includeAccess?: boolean; withFilterSlugs?: boolean } = {},
     ): Promise<ApiDashboardAsCodeListResponse['results']> {
         const project = await this.projectModel.get(projectUuid);
         if (!project) {
@@ -2674,13 +2808,39 @@ export class CoderService extends BaseService {
                 dashboardUuidsForVerification,
             );
 
-        const transformedDashboards = dashboardsWithAccess.map((dashboard) =>
-            CoderService.transformDashboard(
-                dashboard,
+        const controlsEnabled =
+            dashboardsWithAccess.length > 0 &&
+            (withFilterSlugs ||
+                dashboardsWithAccess.some(
+                    (dashboard) =>
+                        dashboard.config?.parameterControls !== undefined ||
+                        dashboard.config?.controlSections !== undefined ||
+                        dashboard.config?.controlOrder !== undefined,
+                ))
+                ? await this.dashboardService.areDashboardControlsEnabled(
+                      user,
+                      project.organizationUuid,
+                  )
+                : false;
+        const transformedDashboards = dashboardsWithAccess.map((dashboard) => {
+            if (controlsEnabled || !dashboard.config) {
+                return CoderService.transformDashboard(
+                    dashboard,
+                    spaces,
+                    dashboardVerificationMap,
+                    controlsEnabled,
+                    withFilterSlugs,
+                );
+            }
+            const { parameterControls: _ignored, ...config } = dashboard.config;
+            return CoderService.transformDashboard(
+                { ...dashboard, config },
                 spaces,
                 dashboardVerificationMap,
-            ),
-        );
+                controlsEnabled,
+                withFilterSlugs,
+            );
+        });
 
         const dashboardAccessByUuid = includeAccess
             ? await this.getPortableDirectAccessByUuid(
@@ -3568,7 +3728,36 @@ export class CoderService extends BaseService {
         return this.makeChartAsCodePortable(projectUuid, chartAsCode);
     }
 
+    private async transformDashboardForExport(
+        user: SessionUser,
+        dashboard: DashboardDAO,
+        spaces: Pick<SpaceSummaryBase, 'uuid' | 'name' | 'path'>[],
+        verificationMap: Map<string, ContentVerificationInfo>,
+    ): Promise<DashboardAsCode> {
+        const controlsEnabled =
+            dashboard.config?.parameterControls !== undefined ||
+            dashboard.config?.controlSections !== undefined ||
+            dashboard.config?.controlOrder !== undefined
+                ? await this.dashboardService.areDashboardControlsEnabled(
+                      user,
+                      dashboard.organizationUuid,
+                  )
+                : false;
+        const { parameterControls, ...config } = dashboard.config ?? {
+            isDateZoomDisabled: false,
+        };
+        return CoderService.transformDashboard(
+            !controlsEnabled && parameterControls !== undefined
+                ? { ...dashboard, config }
+                : dashboard,
+            spaces,
+            verificationMap,
+            controlsEnabled,
+        );
+    }
+
     async getCurrentDashboardAsCode(
+        user: SessionUser,
         dashboardUuid: string,
     ): Promise<DashboardAsCode> {
         const dashboard =
@@ -3581,7 +3770,8 @@ export class CoderService extends BaseService {
                 ContentType.DASHBOARD,
                 [dashboard.uuid],
             );
-        return CoderService.transformDashboard(
+        return this.transformDashboardForExport(
+            user,
             dashboard,
             spaces,
             verificationMap,
@@ -3613,6 +3803,7 @@ export class CoderService extends BaseService {
     // Drafts review: render the dashboard's as-code document with an
     // unpublished draft's fields applied on top of the published version
     async getDashboardAsCodeWithOverlay(
+        user: SessionUser,
         dashboardUuid: string,
         overlay: object,
     ): Promise<DashboardAsCode> {
@@ -3627,6 +3818,9 @@ export class CoderService extends BaseService {
             }),
             ...(fields.tiles !== undefined && { tiles: fields.tiles }),
             ...(fields.filters !== undefined && { filters: fields.filters }),
+            ...(fields.parameters !== undefined && {
+                parameters: fields.parameters,
+            }),
             ...(fields.tabs !== undefined && { tabs: fields.tabs }),
             ...(fields.config !== undefined && { config: fields.config }),
             ...(fields.spaceUuid !== undefined && {
@@ -3641,7 +3835,12 @@ export class CoderService extends BaseService {
                 ContentType.DASHBOARD,
                 [merged.uuid],
             );
-        return CoderService.transformDashboard(merged, spaces, verificationMap);
+        return this.transformDashboardForExport(
+            user,
+            merged,
+            spaces,
+            verificationMap,
+        );
     }
 
     // The repo's content_as_code flags travel with uploads; stamping them as
@@ -3777,7 +3976,8 @@ export class CoderService extends BaseService {
             await this.recordAppliedSnapshot(
                 projectUuid,
                 ContentAsCodeType.DASHBOARD,
-                CoderService.transformDashboard(
+                await this.transformDashboardForExport(
+                    user,
                     dashboard,
                     spaces,
                     verificationMap,
@@ -4286,6 +4486,8 @@ export class CoderService extends BaseService {
                             slug: chartWithDefaults.dashboardSlug,
                             forceSlug: shouldUseExactSlug,
                             tabs: [],
+                            ownerUserUuid:
+                                DashboardService.getDefaultOwnerUserUuid(user),
                         },
                         user,
                         projectUuid,
@@ -4599,10 +4801,15 @@ export class CoderService extends BaseService {
         if (!from) {
             throw new ParameterError('The source slug must not be empty');
         }
+        // Data-app slugs follow the server's own shape check
+        // (isValidDataAppSlug, applied in AppGenerateService.renameAppSlug),
+        // which allows more than generateSlug emits — e.g. consecutive
+        // hyphens and up to 255 characters.
         if (
-            !to ||
-            to.length > MAX_CONTENT_SLUG_LENGTH ||
-            generateSlug(to) !== to
+            resourceType !== ContentType.DATA_APP &&
+            (!to ||
+                to.length > MAX_CONTENT_SLUG_LENGTH ||
+                generateSlug(to) !== to)
         ) {
             throw new ParameterError(
                 `The target slug must contain between 1 and ${MAX_CONTENT_SLUG_LENGTH} lowercase letters, numbers, or hyphen-separated words`,
@@ -4625,7 +4832,10 @@ export class CoderService extends BaseService {
                 const { inheritsFromOrgOrProject, access } =
                     await this.spacePermissionService.resolveAccess(
                         user.userUuid,
-                        { type: 'space', spaceUuid: chart.spaceUuid },
+                        {
+                            type: 'space',
+                            spaceUuid: chart.spaceUuid,
+                        },
                     );
                 if (
                     auditedAbility.cannot(
@@ -4674,8 +4884,22 @@ export class CoderService extends BaseService {
                 });
                 return;
             }
+            case ContentType.DATA_APP: {
+                // Permission checks (manage on the app, registry guard) live
+                // in AppGenerateService.renameAppSlug.
+                const appGenerateService = this.getAppGenerateService?.();
+                if (!appGenerateService) {
+                    throw new NotImplementedError(
+                        'Data apps are not available on this instance',
+                    );
+                }
+                await appGenerateService.renameAppSlug(user, projectUuid, {
+                    from,
+                    to,
+                });
+                return;
+            }
             case ContentType.SPACE:
-            case ContentType.DATA_APP:
             case ContentType.DOCUMENT:
                 throw new NotImplementedError(
                     `Slug renaming is not supported for resource type "${resourceType}" yet`,
@@ -4964,6 +5188,18 @@ export class CoderService extends BaseService {
             `Updating SQL chart "${sqlChartAsCode.name}" on project ${projectUuid}`,
         );
 
+        const versionedData = {
+            sql: sqlChartAsCode.sql,
+            limit: sqlChartAsCode.limit,
+            config: sqlChartAsCode.config,
+        };
+        const hasVersionedChanges =
+            existingSqlChart.sql !== versionedData.sql ||
+            existingSqlChart.limit !== versionedData.limit ||
+            !isEqual(existingSqlChart.config, versionedData.config) ||
+            existingSqlChart.warehouse_connection_uuid !==
+                warehouseConnectionUuid;
+
         const sqlChartUpdate = {
             userUuid: user.userUuid,
             savedSqlUuid: existingSqlChart.saved_sql_uuid,
@@ -4973,11 +5209,7 @@ export class CoderService extends BaseService {
                     description: sqlChartAsCode.description,
                     spaceUuid: space.uuid,
                 },
-                versionedData: {
-                    sql: sqlChartAsCode.sql,
-                    limit: sqlChartAsCode.limit,
-                    config: sqlChartAsCode.config,
-                },
+                ...(hasVersionedChanges ? { versionedData } : {}),
             },
         };
         await this.savedSqlModel.update(
@@ -5502,6 +5734,43 @@ export class CoderService extends BaseService {
         };
     }
 
+    // Definitions of the parameters the tiles can use: project ones, plus each saved chart's explore
+    private async getTileParameterDefinitions(
+        projectUuid: string,
+        keys: string[],
+    ): Promise<ParameterDefinitions> {
+        const projectParameters = this.projectService
+            ? await this.projectService.projectParametersModel.find(projectUuid)
+            : [];
+        const tableNames = [
+            ...new Set(
+                keys.flatMap((key) => {
+                    const separator = key.indexOf('.');
+                    return separator < 0 ? [] : [key.slice(0, separator)];
+                }),
+            ),
+        ];
+        const explores = await this.projectModel.findExploresFromCache(
+            projectUuid,
+            'name',
+            [...new Set(tableNames)],
+        );
+        return Object.values(explores)
+            .filter((explore): explore is Explore => !isExploreError(explore))
+            .reduce<ParameterDefinitions>(
+                (acc, explore) => ({
+                    ...acc,
+                    ...getAvailableParameterDefinitions(
+                        projectParameters,
+                        explore,
+                    ),
+                }),
+                Object.fromEntries(
+                    projectParameters.map(({ name, config }) => [name, config]),
+                ),
+            );
+    }
+
     async upsertDashboard(
         user: SessionUser,
         projectUuid: string,
@@ -5543,7 +5812,7 @@ export class CoderService extends BaseService {
                 options.account.authentication.agentConnectionGrant
             );
         // Default optional fields when missing (e.g. user-authored YAML)
-        const dashboardWithDefaults = {
+        let dashboardWithDefaults = {
             ...dashboardAsCode,
             updatedAt: dashboardAsCode.updatedAt ?? new Date(),
             filters: {
@@ -5573,13 +5842,61 @@ export class CoderService extends BaseService {
         const existingDashboard = dashboardSummary
             ? await this.dashboardModel.getByIdOrSlug(dashboardSummary.uuid)
             : undefined;
+        let controlsEnabled = true;
+        const hasParameterControls =
+            dashboardWithDefaults.config?.parameterControls !== undefined ||
+            existingDashboard?.config?.parameterControls !== undefined;
+        if (
+            hasParameterControls ||
+            dashboardWithDefaults.config?.controlOrder !== undefined ||
+            existingDashboard?.config?.controlOrder !== undefined ||
+            dashboardWithDefaults.config?.controlSections !== undefined ||
+            existingDashboard?.config?.controlSections !== undefined ||
+            [
+                ...dashboardWithDefaults.filters.dimensions,
+                ...dashboardWithDefaults.filters.metrics,
+                ...dashboardWithDefaults.filters.tableCalculations,
+            ].some((filter) => filter.slug !== undefined) ||
+            dashboardWithDefaults.config?.dateZoomConfig?.controls?.some(
+                (control) => control.slug !== undefined,
+            )
+        ) {
+            const enabled =
+                await this.dashboardService.areDashboardControlsEnabled(
+                    user,
+                    project.organizationUuid,
+                );
+            controlsEnabled = enabled;
+            if (!enabled && hasParameterControls) {
+                const { parameterControls: _ignored, ...config } =
+                    dashboardWithDefaults.config ?? {
+                        isDateZoomDisabled: false,
+                    };
+                dashboardWithDefaults = {
+                    ...dashboardWithDefaults,
+                    config: {
+                        ...config,
+                        ...(existingDashboard?.config?.parameterControls !==
+                            undefined && {
+                            parameterControls:
+                                existingDashboard.config.parameterControls,
+                        }),
+                    },
+                };
+            }
+        }
+        const dashboardWithResolvedSections = getDashboardWithSectionIds(
+            dashboardWithDefaults,
+            existingDashboard?.config,
+            controlsEnabled,
+        );
         const { tabs: tabsWithUuids, tabUuidsBySlug } =
             CoderService.convertTabsWithSlugsToUuids(
-                dashboardWithDefaults.tabs,
+                dashboardWithResolvedSections.tabs,
                 existingDashboard?.tabs,
             );
-        const dashboardWithResolvedTabs = {
-            ...dashboardWithDefaults,
+        let dashboardWithResolvedTabs = {
+            ...dashboardWithResolvedSections,
             tabs: tabsWithUuids,
         };
         const { tiles: resolvedTiles, warnings: tileWarnings } =
@@ -5588,6 +5905,10 @@ export class CoderService extends BaseService {
                 dashboardWithResolvedTabs.tiles,
                 tabUuidsBySlug,
             );
+        assertNoComposerChartTilesToReplace(
+            slug,
+            existingDashboard?.tiles ?? [],
+        );
         const tilesWithUuids = preserveDashboardTileUuids(
             resolvedTiles,
             existingDashboard?.tiles ?? [],
@@ -5599,16 +5920,149 @@ export class CoderService extends BaseService {
             tiles: dashboardWithDefaults.tiles,
         });
 
+        if (controlsEnabled)
+            assertValidFilterSlugs([
+                ...dashboardWithDefaults.filters.dimensions,
+                ...dashboardWithDefaults.filters.metrics,
+            ]);
         const dashboardFilters = CoderService.getFiltersWithTileUuids(
             dashboardWithResolvedTabs,
             tilesWithUuids,
+            existingDashboard?.filters,
         );
-        const dashboardConfig = dashboardWithResolvedTabs.config
-            ? CoderService.getConfigWithDateZoomTileUuids(
-                  dashboardWithResolvedTabs.config,
-                  tilesWithUuids,
-              )
-            : dashboardWithResolvedTabs.config;
+        let dashboardConfig: DashboardConfig | undefined;
+        if (dashboardWithResolvedTabs.config) {
+            const { dateZoomConfig: portableDateZoom, ...portableConfig } =
+                dashboardWithResolvedTabs.config;
+            const {
+                parameterControls: portableControls,
+                controlOrder: _portableOrder,
+                ...config
+            } = CoderService.getConfigWithDateZoomTileUuids(
+                {
+                    ...portableConfig,
+                    ...(portableDateZoom && {
+                        dateZoomConfig: getDateZoomConfigWithoutSlugs(
+                            portableDateZoom,
+                            controlsEnabled,
+                        ),
+                    }),
+                },
+                tilesWithUuids,
+            );
+            const existingControls =
+                existingDashboard?.config?.parameterControls;
+            dashboardConfig = controlsEnabled
+                ? getConfigWithParameterControlTileUuids(
+                      {
+                          ...config,
+                          ...(portableControls !== undefined && {
+                              parameterControls: getParameterControlsWithIds(
+                                  portableControls,
+                                  existingControls ?? [],
+                              ),
+                          }),
+                      },
+                      tilesWithUuids,
+                  )
+                : { ...config, parameterControls: existingControls };
+        }
+        // Flag on, the file's order is declarative: absent resets to the default order
+        const fileOrder = dashboardWithResolvedTabs.config?.controlOrder;
+        let controlOrder = existingDashboard?.config?.controlOrder;
+        if (controlsEnabled) {
+            const sources = {
+                filters: dashboardFilters,
+                parameterControls: dashboardConfig?.parameterControls ?? [],
+                sections: dashboardConfig?.controlSections ?? [],
+                dateZoomControls:
+                    dashboardConfig?.dateZoomConfig?.controls ?? [],
+            };
+            // An empty list renders like no list, so it isn't stored
+            controlOrder =
+                fileOrder === undefined || fileOrder.length === 0
+                    ? undefined
+                    : getControlOrderWithIds(
+                          fileOrder,
+                          getUploadedControlSlugs(
+                              {
+                                  filters: [
+                                      ...(dashboardWithResolvedTabs.filters
+                                          ?.dimensions ?? []),
+                                      ...(dashboardWithResolvedTabs.filters
+                                          ?.metrics ?? []),
+                                  ],
+                                  parameterControls:
+                                      dashboardWithResolvedTabs.config
+                                          ?.parameterControls ?? [],
+                                  sections:
+                                      dashboardWithDefaults.config
+                                          ?.controlSections ?? [],
+                                  dateZoomControls:
+                                      dashboardWithResolvedTabs.config
+                                          ?.dateZoomConfig?.controls ?? [],
+                              },
+                              sources,
+                          ),
+                      );
+        }
+        if (dashboardConfig || controlOrder !== undefined) {
+            dashboardConfig = {
+                ...(dashboardConfig ?? { isDateZoomDisabled: false }),
+                ...(controlOrder !== undefined && { controlOrder }),
+            };
+        }
+        if (controlsEnabled && dashboardConfig?.parameterControls) {
+            const tileSlugs = getTileSlugsByUuid(tilesWithUuids);
+            const definitions = await this.getTileParameterDefinitions(
+                projectUuid,
+                [...getControlledKeys(dashboardConfig.parameterControls)],
+            );
+            assertValidParameterControls(
+                dashboardConfig.parameterControls,
+                definitions,
+                (tileUuid) => tileSlugs.get(tileUuid) ?? tileUuid,
+            );
+            for (const control of dashboardConfig.parameterControls) {
+                const known = Object.keys(control.parameters).flatMap((key) =>
+                    definitions[key] ? [definitions[key]] : [],
+                );
+                if (
+                    known.some(
+                        (definition) =>
+                            !isParameterCompatible(known[0], definition) ||
+                            !isParameterCompatible(definition, known[0]),
+                    )
+                ) {
+                    throw new ParameterError(
+                        `Parameter control ${control.label ?? control.id} has incompatible options`,
+                    );
+                }
+                if (
+                    control.value !== null &&
+                    known.some(
+                        (definition) =>
+                            !isEqual(
+                                getAllowedParameterValue(
+                                    definition,
+                                    control.value!,
+                                ),
+                                control.value,
+                            ),
+                    )
+                ) {
+                    throw new ParameterError(
+                        `Parameter control ${control.label ?? control.id} has a value outside its allowed options`,
+                    );
+                }
+            }
+            dashboardWithResolvedTabs = {
+                ...dashboardWithResolvedTabs,
+                parameters: getParameterMirror(
+                    dashboardConfig.parameterControls,
+                ),
+            };
+        }
         // If chart does not exist, we can't use promoteService,
         // since it relies on information that's not available in ChartAsCode, and other uuids
         if (dashboardSummary === undefined) {
@@ -5652,6 +6106,9 @@ export class CoderService extends BaseService {
                     forceSlug: shouldUseExactSlug,
                     filters: dashboardFilters,
                     config: dashboardConfig,
+                    // ownerEmail, synced below, can still reassign or clear it
+                    ownerUserUuid:
+                        DashboardService.getDefaultOwnerUserUuid(user),
                 },
                 user,
                 projectUuid,

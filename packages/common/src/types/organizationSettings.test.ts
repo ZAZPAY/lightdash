@@ -31,24 +31,22 @@ describe('resolveEffectiveOrganizationSettings', () => {
             queryLimit: 5000,
             csvCellsLimit: 100000,
             corsAllowedDomains: [],
-            dataAppAutomaticThumbnailsEnabled: true,
             dataAppCapturesEnabled: true,
+            dataAppCustomDependenciesEnabled: false,
         });
     });
 
-    test('automatic data app thumbnails are on until an org turns them off', () => {
+    test('custom data app dependencies are off until an org admin turns them on', () => {
         expect(
-            resolveEffectiveOrganizationSettings(
-                { dataAppAutomaticThumbnailsEnabled: null },
-                INSTANCE_DEFAULTS,
-            ).dataAppAutomaticThumbnailsEnabled,
-        ).toBe(true);
-        expect(
-            resolveEffectiveOrganizationSettings(
-                { dataAppAutomaticThumbnailsEnabled: false },
-                INSTANCE_DEFAULTS,
-            ).dataAppAutomaticThumbnailsEnabled,
+            resolveEffectiveOrganizationSettings({}, INSTANCE_DEFAULTS)
+                .dataAppCustomDependenciesEnabled,
         ).toBe(false);
+        expect(
+            resolveEffectiveOrganizationSettings(
+                { dataAppCustomDependenciesEnabled: true },
+                INSTANCE_DEFAULTS,
+            ).dataAppCustomDependenciesEnabled,
+        ).toBe(true);
     });
 
     test('data app captures are on until an org turns them off', () => {
@@ -78,24 +76,6 @@ describe('resolveEffectiveOrganizationSettings', () => {
                 { dataAppCapturesEnabled: true },
                 capturesOffInstance,
             ).dataAppCapturesEnabled,
-        ).toBe(false);
-    });
-
-    test('automatic thumbnails are off whenever captures are off, whatever the org chose', () => {
-        expect(
-            resolveEffectiveOrganizationSettings(
-                {
-                    dataAppCapturesEnabled: false,
-                    dataAppAutomaticThumbnailsEnabled: true,
-                },
-                INSTANCE_DEFAULTS,
-            ).dataAppAutomaticThumbnailsEnabled,
-        ).toBe(false);
-        expect(
-            resolveEffectiveOrganizationSettings(
-                { dataAppAutomaticThumbnailsEnabled: true },
-                { ...INSTANCE_DEFAULTS, dataAppCapturesEnabled: false },
-            ).dataAppAutomaticThumbnailsEnabled,
         ).toBe(false);
     });
 

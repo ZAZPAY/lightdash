@@ -5,6 +5,10 @@ import {
     qualifyManifestNames,
 } from '../dbt/qualifiedName';
 import {
+    assertValidDbtModelIdentifiers,
+    getDbtModelTextError,
+} from '../dbt/validateDbtText';
+import {
     buildModelGraph,
     convertColumnMetric,
     convertModelMetric,
@@ -13,17 +17,20 @@ import {
     patchPathParts,
     RESERVED_MODEL_META_KEYS,
     SupportedDbtAdapter,
+    type DbtColumnLightdashAdditionalDimension,
     type DbtColumnLightdashDimension,
     type DbtColumnMetadata,
     type DbtExploreLightdashAdditionalDimension,
     type DbtModelColumn,
     type DbtModelJoin,
     type DbtModelNode,
+    type DbtRawModelNode,
     type LineageGraph,
     type ModelInventoryEntry,
 } from '../types/dbt';
 import {
     CompileError,
+    DbtModelTextError,
     MissingCatalogEntryError,
     NotSupportedError,
     ParseError,
@@ -705,6 +712,24 @@ function dropMapValuedModelFilters(
     return { filters: validFilters, warnings };
 }
 
+// Model-level additional dimensions have no column to fall back on.
+const isCompleteAdditionalDimension = (
+    config: DbtColumnLightdashAdditionalDimension,
+): config is DbtExploreLightdashAdditionalDimension =>
+    Boolean(config.type && config.sql);
+
+const getModelAdditionalDimensions = (
+    model: Pick<DbtRawModelNode, 'meta' | 'config'>,
+): Record<string, DbtColumnLightdashAdditionalDimension> =>
+    merge({}, model.meta, model.config?.meta).additional_dimensions ?? {};
+
+export const hasModelAdditionalDimension = (
+    model: Pick<DbtRawModelNode, 'meta' | 'config'>,
+): boolean =>
+    Object.values(getModelAdditionalDimensions(model)).some(
+        isCompleteAdditionalDimension,
+    );
+
 export const convertTable = (
     adapterType: SupportedDbtAdapter,
     model: DbtModelNode,
@@ -721,7 +746,167 @@ export const convertTable = (
     const tableLabel = meta.label || friendlyName(model.name);
     const tableWarnings: InlineError[] = [];
 
-    const [dimensions, metrics]: [
+    const processIntervalDimension = (
+        dim: Dimension,
+        overrideTimeIntervals: DbtColumnLightdashDimension['time_intervals'],
+        column: DbtModelColumn,
+        columnMeta: DbtColumnMetadata,
+        index: number,
+    ) => {
+        if (dim.isIntervalBase) {
+            let allIntervals: (TimeFrames | string)[] = [];
+
+            if (
+                !dim.isAdditionalDimension &&
+                columnMeta.dimension?.time_intervals &&
+                Array.isArray(columnMeta?.dimension.time_intervals)
+            ) {
+                allIntervals = columnMeta.dimension.time_intervals;
+            } else if (
+                dim.isAdditionalDimension &&
+                Array.isArray(overrideTimeIntervals)
+            ) {
+                allIntervals = overrideTimeIntervals;
+            } else {
+                allIntervals = getTimeFramesWithProjectDefaults(
+                    dim.type,
+                    additionalTimeIntervals,
+                );
+            }
+
+            // Split into standard TimeFrames and custom granularity names
+            const intervals = validateTimeFrames(allIntervals);
+            const customIntervalNames = allIntervals.filter(
+                (v) => !isTimeInterval(v.toUpperCase()),
+            );
+
+            const dimensionMeta = {
+                ...columnMeta.dimension,
+                type: dim.type,
+                label: dim.label,
+                groups: dim.groups,
+                sql: dim.sql,
+                description: dim.description,
+                hidden: dim.hidden,
+                // Additional-dim children must inherit the additional
+                // dimension's own resolved domain, not the parent
+                // column's annotation riding in the meta spread.
+                timestamp_domain: dim.timestampDomain,
+            };
+
+            // Generate standard interval dimensions
+            const standardDims = intervals.reduce<Record<string, Dimension>>(
+                (acc, interval) => ({
+                    ...acc,
+                    [`${dim.name}_${interval.toLowerCase()}`]: convertDimension(
+                        index,
+                        adapterType,
+                        model,
+                        tableLabel,
+                        {
+                            ...column,
+                            ...('isAdditionalDimension' in dim &&
+                            dim.isAdditionalDimension
+                                ? {
+                                      name: dim.name,
+                                      meta: {
+                                          dimension: dimensionMeta,
+                                      },
+                                      // In dbt 1.10+, config.meta takes precedence over meta
+                                      // so we must set config.meta.dimension to prevent
+                                      // the base dimension's properties from overwriting
+                                      config: {
+                                          meta: {
+                                              dimension: dimensionMeta,
+                                          },
+                                      },
+                                  }
+                                : {}),
+                        },
+                        undefined,
+                        interval,
+                        startOfWeek,
+                        'isAdditionalDimension' in dim &&
+                            dim.isAdditionalDimension,
+                        // Additional-dim children derive from the
+                        // parent's compiled sql, which already
+                        // carries the timestamp conversion.
+                        dim.isAdditionalDimension
+                            ? true
+                            : disableTimestampConversion,
+                        undefined,
+                        granularityLabels,
+                    ),
+                }),
+                {},
+            );
+
+            // Generate custom granularity dimensions
+            const customDims = customIntervalNames.reduce<
+                Record<string, Dimension>
+            >((acc, customName) => {
+                const granularity = customGranularities?.[customName];
+                if (!granularity) {
+                    tableWarnings.push({
+                        type: InlineErrorType.FIELD_ERROR,
+                        message: `Unknown time interval "${customName}" on column "${dim.name}" in model "${model.name}". It is not a standard time frame or a custom granularity defined in lightdash.config.yml.`,
+                    });
+                    return acc;
+                }
+
+                const customSql = granularity.sql.replace(
+                    /\$\{COLUMN\}/g,
+                    () => dim.sql,
+                );
+                const customType = granularity.type || DimensionType.DATE;
+                const customDimName = `${dim.name}_${customName}`;
+
+                const groups: string[] = [...(dim.groups || [])];
+                if (!groups.includes(dim.label)) {
+                    groups.push(dim.label);
+                }
+
+                return {
+                    ...acc,
+                    [customDimName]: {
+                        index,
+                        fieldType: FieldType.DIMENSION,
+                        name: customDimName,
+                        label: granularity.label,
+                        sql: customSql,
+                        table: model.name,
+                        tableLabel,
+                        type: customType,
+                        description: dim.description,
+                        source: undefined,
+                        timeInterval: undefined,
+                        timeIntervalBaseDimensionName: dim.name,
+                        timeIntervalBaseDimensionType: dim.type,
+                        customTimeInterval: customName,
+                        hidden: dim.hidden,
+                        format: undefined,
+                        round: undefined,
+                        compact: undefined,
+                        requiredAttributes: dim.requiredAttributes,
+                        anyAttributes: dim.anyAttributes,
+                        groups,
+                        isIntervalBase: false,
+                        isAdditionalDimension: dim.isAdditionalDimension,
+                        ...(dim.skipTimezoneConversion
+                            ? { skipTimezoneConversion: true }
+                            : {}),
+                        // Custom granularity SQL may change the base
+                        // column's domain, so keep its output unknown.
+                    } satisfies Dimension,
+                };
+            }, {});
+
+            return { ...standardDims, ...customDims };
+        }
+        return {};
+    };
+
+    const [columnDimensions, metrics]: [
         Record<string, Dimension>,
         Record<string, Metric>,
     ] = Object.values(model.columns).reduce(
@@ -760,171 +945,16 @@ export const convertTable = (
                       granularityLabels,
                   );
 
-            const processIntervalDimension = (
-                dim: Dimension,
-                overrideTimeIntervals: DbtColumnLightdashDimension['time_intervals'],
-            ) => {
-                if (dim.isIntervalBase) {
-                    let allIntervals: (TimeFrames | string)[] = [];
-
-                    if (
-                        !dim.isAdditionalDimension &&
-                        columnMeta.dimension?.time_intervals &&
-                        Array.isArray(columnMeta?.dimension.time_intervals)
-                    ) {
-                        allIntervals = columnMeta.dimension.time_intervals;
-                    } else if (
-                        dim.isAdditionalDimension &&
-                        Array.isArray(overrideTimeIntervals)
-                    ) {
-                        allIntervals = overrideTimeIntervals;
-                    } else {
-                        allIntervals = getTimeFramesWithProjectDefaults(
-                            dim.type,
-                            additionalTimeIntervals,
-                        );
-                    }
-
-                    // Split into standard TimeFrames and custom granularity names
-                    const intervals = validateTimeFrames(allIntervals);
-                    const customIntervalNames = allIntervals.filter(
-                        (v) => !isTimeInterval(v.toUpperCase()),
-                    );
-
-                    const dimensionMeta = {
-                        ...columnMeta.dimension,
-                        type: dim.type,
-                        label: dim.label,
-                        groups: dim.groups,
-                        sql: dim.sql,
-                        description: dim.description,
-                        hidden: dim.hidden,
-                        // Additional-dim children must inherit the additional
-                        // dimension's own resolved domain, not the parent
-                        // column's annotation riding in the meta spread.
-                        timestamp_domain: dim.timestampDomain,
-                    };
-
-                    // Generate standard interval dimensions
-                    const standardDims = intervals.reduce<
-                        Record<string, Dimension>
-                    >(
-                        (acc, interval) => ({
-                            ...acc,
-                            [`${dim.name}_${interval.toLowerCase()}`]:
-                                convertDimension(
-                                    index,
-                                    adapterType,
-                                    model,
-                                    tableLabel,
-                                    {
-                                        ...column,
-                                        ...('isAdditionalDimension' in dim &&
-                                        dim.isAdditionalDimension
-                                            ? {
-                                                  name: dim.name,
-                                                  meta: {
-                                                      dimension: dimensionMeta,
-                                                  },
-                                                  // In dbt 1.10+, config.meta takes precedence over meta
-                                                  // so we must set config.meta.dimension to prevent
-                                                  // the base dimension's properties from overwriting
-                                                  config: {
-                                                      meta: {
-                                                          dimension:
-                                                              dimensionMeta,
-                                                      },
-                                                  },
-                                              }
-                                            : {}),
-                                    },
-                                    undefined,
-                                    interval,
-                                    startOfWeek,
-                                    'isAdditionalDimension' in dim &&
-                                        dim.isAdditionalDimension,
-                                    // Additional-dim children derive from the
-                                    // parent's compiled sql, which already
-                                    // carries the timestamp conversion.
-                                    dim.isAdditionalDimension
-                                        ? true
-                                        : disableTimestampConversion,
-                                    undefined,
-                                    granularityLabels,
-                                ),
-                        }),
-                        {},
-                    );
-
-                    // Generate custom granularity dimensions
-                    const customDims = customIntervalNames.reduce<
-                        Record<string, Dimension>
-                    >((acc, customName) => {
-                        const granularity = customGranularities?.[customName];
-                        if (!granularity) {
-                            tableWarnings.push({
-                                type: InlineErrorType.FIELD_ERROR,
-                                message: `Unknown time interval "${customName}" on column "${dim.name}" in model "${model.name}". It is not a standard time frame or a custom granularity defined in lightdash.config.yml.`,
-                            });
-                            return acc;
-                        }
-
-                        const customSql = granularity.sql.replace(
-                            /\$\{COLUMN\}/g,
-                            () => dim.sql,
-                        );
-                        const customType =
-                            granularity.type || DimensionType.DATE;
-                        const customDimName = `${dim.name}_${customName}`;
-
-                        const groups: string[] = [...(dim.groups || [])];
-                        if (!groups.includes(dim.label)) {
-                            groups.push(dim.label);
-                        }
-
-                        return {
-                            ...acc,
-                            [customDimName]: {
-                                index,
-                                fieldType: FieldType.DIMENSION,
-                                name: customDimName,
-                                label: granularity.label,
-                                sql: customSql,
-                                table: model.name,
-                                tableLabel,
-                                type: customType,
-                                description: dim.description,
-                                source: undefined,
-                                timeInterval: undefined,
-                                timeIntervalBaseDimensionName: dim.name,
-                                timeIntervalBaseDimensionType: dim.type,
-                                customTimeInterval: customName,
-                                hidden: dim.hidden,
-                                format: undefined,
-                                round: undefined,
-                                compact: undefined,
-                                requiredAttributes: dim.requiredAttributes,
-                                anyAttributes: dim.anyAttributes,
-                                groups,
-                                isIntervalBase: false,
-                                isAdditionalDimension:
-                                    dim.isAdditionalDimension,
-                                ...(dim.skipTimezoneConversion
-                                    ? { skipTimezoneConversion: true }
-                                    : {}),
-                                // Custom granularity SQL may change the base
-                                // column's domain, so keep its output unknown.
-                            } satisfies Dimension,
-                        };
-                    }, {});
-
-                    return { ...standardDims, ...customDims };
-                }
-                return {};
-            };
-
             let extraDimensions = dimension
-                ? { ...processIntervalDimension(dimension, undefined) }
+                ? {
+                      ...processIntervalDimension(
+                          dimension,
+                          undefined,
+                          column,
+                          columnMeta,
+                          index,
+                      ),
+                  }
                 : {};
 
             extraDimensions = Object.entries(
@@ -963,6 +993,9 @@ export const convertTable = (
                     ...processIntervalDimension(
                         additionalDim,
                         subDimension.time_intervals,
+                        column,
+                        columnMeta,
+                        index,
                     ),
                 };
             }, extraDimensions);
@@ -1015,6 +1048,76 @@ export const convertTable = (
             ];
         },
         [{}, {}],
+    );
+
+    const dimensions: Record<string, Dimension> = { ...columnDimensions };
+    const metricNames = new Set([
+        ...Object.keys(metrics),
+        ...Object.keys(meta.metrics ?? {}),
+    ]);
+    const isDuplicateDimension = (name: string) => {
+        const existing =
+            (dimensions[name] && 'dimension') ||
+            (metricNames.has(name) && 'metric');
+        if (!existing) return false;
+        tableWarnings.push({
+            type: InlineErrorType.DUPLICATE_FIELD_NAME,
+            message: `Skipped additional dimension "${name}" in model "${model.name}" because a ${existing} with the same name exists.`,
+        });
+        return true;
+    };
+    const columnCount = Object.keys(model.columns).length;
+    Object.entries(getModelAdditionalDimensions(model)).forEach(
+        ([name, config], position) => {
+            if (!isCompleteAdditionalDimension(config)) {
+                const missing = [
+                    ...(config.type ? [] : ['type']),
+                    ...(config.sql ? [] : ['sql']),
+                ]
+                    .map((key) => `"${key}"`)
+                    .join(' and ');
+                tableWarnings.push({
+                    type: InlineErrorType.FIELD_ERROR,
+                    message: `Skipped additional dimension "${name}" in model "${model.name}" because it is missing ${missing}. Model-level additional dimensions need both "type" and "sql".`,
+                });
+                return;
+            }
+            if (isDuplicateDimension(name)) return;
+            const index = columnCount + position;
+            const column: DbtModelColumn = {
+                name,
+                data_type: config.type,
+                meta: { dimension: config },
+            };
+            const baseDimension = convertDimension(
+                index,
+                adapterType,
+                model,
+                tableLabel,
+                column,
+                undefined,
+                undefined,
+                startOfWeek,
+                true,
+                disableTimestampConversion,
+                tableWarnings,
+                granularityLabels,
+            );
+            dimensions[name] = baseDimension;
+            Object.entries(
+                processIntervalDimension(
+                    baseDimension,
+                    config.time_intervals,
+                    column,
+                    { dimension: config },
+                    index,
+                ),
+            ).forEach(([intervalName, intervalDimension]) => {
+                if (!isDuplicateDimension(intervalName)) {
+                    dimensions[intervalName] = intervalDimension;
+                }
+            });
+        },
     );
 
     const modelMetrics = Object.fromEntries(
@@ -1504,7 +1607,16 @@ export const instantiateNestedTables = ({
     );
 };
 
+export type DbtJoinAvailability = Readonly<{
+    unavailableSources: readonly Readonly<{
+        sourceUuid: string;
+        sourceName: string;
+    }>[];
+}>;
+
 export type ConvertExploresOptions = {
+    joinAvailability?: DbtJoinAvailability;
+    unavailableModels?: readonly ModelInventoryEntry[];
     disableTimestampConversion?: boolean;
     allowPartialCompilation?: boolean;
     postProcessors?: ExplorePostProcessor[];
@@ -1545,7 +1657,10 @@ export async function* iterateExplores(
         includeModelIdentity = deferExploreNaming,
         modelInventory = models,
         allowCrossSourceJoinFallback = true,
+        joinAvailability,
+        unavailableModels = [],
     } = options ?? {};
+    models.forEach((model) => assertValidDbtModelIdentifiers(model));
     const resolvedNamesByUniqueId = deferExploreNaming
         ? new Map(
               models.map((model) => [
@@ -1619,11 +1734,27 @@ export async function* iterateExplores(
         representative: candidates[0],
         target: selectJoinTarget(candidates),
     }));
+    const unavailableGroups = new Map<string, ModelInventoryEntry>();
+    unavailableModels.forEach((model) => {
+        const key = getManifestNamespaceKey(model, model.name);
+        if (key !== undefined && !versionGroups.has(key))
+            unavailableGroups.set(key, model);
+    });
+    const allJoinTargets: {
+        representative: ModelInventoryEntry;
+        target: DbtModelNode | null;
+    }[] = [
+        ...joinTargets,
+        ...[...unavailableGroups.values()].map((representative) => ({
+            representative,
+            target: null,
+        })),
+    ];
     const buildJoinLookup = (
-        keyFor: (model: DbtModelNode) => string | undefined,
+        keyFor: (model: ModelInventoryEntry) => string | undefined,
     ) => {
         const lookup = new Map<string, DbtModelNode | null>();
-        joinTargets.forEach(({ representative, target }) => {
+        allJoinTargets.forEach(({ representative, target }) => {
             const key = keyFor(representative);
             if (key !== undefined)
                 lookup.set(key, lookup.has(key) ? null : target);
@@ -1674,6 +1805,18 @@ export async function* iterateExplores(
                     );
                     return join;
                 }
+                const unavailableSources =
+                    joinAvailability?.unavailableSources ?? [];
+                const unavailableTarget = unavailableSources.find((source) =>
+                    join.join.startsWith(`${source.sourceName}__`),
+                );
+                if (unavailableTarget) {
+                    joinResolutionErrors.set(
+                        join,
+                        `source "${unavailableTarget.sourceName}" inventory is unavailable`,
+                    );
+                    return join;
+                }
                 if (
                     !(
                         model.lightdash_model_inventory_complete ??
@@ -1683,6 +1826,20 @@ export async function* iterateExplores(
                     joinResolutionErrors.set(
                         join,
                         'the full own-source model inventory is unavailable, so cross-source fallback is unsafe',
+                    );
+                    return join;
+                }
+                const unavailableSiblings = unavailableSources.filter(
+                    (source) =>
+                        source.sourceUuid !== model.lightdash_source_uuid,
+                );
+                if (unavailableSiblings.length > 0) {
+                    joinResolutionErrors.set(
+                        join,
+                        `source inventory is unavailable: ${unavailableSiblings
+                            .map((source) => source.sourceName)
+                            .sort()
+                            .join(', ')}`,
                     );
                     return join;
                 }
@@ -1775,6 +1932,8 @@ export async function* iterateExplores(
 
         // If there are any errors compiling the table return an ExploreError
         try {
+            const textError = getDbtModelTextError(model);
+            if (textError !== null) throw textError;
             const table = convertTable(
                 adapterType,
                 model,
@@ -1828,28 +1987,45 @@ export async function* iterateExplores(
                 });
             }
         } catch (e: unknown) {
-            const exploreError: ExploreError = {
-                name: model.name,
-                label: meta.label || friendlyName(model.name),
-                tags,
-                groupLabel: meta.group_label,
-                ...(meta.groups && meta.groups.length > 0
-                    ? { groups: meta.groups }
-                    : {}),
-                errors: [
-                    {
-                        type:
-                            e instanceof ParseError
-                                ? InlineErrorType.METADATA_PARSE_ERROR
-                                : InlineErrorType.NO_DIMENSIONS_FOUND,
-                        message:
-                            e instanceof Error
-                                ? e.message
-                                : `Could not convert dbt model: "${model.name}" into an explore`,
-                    },
-                ],
-            };
-            exploreErrors.push(exploreError);
+            if (e instanceof DbtModelTextError) {
+                if (!allowPartialCompilation) throw e;
+                exploreErrors.push({
+                    name: model.name,
+                    label: friendlyName(
+                        originalNamesByUniqueId.get(model.unique_id) ??
+                            model.name,
+                    ),
+                    errors: [
+                        {
+                            type: InlineErrorType.METADATA_PARSE_ERROR,
+                            message: e.message,
+                        },
+                    ],
+                });
+            } else {
+                const exploreError: ExploreError = {
+                    name: model.name,
+                    label: meta.label || friendlyName(model.name),
+                    tags,
+                    groupLabel: meta.group_label,
+                    ...(meta.groups && meta.groups.length > 0
+                        ? { groups: meta.groups }
+                        : {}),
+                    errors: [
+                        {
+                            type:
+                                e instanceof ParseError
+                                    ? InlineErrorType.METADATA_PARSE_ERROR
+                                    : InlineErrorType.NO_DIMENSIONS_FOUND,
+                            message:
+                                e instanceof Error
+                                    ? e.message
+                                    : `Could not convert dbt model: "${model.name}" into an explore`,
+                        },
+                    ],
+                };
+                exploreErrors.push(exploreError);
+            }
         }
 
         if ((modelIndex + 1) % MODELS_PER_EVENT_LOOP_YIELD === 0) {
@@ -1987,6 +2163,7 @@ export async function* iterateExplores(
                           joins: meta?.joins || [],
                           description: meta.description,
                           caseSensitive: meta.case_sensitive,
+                          combineJoinedFields: meta.combine_joined_fields,
                           tables: tableLookup,
                       },
                   ]),
@@ -2068,6 +2245,9 @@ export async function* iterateExplores(
                               joins: exploreConfig.joins || meta?.joins || [],
                               description: exploreConfig.description,
                               caseSensitive: exploreConfig.case_sensitive,
+                              combineJoinedFields:
+                                  exploreConfig.combine_joined_fields ??
+                                  meta.combine_joined_fields,
                               tables: {
                                   ...tableLookup,
                                   // Override the base table with required filters and explore-scoped dimensions
@@ -2144,6 +2324,7 @@ export async function* iterateExplores(
                         ? { groups: exploreToCreate.groups }
                         : {}),
                     caseSensitive: exploreToCreate.caseSensitive,
+                    combineJoinedFields: exploreToCreate.combineJoinedFields,
                     joinedTables: exploreJoins.map((join) => ({
                         table: join.join,
                         sqlOn: join.sql_on,

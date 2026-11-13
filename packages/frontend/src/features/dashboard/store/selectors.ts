@@ -1,5 +1,10 @@
 import {
+    DashboardTileTypes,
     getMissingRequiredDashboardParameters,
+    getDashboardTileParameterOverrides,
+    omitDisallowedParameterValues,
+    reconcileDashboardControlOrder,
+    isReservedParameterName,
     stripOverridesForLockedFiltersOnTab,
     type DashboardFilters,
     type ParametersValuesMap,
@@ -8,6 +13,19 @@ import {
 import { createSelector } from '@reduxjs/toolkit';
 import { type DashboardStoreState } from '.';
 import { applyParameterLabelOverrides } from '../../../providers/Dashboard/parameterLabelOverrides';
+import { getEffectiveControlOrder } from '../../dashboardControls/controlOrder';
+import { getSavedDateZoomSettings } from './dashboardEditReducer';
+import {
+    selectControlOrder,
+    selectControlSections,
+    selectDateZoomConfig,
+} from './dashboardEditSelectors';
+import { selectDashboard } from './dashboardSourceSelectors';
+import {
+    getParameterControlInputs,
+    getDashboardParameterOptionValues,
+    getTileDashboardParameterInputs,
+} from './parameterControls';
 
 export type TemporaryFilterLocks = {
     /** Saved filters of the query-loaded dashboard (embeds have none) */
@@ -140,40 +158,233 @@ export const selectDashboardParameterReferences = createSelector(
 
 const selectTileQueryParameterReferences = (state: DashboardStoreState) =>
     state.parameters.tileQueryParameterReferences;
+const selectTileListedParameterReferences = (state: DashboardStoreState) =>
+    state.parameters.tileListedParameterReferences;
+const selectTileFailedParameterSources = (state: DashboardStoreState) =>
+    state.parameters.tileFailedParameterSources;
+
+// A tile counts once it ran, or once it was listed with its saved values
+const isTileParameterStateKnown = (
+    tileUuid: string,
+    queryReferences: Record<string, string[] | null>,
+    listedReferences: Record<string, string[]>,
+    failedSources: Record<string, string>,
+    chartValues: Record<string, ParametersValuesMap>,
+    virtualValues: Record<string, ParametersValuesMap>,
+) =>
+    Object.hasOwn(queryReferences, tileUuid) ||
+    (Object.hasOwn(listedReferences, tileUuid) &&
+        !Object.hasOwn(failedSources, tileUuid) &&
+        Object.hasOwn(chartValues, tileUuid) &&
+        Object.hasOwn(virtualValues, tileUuid));
+
+export const selectParameterPicks = (state: DashboardStoreState) =>
+    state.parameters.parameterPicks;
+export const selectParameterControls = (state: DashboardStoreState) =>
+    state.parameters.parameterControls;
+export const selectAreParameterControlsSaved = (state: DashboardStoreState) =>
+    state.parameters.areParameterControlsSaved;
+export const selectSavedParameterControlIds = (state: DashboardStoreState) =>
+    state.parameters.savedParameterControlIds;
+export const selectHaveParameterControlsChanged = (
+    state: DashboardStoreState,
+) => state.parameters.haveParameterControlsChanged;
+
+export const selectParameterControlPicks = (state: DashboardStoreState) =>
+    state.parameters.parameterControlPicks;
+export const selectParameterTilePicks = (state: DashboardStoreState) =>
+    state.parameters.parameterTilePicks;
+
+/**
+ * Null with the dashboard-controls flag off, and while the list is only filled
+ * from the tiles and unchanged; tiles then take the dashboard-wide values,
+ * which a filled list would equal once the tiles have reported.
+ */
+export const selectParameterControlInputs = createSelector(
+    [
+        selectParameterControls,
+        selectParameterPicks,
+        selectAreParameterControlsSaved,
+        selectHaveParameterControlsChanged,
+        selectRawParameterDefinitions,
+        selectParameterControlPicks,
+        selectParameterTilePicks,
+    ],
+    (
+        parameterControls,
+        parameterPicks,
+        areControlsSaved,
+        haveControlsChanged,
+        parameterDefinitions,
+        controlPicks,
+        tilePicks,
+    ) =>
+        parameterControls === null ||
+        (!areControlsSaved &&
+            !haveControlsChanged &&
+            Object.keys(controlPicks).length === 0 &&
+            Object.keys(tilePicks).length === 0)
+            ? null
+            : getParameterControlInputs(
+                  parameterControls,
+                  parameterPicks,
+                  // Loaded definitions are the user's: project and model parameters
+                  Object.keys(parameterDefinitions),
+                  controlPicks,
+                  tilePicks,
+              ),
+);
+
+/**
+ * Values for dashboard-wide requests (exports, deliveries). Backend treats each
+ * as an outside value beating a control's own, so with saved controls only the
+ * picks go; the legacy path takes the full map, which replaces saved values.
+ */
+export const selectDashboardWideParameterValues = createSelector(
+    [
+        selectParameterValues,
+        selectParameterControlInputs,
+        selectAreParameterControlsSaved,
+    ],
+    (parameterValues, controlInputs, areControlsSaved): ParametersValuesMap =>
+        controlInputs !== null && areControlsSaved
+            ? controlInputs.overrides
+            : parameterValues,
+);
+
+/**
+ * The values the dashboard runs with by key, for showing them (the scheduler
+ * form): with saved controls, each key's control value with the picks on top.
+ */
+export const selectDashboardEffectiveParameterValues = createSelector(
+    [selectParameterValues, selectParameterControlInputs],
+    (parameterValues, controlInputs): ParametersValuesMap =>
+        getDashboardParameterOptionValues(controlInputs, parameterValues),
+);
 
 export const selectMissingRequiredParameters = createSelector(
     [
         selectTileParameterReferences,
         selectTileQueryParameterReferences,
+        selectTileListedParameterReferences,
+        selectTileFailedParameterSources,
         selectTileChartSavedParameters,
         selectTileVirtualViewSavedParameters,
         selectAppliedParameterValues,
         selectDashboardParameterDefinitions,
+        selectParameterControlInputs,
     ],
     (
         tileParameterReferences,
         tileQueryParameterReferences,
+        tileListedParameterReferences,
+        tileFailedParameterSources,
         tileChartSavedParameters,
         tileVirtualViewSavedParameters,
         appliedParameterValues,
         parameterDefinitions,
+        controlInputs,
     ) =>
         getMissingRequiredDashboardParameters({
-            // A tile's saved values arrive when it runs; until then it can't count as missing
+            // Until a tile's saved values are known it can't count as missing
             tiles: Object.entries(tileParameterReferences)
-                .filter(
-                    ([tileUuid]) => tileUuid in tileQueryParameterReferences,
+                .filter(([tileUuid]) =>
+                    isTileParameterStateKnown(
+                        tileUuid,
+                        tileQueryParameterReferences,
+                        tileListedParameterReferences,
+                        tileFailedParameterSources,
+                        tileChartSavedParameters,
+                        tileVirtualViewSavedParameters,
+                    ),
                 )
                 .map(([tileUuid, parameterReferences]) => ({
                     parameterReferences,
                     chartSavedValues: tileChartSavedParameters[tileUuid] ?? {},
-                    dashboardValues: appliedParameterValues,
-                    excludedKeys: [],
                     virtualViewSavedValues:
                         tileVirtualViewSavedParameters[tileUuid] ?? {},
+                    ...getTileDashboardParameterInputs({
+                        controlInputs,
+                        tileUuid,
+                        tileParameterReferences,
+                        dashboardValues: appliedParameterValues,
+                    }),
                 })),
             definitions: parameterDefinitions,
         }),
+);
+
+export const selectMissingParametersByTile = createSelector(
+    [
+        selectTileParameterReferences,
+        selectTileQueryParameterReferences,
+        selectTileListedParameterReferences,
+        selectTileFailedParameterSources,
+        selectTileChartSavedParameters,
+        selectTileVirtualViewSavedParameters,
+        selectAppliedParameterValues,
+        selectDashboardParameterDefinitions,
+        selectParameterControlInputs,
+    ],
+    (
+        references,
+        queryReferences,
+        listedReferences,
+        failedSources,
+        chartValues,
+        virtualValues,
+        dashboardValues,
+        definitions,
+        controlInputs,
+    ) =>
+        Object.fromEntries(
+            Object.entries(references)
+                .filter(([tileUuid]) =>
+                    isTileParameterStateKnown(
+                        tileUuid,
+                        queryReferences,
+                        listedReferences,
+                        failedSources,
+                        chartValues,
+                        virtualValues,
+                    ),
+                )
+                .map(([tileUuid, parameterReferences]) => {
+                    const inputs = {
+                        chartSavedValues: chartValues[tileUuid] ?? {},
+                        virtualViewSavedValues: virtualValues[tileUuid] ?? {},
+                        ...getTileDashboardParameterInputs({
+                            controlInputs,
+                            tileUuid,
+                            tileParameterReferences: references,
+                            dashboardValues,
+                        }),
+                    };
+                    const missing = getMissingRequiredDashboardParameters({
+                        tiles: [{ parameterReferences, ...inputs }],
+                        definitions,
+                    });
+                    const overrides = getDashboardTileParameterOverrides({
+                        ...inputs,
+                        definitions,
+                    });
+                    const virtual = omitDisallowedParameterValues(
+                        inputs.virtualViewSavedValues,
+                        definitions,
+                    );
+                    for (const key of new Set(parameterReferences)) {
+                        if (
+                            isReservedParameterName(key) &&
+                            Object.hasOwn(definitions, key) &&
+                            overrides[key] === undefined &&
+                            definitions[key]?.default === undefined &&
+                            virtual[key] === undefined
+                        )
+                            missing.push(key);
+                    }
+                    return [tileUuid, missing];
+                }),
+        ),
 );
 
 // Date zoom
@@ -184,6 +395,27 @@ export const selectControlGranularities = (state: DashboardStoreState) =>
 export const selectChartZoomableFieldsByTileUuid = (
     state: DashboardStoreState,
 ) => state.dateZoom.chartZoomableFieldsByTileUuid;
+/**
+ * Whether every chart tile keeps its saved grain under date zoom, as live
+ * data source tiles do, so the control would change nothing. False until
+ * every chart tile has reported.
+ */
+export const selectIsDateZoomRefusedOnAllChartTiles = (
+    state: DashboardStoreState,
+) => {
+    const chartTiles =
+        state.edit.tiles?.filter(
+            ({ type }) =>
+                type === DashboardTileTypes.SAVED_CHART ||
+                type === DashboardTileTypes.SQL_CHART,
+        ) ?? [];
+    return (
+        chartTiles.length > 0 &&
+        chartTiles.every(
+            ({ uuid }) => state.dateZoom.dateZoomRefusedByTileUuid[uuid],
+        )
+    );
+};
 export const selectTilesWithDateZoomApplied = (state: DashboardStoreState) =>
     state.dateZoom.tilesWithDateZoomApplied;
 export const selectIsDateZoomAppliedToTile = (
@@ -215,3 +447,45 @@ export const selectAvailableCustomGranularities = (
 ) => state.tileStatus.availableCustomGranularities;
 export const selectCompletedEmbedTiles = (state: DashboardStoreState) =>
     state.tileStatus.completedEmbedTiles;
+
+/** The date zoom config as edited, resolved against the loaded dashboard's, as `useDashboardDateZoomConfig` */
+export const selectCurrentDateZoomConfig = (state: DashboardStoreState) =>
+    selectDateZoomConfig(
+        state,
+        getSavedDateZoomSettings(selectDashboard(state)?.config).dateZoomConfig,
+    );
+
+/** Every control in bar order: the stored order (none when absent or empty), else the default bar */
+export const selectOrderedControls = createSelector(
+    [
+        selectControlOrder,
+        selectDashboardFilters,
+        selectParameterControls,
+        selectAreParameterControlsSaved,
+        selectControlSections,
+        selectCurrentDateZoomConfig,
+    ],
+    (
+        controlOrder,
+        filters,
+        parameterControls,
+        areSaved,
+        sections,
+        dateZoomConfig,
+    ) =>
+        reconcileDashboardControlOrder({
+            controlOrder: getEffectiveControlOrder(
+                controlOrder,
+                parameterControls,
+                areSaved,
+            ),
+            filters,
+            parameterControls: parameterControls ?? [],
+            sections,
+            dateZoomControls: dateZoomConfig.controls,
+        }),
+);
+
+/** Whether the bar follows a stored order rather than the default */
+export const selectHasStoredControlOrder = (state: DashboardStoreState) =>
+    (selectControlOrder(state)?.length ?? 0) > 0;

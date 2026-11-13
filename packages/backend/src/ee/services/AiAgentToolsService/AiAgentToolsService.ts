@@ -14,11 +14,13 @@ import {
     ContentType,
     DATA_APP_VIZ_TEMPLATE,
     dataAppVizSchema,
+    DEFAULT_COMPOSER_QUERY_MAX_LIMIT,
     DimensionType,
     DOCUMENT_CONVERSATION_TAGS,
     documentAsCodeSchema,
     doesPatchTouchSqlChartSql,
     Explore,
+    ExploreType,
     FeatureFlags,
     filterExploreByTags,
     filterStaticFilterAutocompleteValues,
@@ -27,11 +29,13 @@ import {
     getAppDisplayName,
     getConnectionDefaults,
     getContentAsCodePathFromLtreePath,
+    getDateZoomXAxisFieldId,
     getDocumentSummaryMarkdown,
     getDocumentUrl,
     getErrorMessage,
     getItemMap,
     getLtreePathFromContentAsCodePath,
+    getTileControl,
     getValidAiQueryLimit,
     isDashboardChartTileType,
     isDashboardSqlChartTile,
@@ -42,6 +46,7 @@ import {
     isGitProjectType,
     JobStatusType,
     mcpDocumentEditSchema,
+    normalizeDateZoomConfig,
     NotFoundError,
     ParameterError,
     parseDocumentBlocks,
@@ -50,6 +55,7 @@ import {
     QueryHistoryStatus,
     QuerySurface,
     RequestMethod,
+    resolveTileDateZoom,
     SessionUser,
     shouldUseStaticFilterAutocomplete,
     SourceQuerySubmission,
@@ -68,15 +74,18 @@ import {
     type AppExternalConnectionLink,
     type ChartAsCode,
     type CustomChartType,
+    type Dashboard,
     type DashboardAsCode,
     type DataAppCreationExperience,
     type DataAppVizSchema,
+    type DateZoom,
     type Document,
     type FieldValueSearchResult,
     type McpCustomChartType,
     type McpListCustomChartTypesOutput,
     type ParameterDefinitions,
     type PersistedDataAppDataReferences,
+    type SavedChartDAO,
     type SchedulerAiAugmentation,
     type SqlChart,
     type SqlChartAsCode,
@@ -102,6 +111,7 @@ import { SavedChartModel } from '../../../models/SavedChartModel';
 import { SearchModel } from '../../../models/SearchModel';
 import { SpaceModel } from '../../../models/SpaceModel';
 import { UserAttributesModel } from '../../../models/UserAttributesModel';
+import { markAlreadyReported } from '../../../sentry/aiAgentErrors';
 import { type AgentPermissionService } from '../../../services/AgentPermissionService/AgentPermissionService';
 import {
     agentExecutionContext,
@@ -529,7 +539,10 @@ type AiAgentToolsServiceDependencies = {
     projectContextModel: ProjectContextModel;
     aiAgentDocumentModel: AiAgentDocumentModel;
     aiDeepResearchRunModel: AiDeepResearchRunModel;
-    aiAgentModel: Pick<AiAgentModel, 'findToolResultsByToolCallIds'>;
+    aiAgentModel: Pick<
+        AiAgentModel,
+        'findToolResultsByToolCallIds' | 'findThreadDashboardRuntimeOverrides'
+    >;
     featureFlagService: FeatureFlagService;
     shareService: ShareService;
     userService: UserService;
@@ -859,7 +872,9 @@ export class AiAgentToolsService extends BaseService {
             exploreNames: [exploreName],
         });
         if (!explore) {
-            throw new NotFoundError('Explore not found');
+            throw new NotFoundError(
+                `Explore "${exploreName}" is not available. It may not exist, or the project's Tables configuration, user attributes or agent tags may hide it. Do not retry this explore: choose one from the available explores.`,
+            );
         }
         return explore;
     }
@@ -1363,12 +1378,6 @@ export class AiAgentToolsService extends BaseService {
         return types;
     }
 
-    private async customChartTypesEnabled(
-        context: AiAgentToolsRuntimeContext,
-    ): Promise<boolean> {
-        return this.appGenerateService.chartTypesEnabledFor(context.user);
-    }
-
     static readonly CUSTOM_CHART_TYPES_INLINE_LIMIT = 10;
 
     static readonly CUSTOM_CHART_TYPES_SEARCH_LIMIT = 10;
@@ -1377,9 +1386,6 @@ export class AiAgentToolsService extends BaseService {
         context: AiAgentToolsRuntimeContext,
     ): ReturnType<ListCustomChartTypesFn> {
         return this.getRuntimeCached(context, 'customChartTypes', async () => {
-            if (!(await this.customChartTypesEnabled(context))) {
-                return { types: [], totalCount: 0 };
-            }
             const { data, pagination } =
                 await this.appModel.listDataAppVisualizations(
                     context.projectUuid,
@@ -1405,9 +1411,6 @@ export class AiAgentToolsService extends BaseService {
             `${AiAgentToolsService.transactionPrefix(context)}.findCustomChartTypes`,
             args,
             async () => {
-                if (!(await this.customChartTypesEnabled(context))) {
-                    return [];
-                }
                 if ('slug' in args) {
                     const row =
                         await this.appModel.findDataAppVisualizationBySlug(
@@ -1571,9 +1574,6 @@ export class AiAgentToolsService extends BaseService {
         context: AiAgentToolsRuntimeContext,
         slug: string,
     ): ReturnType<ResolveCustomChartTypeFn> {
-        if (!(await this.customChartTypesEnabled(context))) {
-            return null;
-        }
         const row = await this.appModel.findDataAppVisualizationBySlug(
             context.projectUuid,
             slug,
@@ -2470,10 +2470,11 @@ export class AiAgentToolsService extends BaseService {
               );
     }
 
-    /** Spaces the user can save charts into, as the app's save modal would list them. */
+    /** Spaces the user can save charts (or Documents) into, as the app's save modal would list them. */
     private async getEditableSpaceUuids(
         user: SessionUser,
         spaceUuids: string[],
+        subjectType: 'SavedChart' | 'Document' = 'SavedChart',
     ): Promise<Set<string>> {
         if (spaceUuids.length === 0) {
             return new Set();
@@ -2483,7 +2484,7 @@ export class AiAgentToolsService extends BaseService {
                 'create',
                 user,
                 spaceUuids,
-                { subjectType: 'SavedChart' },
+                { subjectType },
             ),
         );
     }
@@ -2493,24 +2494,35 @@ export class AiAgentToolsService extends BaseService {
      * (or the right to create one) is enough; without one, only the role is known, as before a project is chosen.
      * `spaceUuids` limits the check to the spaces the run may write to, such as an embed token's write spaces.
      */
-    async canAuthorContent(context: {
-        user: SessionUser;
-        projectUuid: UUID | undefined;
-        spaceUuids: string[] | null;
-    }): Promise<boolean> {
+    private async canSaveIntoProject(
+        context: {
+            user: SessionUser;
+            projectUuid: UUID | undefined;
+            spaceUuids: string[] | null;
+        },
+        roleSubjects: ('SavedChart' | 'Dashboard' | 'Document')[],
+        spaceSubject: 'SavedChart' | 'Document',
+    ): Promise<boolean> {
         const { user, projectUuid, spaceUuids } = context;
         const { organizationUuid } = user;
         const ability = this.createAuditedAbility(user);
-        const roleCanSaveContent =
+        const roleCanSave =
             organizationUuid !== undefined &&
-            (ability.can('create', 'SavedChart') ||
-                ability.can('create', 'Dashboard'));
-        if (!roleCanSaveContent || projectUuid === undefined) {
-            return roleCanSaveContent;
+            roleSubjects.some((roleSubject) =>
+                ability.can('create', roleSubject),
+            );
+        if (!roleCanSave || projectUuid === undefined) {
+            return roleCanSave;
         }
         if (spaceUuids !== null) {
             return (
-                (await this.getEditableSpaceUuids(user, spaceUuids)).size > 0
+                (
+                    await this.getEditableSpaceUuids(
+                        user,
+                        spaceUuids,
+                        spaceSubject,
+                    )
+                ).size > 0
             );
         }
         if (
@@ -2525,8 +2537,31 @@ export class AiAgentToolsService extends BaseService {
         const editableSpaceUuids = await this.getEditableSpaceUuids(
             user,
             spaces.map((space) => space.uuid),
+            spaceSubject,
         );
         return editableSpaceUuids.size > 0;
+    }
+
+    /** Whether the user can save a chart or dashboard in the project. */
+    async canAuthorContent(context: {
+        user: SessionUser;
+        projectUuid: UUID | undefined;
+        spaceUuids: string[] | null;
+    }): Promise<boolean> {
+        return this.canSaveIntoProject(
+            context,
+            ['SavedChart', 'Dashboard'],
+            'SavedChart',
+        );
+    }
+
+    /** Whether the user can save a Document in one of the project's Spaces; personal Documents don't count. */
+    async canAuthorDocuments(context: {
+        user: SessionUser;
+        projectUuid: UUID | undefined;
+        spaceUuids: string[] | null;
+    }): Promise<boolean> {
+        return this.canSaveIntoProject(context, ['Document'], 'Document');
     }
 
     private async listDataAppThemes(
@@ -4426,6 +4461,14 @@ export class AiAgentToolsService extends BaseService {
                     );
                 }
 
+                const { dateZoom, savedChart } =
+                    await this.resolveDashboardTileDateZoom(
+                        context,
+                        dashboard,
+                        tile.uuid,
+                        args.chartUuid,
+                    );
+
                 await context.onWarehouseQuery?.();
                 return this.asyncQueryService.executeDashboardChartQueryAndGetResults(
                     {
@@ -4436,6 +4479,10 @@ export class AiAgentToolsService extends BaseService {
                         tileUuid: tile.uuid,
                         dashboardFilters: dashboard.filters,
                         dashboardSorts: [],
+                        ...(dateZoom ? { dateZoom } : {}),
+                        ...(savedChart
+                            ? { preloadedSavedChart: savedChart }
+                            : {}),
                         limit,
                         context: context.defaultQueryExecutionContext,
                         querySurface: context.querySurface,
@@ -4448,6 +4495,68 @@ export class AiAgentToolsService extends BaseService {
                 );
             },
         );
+    }
+
+    /** The date zoom the dashboard applies to the tile: the viewer's picks attached to the thread, else the saved grains. */
+    private async resolveDashboardTileDateZoom(
+        context: AiAgentToolsRuntimeContext,
+        dashboard: Pick<Dashboard, 'uuid' | 'config'>,
+        tileUuid: string,
+        chartUuid: string,
+    ): Promise<{
+        dateZoom: DateZoom | undefined;
+        /** Loaded for the x-axis field, so the query need not load it again */
+        savedChart: SavedChartDAO | null;
+    }> {
+        // A viewer can pick a zoom on a dashboard that saves none, so a thread is always read
+        const overrides = context.threadUuid
+            ? await this.aiAgentModel.findThreadDashboardRuntimeOverrides(
+                  context.threadUuid,
+                  dashboard.uuid,
+              )
+            : null;
+        const config = normalizeDateZoomConfig(dashboard.config);
+        const savedGranularity = dashboard.config?.isDateZoomDisabled
+            ? undefined
+            : dashboard.config?.defaultDateZoomGranularity;
+        // Absent: as saved. Null: the viewer cleared it.
+        const globalGranularity =
+            overrides?.dateZoom === undefined
+                ? savedGranularity
+                : overrides.dateZoom?.granularity;
+
+        let savedChart: SavedChartDAO | null = null;
+        let defaultXAxisFieldId: string | undefined;
+        if (
+            globalGranularity !== undefined &&
+            getTileControl(config, tileUuid) === undefined
+        ) {
+            savedChart = await this.savedChartModel.get(chartUuid, undefined, {
+                projectUuid: context.projectUuid,
+            });
+            defaultXAxisFieldId = getDateZoomXAxisFieldId(
+                savedChart.chartConfig,
+                await this.projectService.getExplore(
+                    context.account,
+                    context.projectUuid,
+                    savedChart.metricQuery.exploreName,
+                ),
+            );
+        }
+
+        const dateZoom = resolveTileDateZoom({
+            config,
+            tileUuid,
+            // A grain stored as saved gives way to the config, which may have changed since
+            runtimeGranularities: Object.fromEntries(
+                (overrides?.dateZoomControls ?? [])
+                    .filter((control) => control.isViewerPick === true)
+                    .map((control) => [control.uuid, control.granularity]),
+            ),
+            globalGranularity,
+            defaultXAxisFieldId,
+        });
+        return { dateZoom, savedChart };
     }
 
     private runSqlJob(
@@ -4506,11 +4615,11 @@ export class AiAgentToolsService extends BaseService {
 
     private runSqlChartQuery(
         context: AiAgentToolsRuntimeContext,
-        { chartSlug, dashboardSlug, limit }: Parameters<RunSqlChartQueryFn>[0],
+        { chartSlug, dashboardSlug }: Parameters<RunSqlChartQueryFn>[0],
     ): ReturnType<RunSqlChartQueryFn> {
         return wrapSentryTransaction(
             `${AiAgentToolsService.transactionPrefix(context)}.runSqlChartQuery`,
-            { chartSlug, dashboardSlug, limit },
+            { chartSlug, dashboardSlug },
             async () => {
                 const sqlChart = await this.savedSqlService.getSqlChart(
                     context.user,
@@ -4522,7 +4631,7 @@ export class AiAgentToolsService extends BaseService {
                 await this.assertSqlInAgentScope(context, sqlChart.sql);
 
                 const effectiveLimit = getValidAiQueryLimit(
-                    limit,
+                    sqlChart.limit,
                     this.lightdashConfig.ai.copilot.maxQueryLimit,
                 );
                 const sqlChartQueryArgs = {
@@ -4556,6 +4665,7 @@ export class AiAgentToolsService extends BaseService {
                             effectiveLimit,
                         )),
                         sqlChart: summary,
+                        limit: effectiveLimit,
                     };
                 }
 
@@ -4600,6 +4710,7 @@ export class AiAgentToolsService extends BaseService {
                         effectiveLimit,
                     )),
                     sqlChart: summary,
+                    limit: effectiveLimit,
                 };
             },
         );
@@ -4711,9 +4822,11 @@ export class AiAgentToolsService extends BaseService {
             }
 
             if (queryResults.status === QueryHistoryStatus.ERROR) {
-                throw new WarehouseQueryError(
+                const error = new WarehouseQueryError(
                     `SQL query failed: ${queryResults.error ?? 'Unknown error'}`,
                 );
+                // AsyncQueryService reports the query's own error
+                throw markAlreadyReported(error);
             }
 
             if (queryResults.status === QueryHistoryStatus.CANCELLED) {
@@ -4734,14 +4847,17 @@ export class AiAgentToolsService extends BaseService {
         {
             queries,
             terminalNodeId,
+            otherUnreadNodeIds,
             sampleNodeIds,
             onNodeStatus,
             deadlineMs,
             timeoutMessage,
+            readAllTerminalRows = false,
         }: Parameters<RunComposerQueriesFn>[0] & {
             deadlineMs: number;
             /** Fails the run at the deadline instead of returning running. */
             timeoutMessage?: string;
+            readAllTerminalRows?: boolean;
         },
     ): ReturnType<RunComposerQueriesUntilDeadlineFn> {
         return wrapSentryTransaction(
@@ -4890,16 +5006,18 @@ export class AiAgentToolsService extends BaseService {
                 const terminalQuery = queries.find(
                     (query) => query.nodeId === terminalNodeId,
                 );
-                // Callers read only a preview; rowCount comes from the stored total.
-                const pageSize = Math.min(
+                const terminalLimit =
                     terminalQuery?.limit ??
-                        this.lightdashConfig.ai.copilot.maxQueryLimit,
-                    COMPOSER_QUERY_PREVIEW_ROW_LIMIT,
-                );
+                    this.lightdashConfig.ai.copilot.maxQueryLimit;
+                // Previews leave rowCount to the stored total.
+                const pageSize = readAllTerminalRows
+                    ? terminalLimit
+                    : Math.min(terminalLimit, COMPOSER_QUERY_PREVIEW_ROW_LIMIT);
 
-                // Polling only the terminal node is sufficient: its execution
-                // waits on every referenced result and fails if any upstream
-                // query fails.
+                const otherUnreadSubmissions = submissions.filter(
+                    (submission) =>
+                        otherUnreadNodeIds.includes(submission.nodeId),
+                );
 
                 // A failed run marks the nodes its status read did not settle.
                 const emitUnfinishedAsError = (message: string) => {
@@ -4934,9 +5052,13 @@ export class AiAgentToolsService extends BaseService {
 
                 let outcome: ComposerRunOutcome;
                 try {
-                    const polled = await this.pollComposerTerminal({
+                    // Polling the unread nodes suffices: a node waits on every
+                    // result it reads and fails if any of them fails.
+                    const polled = await this.pollComposerResultNodes({
                         context,
                         submissions,
+                        otherUnreadSubmissions,
+                        sampleNodeIds,
                         terminalSubmission,
                         pageSize,
                         deadlineMs,
@@ -4949,6 +5071,7 @@ export class AiAgentToolsService extends BaseService {
                             context,
                             submissions,
                             timeoutMessage,
+                            { cause: null, reportedAtSource: false },
                         );
                     } else {
                         outcome = polled;
@@ -4959,6 +5082,10 @@ export class AiAgentToolsService extends BaseService {
                         context,
                         submissions,
                         getErrorMessage(error),
+                        {
+                            cause: error instanceof Error ? error : null,
+                            reportedAtSource: false,
+                        },
                     );
                 }
                 outcome.nodeStatuses.forEach(({ nodeId, state, error }) => {
@@ -4994,6 +5121,7 @@ export class AiAgentToolsService extends BaseService {
             page: 1,
             aiAccessOnly: true,
             pageSize,
+            maxPageSize: DEFAULT_COMPOSER_QUERY_MAX_LIMIT,
         });
     }
 
@@ -5010,7 +5138,7 @@ export class AiAgentToolsService extends BaseService {
         );
     }
 
-    /** A failed sample read gives a null sample and never fails the run. */
+    /** A failed sample read gives a null sample and never fails the run; a status with a sample already keeps it. */
     private async readComposerNodeSamples(
         context: AiAgentToolsRuntimeContext,
         submissions: SourceQuerySubmission[],
@@ -5025,7 +5153,8 @@ export class AiAgentToolsService extends BaseService {
                 if (
                     !submission ||
                     status.state !== QueryHistoryStatus.READY ||
-                    !sampleNodeIds.includes(status.nodeId)
+                    !sampleNodeIds.includes(status.nodeId) ||
+                    status.sample !== null
                 )
                     return status;
                 try {
@@ -5055,6 +5184,51 @@ export class AiAgentToolsService extends BaseService {
                 }
             }),
         );
+    }
+
+    /**
+     * Waits for the other unread nodes first, so the terminal's status read sees them settled.
+     * Their rows come from that wait, so a failed read fails the run instead of dropping rows.
+     */
+    private async pollComposerResultNodes({
+        otherUnreadSubmissions,
+        sampleNodeIds,
+        ...args
+    }: Parameters<AiAgentToolsService['pollComposerTerminal']>[0] & {
+        otherUnreadSubmissions: SourceQuerySubmission[];
+        sampleNodeIds: string[];
+    }): Promise<ComposerRunOutcome | ComposerRunningOutcome> {
+        const samplesByNodeId = new Map<string, Record<string, AnyType>[]>();
+        const withUnreadNodeSamples = <
+            T extends ComposerRunOutcome | ComposerRunningOutcome,
+        >(
+            outcome: T,
+        ): T => ({
+            ...outcome,
+            nodeStatuses: outcome.nodeStatuses.map((status) => {
+                const rows = samplesByNodeId.get(status.nodeId);
+                return rows && sampleNodeIds.includes(status.nodeId)
+                    ? { ...status, sample: rows }
+                    : status;
+            }),
+        });
+        for (const terminalSubmission of otherUnreadSubmissions) {
+            // eslint-disable-next-line no-await-in-loop
+            const polled = await this.pollComposerTerminal({
+                ...args,
+                terminalSubmission,
+                pageSize: sampleNodeIds.includes(terminalSubmission.nodeId)
+                    ? COMPOSER_QUERY_PREVIEW_ROW_LIMIT
+                    : 1,
+            });
+            if (polled.status !== 'success')
+                return withUnreadNodeSamples(polled);
+            samplesByNodeId.set(
+                terminalSubmission.nodeId,
+                polled.terminal.rows,
+            );
+        }
+        return withUnreadNodeSamples(await this.pollComposerTerminal(args));
     }
 
     private async pollComposerTerminal({
@@ -5127,6 +5301,8 @@ export class AiAgentToolsService extends BaseService {
                     context,
                     submissions,
                     'Composer query failed.',
+                    // AsyncQueryService reports the query's own error
+                    { cause: null, reportedAtSource: true },
                 );
                 // Node statuses carry each node's error; the terminal's is the fallback.
                 return failed.nodeStatuses.some(({ error }) => error !== null)
@@ -5145,6 +5321,7 @@ export class AiAgentToolsService extends BaseService {
                     context,
                     submissions,
                     'Composer query was cancelled.',
+                    { cause: null, reportedAtSource: false },
                 );
             }
 
@@ -5168,10 +5345,16 @@ export class AiAgentToolsService extends BaseService {
         context: AiAgentToolsRuntimeContext,
         submissions: SourceQuerySubmission[],
         error: string,
+        {
+            cause,
+            reportedAtSource,
+        }: { cause: Error | null; reportedAtSource: boolean },
     ): Promise<Extract<ComposerRunOutcome, { status: 'failure' }>> {
         return {
             status: 'failure',
             error,
+            cause,
+            reportedAtSource,
             nodeStatuses: await this.readComposerNodeStatuses(
                 context,
                 submissions,
@@ -5409,23 +5592,45 @@ export class AiAgentToolsService extends BaseService {
                         : undefined;
 
                 const startedAt = Date.now();
+                const queryContext =
+                    context.source === 'mcp'
+                        ? QueryExecutionContext.MCP_SEARCH_FIELD_VALUES
+                        : QueryExecutionContext.AI;
+                const explore = await this.getExploreForRuntime(context, {
+                    table: args.table,
+                }).catch(() => null);
+                // Live sources answer through their API, which only the async query path reaches
                 const results =
-                    await this.projectService.searchFieldUniqueValues(
-                        context.account,
-                        context.projectUuid,
-                        args.table,
-                        args.fieldId,
-                        args.query,
-                        100,
-                        andFilters,
-                        false,
-                        undefined,
-                        context.userAttributeOverrides,
-                        context.source === 'mcp'
-                            ? QueryExecutionContext.MCP_SEARCH_FIELD_VALUES
-                            : QueryExecutionContext.AI,
-                        context.querySurface,
-                    );
+                    explore?.type === ExploreType.API_SOURCE
+                        ? await this.asyncQueryService.searchFieldValuesAndWait(
+                              {
+                                  account: context.account,
+                                  projectUuid: context.projectUuid,
+                                  table: args.table,
+                                  fieldId: args.fieldId,
+                                  search: args.query,
+                                  limit: 100,
+                                  filters: andFilters,
+                                  context: queryContext,
+                                  querySurface: context.querySurface,
+                                  userAttributeOverrides:
+                                      context.userAttributeOverrides,
+                              },
+                          )
+                        : await this.projectService.searchFieldUniqueValues(
+                              context.account,
+                              context.projectUuid,
+                              args.table,
+                              args.fieldId,
+                              args.query,
+                              100,
+                              andFilters,
+                              false,
+                              undefined,
+                              context.userAttributeOverrides,
+                              queryContext,
+                              context.querySurface,
+                          );
                 const output =
                     context.source === 'mcp' ? results : results.results;
                 Logger.info(
@@ -5498,26 +5703,14 @@ export class AiAgentToolsService extends BaseService {
                 if (!context.agentUuid) {
                     return [];
                 }
-                const [documents, deepResearchRuns, researchDocuments] =
-                    await Promise.all([
-                        this.aiAgentDocumentModel.findAllForAgent({
-                            organizationUuid: context.organizationUuid,
-                            agentUuid: context.agentUuid,
-                            projectUuid: context.projectUuid,
-                        }),
-                        context.threadUuid
-                            ? this.aiDeepResearchRunModel.findReportSummariesByThreadScoped(
-                                  {
-                                      aiThreadUuid: context.threadUuid,
-                                      organizationUuid:
-                                          context.organizationUuid,
-                                      projectUuid: context.projectUuid,
-                                      createdByUserUuid: context.user.userUuid,
-                                  },
-                              )
-                            : [],
-                        this.findThreadResearchDocuments(context),
-                    ]);
+                const [documents, researchDocuments] = await Promise.all([
+                    this.aiAgentDocumentModel.findAllForAgent({
+                        organizationUuid: context.organizationUuid,
+                        agentUuid: context.agentUuid,
+                        projectUuid: context.projectUuid,
+                    }),
+                    this.findThreadResearchDocuments(context),
+                ]);
                 const publishedResearchDocuments: AiAgentDocumentSummary[] =
                     researchDocuments.map(({ run, document }) => ({
                         uuid: run.ai_deep_research_run_uuid,
@@ -5546,38 +5739,7 @@ export class AiAgentToolsService extends BaseService {
                         createdAt: run.created_at,
                         updatedAt: document.updatedAt,
                     }));
-                const deepResearchDocuments: AiAgentDocumentSummary[] =
-                    deepResearchRuns.map((run) => ({
-                        uuid: run.ai_deep_research_run_uuid,
-                        organizationUuid: run.organization_uuid,
-                        projectUuid: run.project_uuid,
-                        name: run.prompt,
-                        originalFilename: `${run.ai_deep_research_run_uuid}.md`,
-                        mimeType: 'text/markdown',
-                        contentSizeBytes: run.content_size_bytes,
-                        alwaysIncludeInContext: false,
-                        summary: {
-                            description:
-                                'Deep Research report from this conversation.',
-                            definedTerms: [],
-                            relatedExploreNames: [],
-                            useWhen: `Answering follow-up questions about: ${run.prompt}`,
-                            relevance: 'high',
-                            warning:
-                                'Read-only and available only in this conversation.',
-                        },
-                        agentAccess: [],
-                        createdByUserUuid: run.created_by_user_uuid,
-                        updatedByUserUuid: null,
-                        createdAt: run.created_at,
-                        updatedAt: run.updated_at,
-                    }));
-
-                return [
-                    ...documents,
-                    ...deepResearchDocuments,
-                    ...publishedResearchDocuments,
-                ];
+                return [...documents, ...publishedResearchDocuments];
             },
         );
     }
@@ -5608,24 +5770,6 @@ export class AiAgentToolsService extends BaseService {
                     return content;
                 }
                 if (context.threadUuid) {
-                    const run =
-                        await this.aiDeepResearchRunModel.findReportByUuidThreadScoped(
-                            {
-                                aiDeepResearchRunUuid: args.documentUuid,
-                                aiThreadUuid: context.threadUuid,
-                                organizationUuid: context.organizationUuid,
-                                projectUuid: context.projectUuid,
-                                createdByUserUuid: context.user.userUuid,
-                            },
-                        );
-                    if (run?.result_markdown) {
-                        return {
-                            uuid: run.ai_deep_research_run_uuid,
-                            name: run.prompt,
-                            mimeType: 'text/markdown',
-                            content: run.result_markdown,
-                        };
-                    }
                     const published = (
                         await this.findThreadResearchDocuments(context)
                     ).find(

@@ -2,7 +2,6 @@ import { type AiAgentBattleProfile } from '@lightdash/common';
 import {
     ActionIcon,
     Box,
-    Center,
     Group,
     Pill,
     Popover,
@@ -21,6 +20,7 @@ import {
     type FC,
 } from 'react';
 import {
+    useLocation,
     useNavigate,
     useOutletContext,
     useParams,
@@ -62,6 +62,7 @@ import {
 import { useAiAgentQueryPathBattleAvailable } from '../../features/aiCopilot/hooks/useAiAgentQueryPathBattleAvailable';
 import { useAiAgentSpeedBattleAvailable } from '../../features/aiCopilot/hooks/useAiAgentSpeedBattleAvailable';
 import { useAiAgentSqlModeAvailable } from '../../features/aiCopilot/hooks/useAiAgentSqlModeAvailable';
+import { useDashboardPageContextCuration } from '../../features/aiCopilot/hooks/useDashboardPageContextCuration';
 import { useStartDeepResearchForThreadMutation } from '../../features/aiCopilot/hooks/useDeepResearch';
 import { useDeepResearchAccess } from '../../features/aiCopilot/hooks/useDeepResearchAccess';
 import { usePinnedContext } from '../../features/aiCopilot/hooks/usePinnedContext';
@@ -88,9 +89,9 @@ const agentTourProps = {
     'data-tour-step': '1',
     'data-tour-route': '/projects/:projectUuid/ai-agents/:agentUuid',
     'data-tour-label': 'Your agent is ready to ask',
-    'data-tour-docs': 'agents/set-up-agents.mdx#intro:1',
+    'data-tour-docs': 'agents/set-up-agents.mdx#intro',
     'data-tour-return': 'none',
-    'data-tour-resultdocs': 'agents/set-up-agents.mdx#data-access:1',
+    'data-tour-resultdocs': 'agents/data-access.mdx#intro:2',
 };
 
 const battleProfileA: Record<BattleType, AiAgentBattleProfile | undefined> = {
@@ -149,10 +150,31 @@ const AiAgentNewThreadPage: FC = () => {
         dataAppUuidOrSlug: dataAppUuid,
         documentUuid,
     });
+    const boundDashboardUuid =
+        aiAgentThreadSetup?.binding?.type === 'dashboard'
+            ? aiAgentThreadSetup.binding.dashboardUuid
+            : null;
+    // A bound thread starts with the view state of its dashboard when it is on the same page.
+    const { curateContext } = useDashboardPageContextCuration({
+        previousContext: contextInput,
+        projectUuid: projectUuid!,
+        boundDashboardUuid,
+    });
+    const promptContext = useMemo(
+        () =>
+            boundDashboardUuid
+                ? curateContext({
+                      context: contextInput,
+                      optimisticContext: previewItems,
+                  })
+                : { context: contextInput, optimisticContext: previewItems },
+        [boundDashboardUuid, contextInput, curateContext, previewItems],
+    );
 
     const { agent, agents, navigateFromAgentChat } =
         useOutletContext<AgentContext>();
     const navigate = useNavigate();
+    const location = useLocation();
     const battleModeAvailable = useAiAgentBattleModeEnabled() && !isEmbed;
     const [battleMode, setBattleMode] = useState(false);
     const speedBattleAvailable = useAiAgentSpeedBattleAvailable();
@@ -291,11 +313,11 @@ const AiAgentNewThreadPage: FC = () => {
             if (!isPinnedContextReady) return;
             setPendingPrompt('');
             const mergedContext = mergeAiPromptContextInput(
-                contextInput,
+                promptContext.context,
                 context,
             );
             const mergedOptimisticContext = mergeAiPromptContextItems(
-                previewItems,
+                promptContext.optimisticContext,
                 optimisticContext,
             );
             if (isBattle && projectUuid) {
@@ -364,8 +386,7 @@ const AiAgentNewThreadPage: FC = () => {
             setPendingPrompt,
             createAgentThread,
             createBattleThread,
-            contextInput,
-            previewItems,
+            promptContext,
             sqlModeAvailable,
             sqlMode,
             explicitModelConfig,
@@ -383,6 +404,31 @@ const AiAgentNewThreadPage: FC = () => {
         ],
     );
 
+    const autoSubmitPrompt =
+        typeof location.state?.autoSubmitPrompt === 'string'
+            ? location.state.autoSubmitPrompt.trim()
+            : '';
+    const consumedAutoSubmitKeyRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (!autoSubmitPrompt || !agentUuid || !isPinnedContextReady) return;
+        if (consumedAutoSubmitKeyRef.current === location.key) return;
+        consumedAutoSubmitKeyRef.current = location.key;
+        void navigate(
+            { pathname: location.pathname, search: location.search },
+            { replace: true, state: undefined },
+        );
+        onSubmit({ message: autoSubmitPrompt, toolHints: [] });
+    }, [
+        autoSubmitPrompt,
+        agentUuid,
+        isPinnedContextReady,
+        location.key,
+        location.pathname,
+        location.search,
+        navigate,
+        onSubmit,
+    ]);
+
     const onStartDeepResearch = useCallback(
         async ({ question }: StartDeepResearchArgs) => {
             if (!agentUuid || !isPinnedContextReady || !canStartDeepResearch) {
@@ -392,8 +438,7 @@ const AiAgentNewThreadPage: FC = () => {
             const thread = await createAgentThread({
                 agentUuid,
                 prompt: question,
-                context: contextInput,
-                optimisticContext: previewItems,
+                ...promptContext,
                 modelConfig: explicitModelConfig,
                 skipAgentResponse: true,
                 ...getThreadSetupRequestFields(aiAgentThreadSetup),
@@ -408,11 +453,10 @@ const AiAgentNewThreadPage: FC = () => {
         [
             agentUuid,
             canStartDeepResearch,
-            contextInput,
+            promptContext,
             createAgentThread,
             isPinnedContextReady,
             explicitModelConfig,
-            previewItems,
             setPendingPrompt,
             startDeepResearch,
             aiAgentThreadSetup,
@@ -420,7 +464,7 @@ const AiAgentNewThreadPage: FC = () => {
     );
 
     return (
-        <Center h="100%">
+        <Box className={styles.startScreen}>
             <Stack
                 justify="space-between"
                 gap={0}
@@ -428,7 +472,7 @@ const AiAgentNewThreadPage: FC = () => {
                 {...ChatElementsUtils.centeredElementProps}
                 h="unset"
             >
-                <Stack flex={1} py="lg">
+                <Stack flex={1} py="lg" gap="xl">
                     <Stack
                         align="center"
                         gap={6}
@@ -436,9 +480,9 @@ const AiAgentNewThreadPage: FC = () => {
                         data-tour-step="1"
                         data-tour-route="/projects/:projectUuid/ai-agents/:agentUuid"
                         data-tour-label="Explore an AI agent"
-                        data-tour-docs="agents.mdx#intro:1"
+                        data-tour-docs="agents.mdx#intro:2"
                         data-tour-return="none"
-                        data-tour-resultdocs="agents/use-ai-agents.mdx#core-capabilities:li1"
+                        data-tour-resultdocs="agents.mdx#ask-more-questions:p1:3"
                     >
                         <Box className={styles.agentAvatarWrap}>
                             <LightdashUserAvatar
@@ -498,7 +542,7 @@ const AiAgentNewThreadPage: FC = () => {
                                 data-tour-scope="view:AiAgent"
                                 data-tour-result="1"
                                 data-tour-label="Read the agent description"
-                                data-tour-docs="agents/effective-analytics-with-agents.mdx#think-specialized-not-general:1"
+                                data-tour-docs="agents/effective-analytics-with-agents.mdx#think-specialized-not-general:p3:2"
                             >
                                 {agent.description}
                             </Text>
@@ -518,14 +562,6 @@ const AiAgentNewThreadPage: FC = () => {
                             }
                         />
                     </Stack>
-
-                    {projectUuid && agentUuid && (
-                        <AiAgentNewThreadMcpConnections
-                            projectUuid={projectUuid}
-                            agentUuid={agentUuid}
-                            onSuggestedPrompt={handleSuggestedPrompt}
-                        />
-                    )}
 
                     {verifiedQuestions && (
                         <SuggestedQuestions
@@ -618,11 +654,25 @@ const AiAgentNewThreadPage: FC = () => {
                             defaultValue={pendingPrompt}
                             onValueChange={setPendingPrompt}
                             contentMentionPriorityItems={contentMentionItems}
+                            suggestionLayout="list"
+                            composerTray={
+                                projectUuid &&
+                                agentUuid && (
+                                    <AiAgentNewThreadMcpConnections
+                                        placement="tray"
+                                        projectUuid={projectUuid}
+                                        agentUuid={agentUuid}
+                                        onSuggestedPrompt={
+                                            handleSuggestedPrompt
+                                        }
+                                    />
+                                )
+                            }
                         />
                     </Stack>
                 </Stack>
             </Stack>
-        </Center>
+        </Box>
     );
 };
 export default AiAgentNewThreadPage;

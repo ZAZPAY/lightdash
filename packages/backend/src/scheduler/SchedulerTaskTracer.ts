@@ -136,6 +136,12 @@ const getTagsForTask: {
         'project.uuid': payload.projectUuid,
     }),
 
+    [SCHEDULER_TASKS.WARM_WAREHOUSE_TABLES_CACHE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+
     [SCHEDULER_TASKS.BACKFILL_DEFAULT_USER_SPACES]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
@@ -254,6 +260,12 @@ const getTagsForTask: {
         'user.uuid': payload.userUuid ?? '',
     }),
 
+    [SCHEDULER_TASKS.CHECK_SEMANTIC_LAYER_DRAFT_IMPACT]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+
     [SCHEDULER_TASKS.EMBED_ARTIFACT_VERSION]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
@@ -284,6 +296,7 @@ const getTagsForTask: {
     [SCHEDULER_TASKS.GENERATE_SLACK_CHANNEL_SYNC_JOBS]: () => ({}),
     [SCHEDULER_TASKS.CHECK_FOR_STUCK_JOBS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_DEPLOY_SESSIONS]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_MOBILE_APP_LINKS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_WAREHOUSE_CONNECT_CODES]: () => ({}),
     [SCHEDULER_TASKS.CLEAR_DUE_RESULTS_CACHES]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_AGENT_CONNECTION_APPROVAL_REQUESTS]: () => ({}),
@@ -349,7 +362,6 @@ const getTagsForTask: {
     [SCHEDULER_TASKS.CLEAN_MCP_TOOL_CALLS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_RATE_COUNTERS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_DATA_APP_ANALYSES]: () => ({}),
-    [SCHEDULER_TASKS.CLEAN_AI_DEEP_RESEARCH_REPORTS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_AI_AGENT_THREADS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_SCIM_REQUEST_LOGS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_APP_STATE_HISTORY]: () => ({}),
@@ -385,12 +397,6 @@ const getTagsForTask: {
             ? { 'dashboard.uuid': payload.target.dashboardUuid }
             : { 'app.uuid': payload.target.appUuid }),
         'agent.uuid': payload.agentUuid,
-    }),
-    [SCHEDULER_TASKS.AGENT_ONBOARDING_RUN]: (payload) => ({
-        'organization.uuid': payload.organizationUuid,
-        'user.uuid': payload.userUuid,
-        'project.uuid': payload.projectUuid,
-        'agent_onboarding.run_uuid': payload.agentOnboardingRunUuid,
     }),
     [SCHEDULER_TASKS.AI_AGENT_EDIT_DBT_PROJECT_PIPELINE]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
@@ -428,6 +434,12 @@ const getTagsForTask: {
         'project.uuid': payload.projectUuid,
     }),
     [SCHEDULER_TASKS.MAINTAIN_EXTERNAL_SOURCES]: () => ({}),
+    [SCHEDULER_TASKS.REBUILD_OUTDATED_API_SOURCE_EXPLORES]: () => ({}),
+    [SCHEDULER_TASKS.SCAN_API_SOURCE_SCHEMA]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
     [SCHEDULER_TASKS.SWEEP_UNCLAIMED_AI_THREAD_FILES]: () => ({}),
     [SCHEDULER_TASKS.LEARN_SANDBOX_COMMAND]: (payload) => ({
         projectUuid: payload.projectUuid,

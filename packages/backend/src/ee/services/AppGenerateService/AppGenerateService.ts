@@ -26,6 +26,7 @@ import {
     ContentType,
     DATA_APP_CLAUDE_MODELS,
     DATA_APP_CODEX_MODELS,
+    DATA_APP_NEWER_VERSION_CODE,
     DATA_APP_VIZ_TEMPLATE,
     DATA_REFERENCE_EXTRACTOR_VERSION,
     dataAppManifestRegistryProvenanceSchema,
@@ -44,6 +45,7 @@ import {
     formatPromptWithClarifications,
     getContentAsCodePathFromLtreePath,
     getCustomSqlFieldKey,
+    getDataAppConsumerAccess,
     getDataAppVizPreviewSchema,
     getDocumentRuntimeChartConfig,
     getEffectiveFieldAiHints,
@@ -81,7 +83,6 @@ import {
     type ApiGetAppResponse,
     type ApiOrganizationDesign,
     type AppBuildFromSourceJobPayload,
-    type AppCaptureThumbnailJobPayload,
     type AppChartReference,
     type AppClarification,
     type AppDashboardReference,
@@ -118,6 +119,7 @@ import {
     type DataAppCodingAgent,
     type DataAppCodingAgentModel,
     type DataAppCompactionResult,
+    type DataAppConsumerAccess,
     type DataAppContext,
     type DataAppCreationExperience,
     type DataAppDependencies,
@@ -215,11 +217,9 @@ import {
 } from '../../../models/AppModel';
 import { CatalogModel } from '../../../models/CatalogModel/CatalogModel';
 import { ContentVerificationModel } from '../../../models/ContentVerificationModel';
-import {
-    FeatureFlagModel,
-    type FeatureFlagLogicArgs,
-} from '../../../models/FeatureFlagModel/FeatureFlagModel';
+import { FeatureFlagModel } from '../../../models/FeatureFlagModel/FeatureFlagModel';
 import { OrganizationDesignModel } from '../../../models/OrganizationDesignModel';
+import { type OrganizationSettingsModel } from '../../../models/OrganizationSettingsModel';
 import { PinnedListModel } from '../../../models/PinnedListModel';
 import { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import { ProjectParametersModel } from '../../../models/ProjectParametersModel';
@@ -305,9 +305,9 @@ import {
     SEMANTIC_LAYER_POINTER_FILE,
 } from './appContext';
 import {
-    assertChartTypesEnabled,
-    chartTypesEnabledFor,
-} from './chartTypeFeatureGate';
+    assertDataAppQueryAllowed,
+    type DataAppQueryInputs,
+} from './appQueryAuthorization';
 import {
     CLARIFY_APP_SYSTEM_PROMPT,
     CLARIFY_VIZ_SYSTEM_PROMPT,
@@ -483,6 +483,7 @@ type AppGenerateServiceDeps = {
     appModel: AppModel;
     featureFlagModel: FeatureFlagModel;
     organizationDesignModel: OrganizationDesignModel;
+    organizationSettingsModel: Pick<OrganizationSettingsModel, 'get'>;
     pinnedListModel: PinnedListModel;
     projectModel: ProjectModel;
     projectParametersModel: ProjectParametersModel;
@@ -783,13 +784,27 @@ const CANCELLED_PROMPT_NOTICE =
 
 /** Prepended to the build prompt when the builder's org has saved app state. */
 export const APP_STATE_PROMPT_BLOCK =
-    '[Saved app state is available — this app can remember what each person enters with useAppState and keep values every viewer shares, with a change history, with useSharedAppState. ' +
-    'Read /app/references/app-state.md before building anything that should survive a reload. ' +
+    // No hook names here: this block also reaches sandboxes resumed with an
+    // older bundled SDK, where a newer call form would silently misbehave
+    // (e.g. a pre-scopes SDK saves a { scope: 'shared' } value per person).
+    // /app/references/app-state.md is baked next to the SDK it documents.
+    '[Saved app state is available — this app can remember what each person enters and keep values every viewer shares, with a change history. ' +
+    'Read /app/references/app-state.md before building anything that should survive a reload, and use exactly the hook forms it shows. ' +
     'Remember a person\'s inputs by default without being asked; use shared state only when the prompt asks for comments, targets, annotations, or anything "everyone" or "the team" sees.]\n\n';
 
 // Maximum number of in-progress app builds allowed per project at one time.
 // Prevents trivial sandbox exhaustion via repeated POST /code calls.
 const MAX_CONCURRENT_APP_BUILDS_PER_PROJECT = 5;
+
+// Library chart types a new project starts with; ones that need data a new project rarely has are left out
+const STARTER_CHART_TYPE_SLUGS: readonly string[] = [
+    'big-number-with-sparkline-trend',
+    'customizable-cartesian-chart',
+    'heatmap',
+    'sortable-pivot-table',
+    'radar-chart',
+    'boxplot',
+];
 
 type ImportAppCodeResult = {
     appUuid: string;
@@ -813,6 +828,11 @@ export class AppGenerateService extends BaseService {
     private readonly featureFlagModel: FeatureFlagModel;
 
     private readonly organizationDesignModel: OrganizationDesignModel;
+
+    private readonly organizationSettingsModel: Pick<
+        OrganizationSettingsModel,
+        'get'
+    >;
 
     private readonly pinnedListModel: PinnedListModel;
 
@@ -882,6 +902,7 @@ export class AppGenerateService extends BaseService {
         appModel,
         featureFlagModel,
         organizationDesignModel,
+        organizationSettingsModel,
         pinnedListModel,
         projectModel,
         projectParametersModel,
@@ -915,6 +936,7 @@ export class AppGenerateService extends BaseService {
         this.appModel = appModel;
         this.featureFlagModel = featureFlagModel;
         this.organizationDesignModel = organizationDesignModel;
+        this.organizationSettingsModel = organizationSettingsModel;
         this.pinnedListModel = pinnedListModel;
         this.projectModel = projectModel;
         this.projectParametersModel = projectParametersModel;
@@ -1766,15 +1788,12 @@ export class AppGenerateService extends BaseService {
         await this.assertDataAppsEnabled(user);
     }
 
-    /** Library installs uninstall and restore wherever chart types are usable, even without Chart Studio. */
+    /** Library installs uninstall and restore anywhere, even without Chart Studio. */
     private async assertCanRemoveAppGate(
         user: SessionUser,
         app: Pick<DbApp, 'registry_slug' | 'template'>,
     ): Promise<void> {
-        if (app.registry_slug !== null) {
-            await this.assertChartTypesUsable(user);
-            return;
-        }
+        if (app.registry_slug !== null) return;
         await this.assertAppsEnabled(user, app.template);
     }
 
@@ -1806,24 +1825,6 @@ export class AppGenerateService extends BaseService {
     private async assertAnyAppsEnabled(user: SessionUser): Promise<void> {
         if (this.isChartStudioAvailable()) return;
         await this.assertDataAppsEnabled(user);
-    }
-
-    async chartTypesEnabledFor(user: SessionUser): Promise<boolean> {
-        return chartTypesEnabledFor(
-            this.featureFlagModel,
-            this.isChartStudioAvailable(),
-            user,
-        );
-    }
-
-    private async assertChartTypesUsable(
-        user: FeatureFlagLogicArgs['user'],
-    ): Promise<void> {
-        await assertChartTypesEnabled(
-            this.featureFlagModel,
-            this.isChartStudioAvailable(),
-            user,
-        );
     }
 
     /**
@@ -1872,22 +1873,6 @@ export class AppGenerateService extends BaseService {
     }
 
     /**
-     * The library surface — browsing, installing, registry assets — follows
-     * the `ChartTypeRegistry` flag alone, independent of data apps.
-     */
-    private async assertChartTypeLibraryEnabled(
-        user: SessionUser,
-    ): Promise<void> {
-        const { enabled } = await this.featureFlagModel.get({
-            user,
-            featureFlagId: FeatureFlags.ChartTypeRegistry,
-        });
-        if (!enabled) {
-            throw new ForbiddenError('The chart type library is not enabled');
-        }
-    }
-
-    /**
      * Chart types are offered to whoever can build a chart in an explore:
      * picking, configuring, and previewing a renderer is part of chart
      * building, not app access. Registry-installed chart types are space-less,
@@ -1912,9 +1897,6 @@ export class AppGenerateService extends BaseService {
         user: SessionUser,
         projectUuid: string | null,
     ): Promise<boolean> {
-        if (!(await this.chartTypesEnabledFor(user))) {
-            return false;
-        }
         const auditedAbility = this.createAuditedAbility(user);
         if (projectUuid === null) {
             return auditedAbility.can('manage', 'Explore');
@@ -2745,7 +2727,6 @@ export class AppGenerateService extends BaseService {
     ) {
         const app = await this.appModel.getApp(appUuid, projectUuid);
         if (app.template === DATA_APP_VIZ_TEMPLATE) {
-            await this.assertChartTypesUsable(user);
             this.assertCanUseChartTypes(user, {
                 organizationUuid: app.organization_uuid,
                 projectUuid,
@@ -2925,33 +2906,6 @@ export class AppGenerateService extends BaseService {
         });
     }
 
-    /** Best-effort: an enqueue failure must never affect the build. */
-    private async enqueueThumbnailCapture(args: {
-        organizationUuid: string;
-        projectUuid: string;
-        userUuid: string;
-        appUuid: string;
-        version: number;
-        isCustomChartType: boolean;
-    }): Promise<void> {
-        try {
-            const enabled =
-                await this.appThumbnailClient.shouldCaptureAutomatically(args);
-            if (!enabled) return;
-            await this.schedulerClient.appCaptureThumbnail({
-                organizationUuid: args.organizationUuid,
-                projectUuid: args.projectUuid,
-                userUuid: args.userUuid,
-                appUuid: args.appUuid,
-                version: args.version,
-            });
-        } catch (error) {
-            this.logger.warn(
-                `App ${args.appUuid}: could not enqueue thumbnail capture for version ${args.version}: ${getErrorMessage(error)}`,
-            );
-        }
-    }
-
     /** Best-effort: a thumbnail must never fail the flow that copies it. */
     private async copyVersionThumbnail(
         from: { appUuid: string; version: number },
@@ -2963,36 +2917,6 @@ export class AppGenerateService extends BaseService {
             this.logger.warn(
                 `App ${to.appUuid}: could not copy thumbnail of app ${from.appUuid} version ${from.version} to version ${to.version}: ${getErrorMessage(error)}`,
             );
-        }
-    }
-
-    /** Scheduler job body. Never throws: a failed capture is only logged. */
-    async captureVersionThumbnail({
-        appUuid,
-        version,
-    }: AppCaptureThumbnailJobPayload): Promise<void> {
-        const outcome = await this.appThumbnailClient.captureVersion({
-            appUuid,
-            version,
-        });
-        switch (outcome.status) {
-            case 'captured':
-                this.logger.info(
-                    `App ${appUuid}: captured thumbnail for version ${version}`,
-                );
-                return;
-            case 'skipped':
-                this.logger.info(
-                    `App ${appUuid}: skipped thumbnail capture for version ${version} (${outcome.reason})`,
-                );
-                return;
-            case 'failed':
-                this.logger.warn(
-                    `App ${appUuid}: thumbnail capture failed for version ${version}: ${getErrorMessage(outcome.error)}`,
-                );
-                return;
-            default:
-                assertUnreachable(outcome, 'Unknown thumbnail capture outcome');
         }
     }
 
@@ -4475,9 +4399,7 @@ export class AppGenerateService extends BaseService {
                     : '\n\nNo CSS, font, or image files were copied for this theme.';
             const omittedFontNote =
                 designCopy.omittedRestrictedFonts.length > 0
-                    ? `\n\n${omittedThemeFontGuidance(
-                          designCopy.omittedRestrictedFonts,
-                      )}`
+                    ? `\n\n${omittedThemeFontGuidance(designCopy.omittedRestrictedFonts)}`
                     : '';
 
             sections.push(
@@ -6985,14 +6907,6 @@ export class AppGenerateService extends BaseService {
                 );
                 return;
             }
-            await this.enqueueThumbnailCapture({
-                organizationUuid: payload.organizationUuid,
-                projectUuid: payload.projectUuid,
-                userUuid: payload.userUuid,
-                appUuid,
-                version,
-                isCustomChartType: isDataAppViz,
-            });
         } catch (error) {
             this.logger.error(
                 `App ${appUuid}: failed to mark version as ready: ${getErrorMessage(error)}`,
@@ -8847,6 +8761,11 @@ export class AppGenerateService extends BaseService {
             newVersion,
             source.data_references,
         );
+        await this.freezeConsumerDataReferences(
+            appUuid,
+            newVersion,
+            source.consumer_data_references,
+        );
         await this.appModel.updateStatusMessage(
             appUuid,
             newVersion,
@@ -9492,6 +9411,11 @@ export class AppGenerateService extends BaseService {
                 targetVersion,
                 sourceVersion.data_references,
             );
+            await this.freezeConsumerDataReferences(
+                targetAppUuid,
+                targetVersion,
+                sourceVersion.consumer_data_references,
+            );
             await this.appModel.updateStatusMessage(
                 targetAppUuid,
                 targetVersion,
@@ -9551,16 +9475,6 @@ export class AppGenerateService extends BaseService {
                 upstreamApp.sandbox_id,
             );
         }
-
-        // Captured fresh upstream: the preview's thumbnail shows preview data.
-        await this.enqueueThumbnailCapture({
-            organizationUuid: upstreamOrganizationUuid,
-            projectUuid: upstreamProjectUuid,
-            userUuid: user.userUuid,
-            appUuid: targetAppUuid,
-            version: targetVersion,
-            isCustomChartType: isChartType,
-        });
 
         this.analytics.track({
             event: 'data_app.promoted',
@@ -9832,6 +9746,11 @@ export class AppGenerateService extends BaseService {
                 newVersion,
                 sourceVersion.data_references,
             );
+            await this.freezeConsumerDataReferences(
+                newAppUuid,
+                newVersion,
+                sourceVersion.consumer_data_references,
+            );
             await this.linkResolvedExternalConnections(
                 newAppUuid,
                 externalConnectionResources,
@@ -10100,6 +10019,11 @@ export class AppGenerateService extends BaseService {
                 newVersion,
                 sourceVersion.data_references,
             );
+            await this.freezeConsumerDataReferences(
+                newAppUuid,
+                newVersion,
+                sourceVersion.consumer_data_references,
+            );
             // Link back to the upstream app so a later promote updates it
             // instead of creating a duplicate.
             await this.appModel.setUpstreamAppUuid(
@@ -10318,6 +10242,7 @@ export class AppGenerateService extends BaseService {
         latestReadyVersion: number | null;
         latestReadyVersionUsesAiAnalysis: boolean | null;
         latestReadyVersionHasAnalyzableData: boolean | null;
+        latestReadyVersionConsumerAccess: DataAppConsumerAccess | null;
         addAnalysisDismissed: boolean;
         registrySlug: string | null;
         icon: ChartTypeIcon | null;
@@ -10383,6 +10308,21 @@ export class AppGenerateService extends BaseService {
                   return null;
               })
             : null;
+        // Only for people who can act on it, and only while the organization
+        // has consumer access on. Reads the frozen snapshot, which is what
+        // consumer queries are checked against.
+        const showConsumerAccess =
+            latestReady !== null &&
+            this.createAuditedAbility(user).can(
+                'manage',
+                subject('DataApp', appAuthorization),
+            ) &&
+            (
+                await this.featureFlagModel.get({
+                    featureFlagId: FeatureFlags.DataAppConsumerAccess,
+                    user: { organizationUuid, userUuid: user.userUuid },
+                })
+            ).enabled;
         const verification = await this.contentVerificationModel.getByContent(
             ContentType.DATA_APP,
             appUuid,
@@ -10446,8 +10386,11 @@ export class AppGenerateService extends BaseService {
                               vizPreview: v.viz_preview ?? null,
                           }
                         : null,
+                // Only manual thumbnails are served; automatic ones are retired.
                 hasThumbnail:
-                    v.status === 'ready' && Boolean(v.thumbnail_captured_at),
+                    v.status === 'ready' &&
+                    Boolean(v.thumbnail_captured_at) &&
+                    v.thumbnail_is_manual === true,
                 createdAt: v.created_at,
                 statusUpdatedAt: v.status_updated_at,
                 // Custom-deps summary only; the lockfile hash is internal.
@@ -10480,6 +10423,12 @@ export class AppGenerateService extends BaseService {
                           ref.kind === 'query' || ref.kind === 'savedChart',
                   )
                 : null,
+            latestReadyVersionConsumerAccess:
+                showConsumerAccess && latestReady
+                    ? getDataAppConsumerAccess(
+                          latestReady.consumer_data_references ?? null,
+                      )
+                    : null,
             addAnalysisDismissed: addAnalysisDismissedAt !== null,
             registrySlug,
             // An icon retired from the curated set reads back as no icon.
@@ -10577,7 +10526,6 @@ export class AppGenerateService extends BaseService {
         search?: string,
         sort: DataAppVizListSort = DEFAULT_DATA_APP_VIZ_LIST_SORT,
     ): Promise<KnexPaginatedData<DataAppViz[]>> {
-        await this.assertChartTypesUsable(user);
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
         this.assertCanUseChartTypes(user, { organizationUuid, projectUuid });
@@ -10604,9 +10552,8 @@ export class AppGenerateService extends BaseService {
 
     /**
      * The catalog of installable chart types from the configured chart
-     * registry, merged with this project's install state. Gated behind the
-     * `ChartTypeRegistry` flag; the library is offered to whoever can build
-     * a chart in an explore, same as `listDataAppVisualizations`.
+     * registry, merged with this project's install state. Offered to whoever
+     * can build a chart in an explore, same as `listDataAppVisualizations`.
      */
     async listRegistryChartTypes(
         user: SessionUser,
@@ -10615,7 +10562,6 @@ export class AppGenerateService extends BaseService {
         registryEnabled: boolean;
         charts: RegistryChartTypeListItem[];
     }> {
-        await this.assertChartTypeLibraryEnabled(user);
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
         this.assertCanUseChartTypes(user, { organizationUuid, projectUuid });
@@ -10688,7 +10634,6 @@ export class AppGenerateService extends BaseService {
         action: 'installed' | 'upgraded' | 'unchanged';
         upgradedChartCount: number;
     }> {
-        await this.assertChartTypeLibraryEnabled(user);
         const { organizationUuid } = await this.assertDataAppAbility(
             user,
             'create',
@@ -10714,6 +10659,57 @@ export class AppGenerateService extends BaseService {
             entry,
             options,
         );
+    }
+
+    /**
+     * Installs the starter chart types a new project gets during onboarding.
+     * Skips what is already installed, so repeat calls are cheap; one failed
+     * install doesn't stop the rest. Returns the slugs it installed.
+     */
+    async installStarterChartTypes(
+        user: SessionUser,
+        projectUuid: string,
+    ): Promise<{ installedSlugs: string[] }> {
+        if (!this.chartRegistryClient.isEnabled()) {
+            return { installedSlugs: [] };
+        }
+        const { organizationUuid } = await this.assertDataAppAbility(
+            user,
+            'create',
+            projectUuid,
+            'Insufficient permissions to install chart types',
+        );
+        const [index, installed] = await Promise.all([
+            this.chartRegistryClient.getIndex(),
+            this.appModel.listRegistryInstalledApps(projectUuid),
+        ]);
+        const installedSlugs = new Set(installed.map((a) => a.registry_slug));
+        const entries = index.charts.filter(
+            (entry) =>
+                STARTER_CHART_TYPE_SLUGS.includes(entry.slug) &&
+                !installedSlugs.has(entry.slug) &&
+                !AppGenerateService.isRegistryEntryIncompatible(entry),
+        );
+        const newSlugs: string[] = [];
+        // Sequential: each install downloads and copies a bundle
+        for (const entry of entries) {
+            try {
+                // eslint-disable-next-line no-await-in-loop
+                await this.installRegistryEntry(
+                    user,
+                    projectUuid,
+                    organizationUuid,
+                    entry,
+                    {},
+                );
+                newSlugs.push(entry.slug);
+            } catch (e) {
+                this.logger.warn(
+                    `Starter chart type "${entry.slug}" failed to install in project ${projectUuid}: ${getErrorMessage(e)}`,
+                );
+            }
+        }
+        return { installedSlugs: newSlugs };
     }
 
     /** Digest mismatches keep their own error; transport failures get a library-facing one. */
@@ -10775,7 +10771,6 @@ export class AppGenerateService extends BaseService {
         }
         const provenance = parsedProvenance.data;
         const { slug, version } = provenance;
-        await this.assertChartTypeLibraryEnabled(user);
         const { organizationUuid } = await this.assertDataAppAbility(
             user,
             'create',
@@ -11175,16 +11170,13 @@ export class AppGenerateService extends BaseService {
     /**
      * Thin pass-through to the chart registry's index-listed images
      * (thumbnails/screenshots). No ability check beyond route auth — these
-     * are catalog metadata, not project data — but gated the same way as
-     * `listRegistryChartTypes`: the `ChartTypeRegistry` flag, before falling
-     * back to the registry client's own enabled check
-     * (`chartRegistryClient.getAsset` throws when it isn't).
+     * are catalog metadata, not project data — beyond the registry client's
+     * own enabled check (`chartRegistryClient.getAsset` throws when it isn't).
      */
     async getRegistryAsset(
         user: SessionUser,
         path: string,
     ): Promise<{ buffer: Buffer; contentType: string } | undefined> {
-        await this.assertChartTypeLibraryEnabled(user);
         if (!this.chartRegistryClient.isEnabled()) {
             return undefined;
         }
@@ -11226,7 +11218,6 @@ export class AppGenerateService extends BaseService {
         projectUuid: string,
         dataAppVizUuid: string,
     ): Promise<DataAppVizUpgradeImpact> {
-        await this.assertChartTypeLibraryEnabled(user);
         await this.assertDataAppAbility(
             user,
             'create',
@@ -11260,7 +11251,6 @@ export class AppGenerateService extends BaseService {
         dataAppVizUuid: string,
         version?: number,
     ): Promise<DataAppViz> {
-        await this.assertChartTypesUsable(user);
         const dataAppViz = await this.appModel.findVisualizationApp(
             dataAppVizUuid,
             projectUuid,
@@ -11304,8 +11294,6 @@ export class AppGenerateService extends BaseService {
             dataAppVizUuid,
         );
 
-        await this.assertChartTypesUsable(user);
-
         this.assertCanUseChartTypes(user, {
             organizationUuid: dataAppViz.organization_uuid,
             projectUuid: dataAppViz.project_uuid,
@@ -11331,8 +11319,6 @@ export class AppGenerateService extends BaseService {
             projectUuid,
             dataAppVizUuid,
         );
-
-        await this.assertChartTypesUsable(user);
 
         await this.savedChartService.hasAccess(
             'view',
@@ -11413,11 +11399,6 @@ export class AppGenerateService extends BaseService {
             projectUuid,
             dataAppVizUuid,
         );
-
-        await this.assertChartTypesUsable({
-            userUuid: account.user.userUuid,
-            organizationUuid: account.organization.organizationUuid,
-        });
 
         const content = await this.documentService.getChart(
             account,
@@ -12515,6 +12496,28 @@ export class AppGenerateService extends BaseService {
         const app = await this.appModel.getApp(appUuid, projectUuid);
         await this.assertAppsEnabled(user, app.template);
         await this.assertCanViewApp(user, app);
+        // With consumer access on, users without Explore only get the
+        // latest ready version.
+        if (
+            this.createAuditedAbility(user).cannot(
+                'view',
+                subject('Explore', {
+                    organizationUuid: user.organizationUuid!,
+                    projectUuid,
+                }),
+            ) &&
+            (
+                await this.featureFlagModel.get({
+                    user: {
+                        organizationUuid: user.organizationUuid,
+                        userUuid: user.userUuid,
+                    },
+                    featureFlagId: FeatureFlags.DataAppConsumerAccess,
+                })
+            ).enabled
+        ) {
+            await this.assertLatestReadyVersion(appUuid, version);
+        }
 
         return mintPreviewToken(
             this.lightdashConfig.lightdashSecrets,
@@ -13383,6 +13386,136 @@ export class AppGenerateService extends BaseService {
         }
     }
 
+    /**
+     * Rechecks app access for stored results and reruns of consumer queries.
+     * With `version`, it must still be the latest ready version.
+     */
+    async assertCanViewQuerySource({
+        account,
+        projectUuid,
+        appUuid,
+        version,
+    }: {
+        account: Account;
+        projectUuid: string;
+        appUuid: string;
+        version?: number;
+    }): Promise<void> {
+        if (!account.isRegisteredUser()) throw new ForbiddenError();
+        const app = await this.appModel.findApp(appUuid, projectUuid);
+        if (!app || app.project_uuid !== projectUuid)
+            throw new ForbiddenError();
+        // Abilities can be cached for a short time; the flag is read fresh so
+        // turning it off also stops stored results and reruns.
+        await this.assertConsumerAccessEnabled(
+            account.user.id,
+            app.organization_uuid,
+        );
+        const [accessContext, projectContext] = await Promise.all([
+            this.spacePermissionService.resolveAccess(account.user.id, {
+                type: 'app',
+                appUuid: app.app_id,
+                organizationUuid: app.organization_uuid,
+                projectUuid: app.project_uuid,
+                spaceUuid: app.space_uuid,
+            }),
+            this.getDataAppProjectContext(projectUuid),
+        ]);
+        if (
+            app.organization_uuid !== projectContext.organizationUuid ||
+            this.createAuditedAbility(account).cannot(
+                'view',
+                subject('DataApp', {
+                    ...projectContext,
+                    ...accessContext,
+                    createdByUserUuid: app.created_by_user_uuid,
+                }),
+            )
+        )
+            throw new ForbiddenError('You do not have access to this data app');
+        if (version !== undefined)
+            await this.assertLatestReadyVersion(appUuid, version);
+    }
+
+    private async assertConsumerAccessEnabled(
+        userUuid: string,
+        organizationUuid: string,
+    ): Promise<void> {
+        const { enabled } = await this.featureFlagModel.get({
+            user: { organizationUuid, userUuid },
+            featureFlagId: FeatureFlags.DataAppConsumerAccess,
+        });
+        if (!enabled) throw new ForbiddenError();
+    }
+
+    private async assertLatestReadyVersion(appUuid: string, version: number) {
+        const latest = await this.appModel.getLatestReadyVersion(appUuid);
+        if (!latest || latest.version !== version)
+            throw new ForbiddenError(
+                'This data app has a newer version. Reload the app to continue.',
+                { code: DATA_APP_NEWER_VERSION_CODE },
+            );
+        return latest;
+    }
+
+    /**
+     * Authorizes a metric query for a user without Explore access. The signed
+     * token proves the app version; its saved data references bound the fields.
+     */
+    async authorizeConsumerQuery({
+        account,
+        projectUuid,
+        organizationUuid,
+        previewToken,
+        ...queryInputs
+    }: DataAppQueryInputs & {
+        account: Account;
+        projectUuid: string;
+        organizationUuid: string;
+        previewToken: string;
+    }): Promise<{ appUuid: string; version: number }> {
+        if (!account.isRegisteredUser()) throw new ForbiddenError();
+        await this.assertConsumerAccessEnabled(
+            account.user.id,
+            organizationUuid,
+        );
+        const verified = verifyPreviewTokenClaims(
+            previewToken,
+            this.lightdashConfig.lightdashSecrets,
+        );
+        if (
+            !verified.ok ||
+            verified.payload.userUuid !== account.user.id ||
+            verified.payload.projectUuid !== projectUuid ||
+            verified.payload.organizationUuid !== organizationUuid
+        )
+            throw new ForbiddenError('Invalid data app query token');
+        const { appUuid, version } = verified.payload;
+        await this.assertCanViewQuerySource({ account, projectUuid, appUuid });
+        // Only the latest ready version: removing a field from an app must
+        // also stop consumers querying it through an older version.
+        const latest = await this.assertLatestReadyVersion(appUuid, version);
+        if (!latest.consumer_data_references)
+            throw new ForbiddenError(
+                'This data app version has no saved data references',
+            );
+        const explore = await this.projectModel
+            .getExploreFromCache(
+                projectUuid,
+                queryInputs.metricQuery.exploreName,
+            )
+            .catch(() => undefined);
+        const baseTable =
+            explore && !isExploreError(explore) ? explore.baseTable : null;
+        assertDataAppQueryAllowed(
+            latest.consumer_data_references,
+            queryInputs,
+            baseTable,
+        );
+        setQueryAppVersion(appUuid, version);
+        return { appUuid, version };
+    }
+
     async getCustomSqlProvenance({
         account,
         projectUuid,
@@ -13481,6 +13614,27 @@ export class AppGenerateService extends BaseService {
         return provenance;
     }
 
+    // Never called from the refresh path: extractor changes must not widen
+    // what an existing version authorizes.
+    private async freezeConsumerDataReferences(
+        appUuid: string,
+        version: number,
+        dataReferences: PersistedDataAppDataReferences | null | undefined,
+    ): Promise<void> {
+        if (dataReferences == null) return;
+        try {
+            await this.appModel.freezeVersionConsumerDataReferences(
+                appUuid,
+                version,
+                dataReferences,
+            );
+        } catch (error) {
+            this.logger.warn(
+                `App ${appUuid}: failed to freeze consumer data references for version ${version}: ${getErrorMessage(error)}`,
+            );
+        }
+    }
+
     private async persistVersionDataReferences(
         appUuid: string,
         version: number,
@@ -13509,6 +13663,11 @@ export class AppGenerateService extends BaseService {
             const dataReferences =
                 AppGenerateService.extractPersistedDataReferences(files);
             await this.persistVersionDataReferences(
+                appUuid,
+                version,
+                dataReferences,
+            );
+            await this.freezeConsumerDataReferences(
                 appUuid,
                 version,
                 dataReferences,
@@ -13660,6 +13819,47 @@ export class AppGenerateService extends BaseService {
             resources: readyVersion.resources,
             dataReferences,
         };
+    }
+
+    /**
+     * Rename a data app's slug in place (lightdash slug-update --type app).
+     * The old slug becomes a historical alias, so existing links and stale
+     * as-code checkouts keep resolving. Slug-shape validation and conflict
+     * handling live in AppModel.renameSlug.
+     */
+    async renameAppSlug(
+        user: SessionUser,
+        projectUuid: string,
+        { from, to }: { from: string; to: string },
+    ): Promise<void> {
+        if (!isValidDataAppSlug(to)) {
+            throw new ParameterError(
+                `Invalid data app slug "${to}". Slugs must start with a lowercase letter or digit and contain only lowercase letters, digits, and hyphens, up to 255 characters.`,
+            );
+        }
+        const app = await this.appModel.findAppBySlug(projectUuid, from);
+        if (!app) {
+            throw new NotFoundError(`Data app slug "${from}" not found`);
+        }
+        await this.assertAppsEnabled(user, app.template);
+        await this.assertCanManageApp(
+            user,
+            app,
+            `You don't have access to rename data app "${from}"`,
+        );
+        // Registry-managed apps mirror library content; their slug is the
+        // install identity and must not drift.
+        if (app.registry_slug !== null) {
+            throw new ForbiddenError(
+                `"${app.slug}" is an official chart type and its slug cannot be renamed.`,
+            );
+        }
+        await this.appModel.renameSlug({
+            projectUuid,
+            appUuid: app.app_id,
+            from,
+            to,
+        });
     }
 
     /** Any version the caller can view is reportable; no session affinity. */
@@ -14300,9 +14500,7 @@ export class AppGenerateService extends BaseService {
                       user,
                       organizationUuid,
                       access: code.manifest.access,
-                      contentLabel: `App ${
-                          code.manifest.slug ?? code.manifest.name
-                      }`,
+                      contentLabel: `App ${code.manifest.slug ?? code.manifest.name}`,
                   })
                 : null;
 
@@ -14421,21 +14619,17 @@ export class AppGenerateService extends BaseService {
                     });
                     throw err;
                 }
-                // The per-org rollout gate applies when uploading a new custom
-                // dependency set. Once approved and stored, background builds,
-                // iterations, and downloads must continue to use that exact set.
-                const { enabled: orgAllowsCustomDeps } =
-                    await this.featureFlagModel.get({
-                        user,
-                        featureFlagId:
-                            FeatureFlags.EnableDataAppCustomDependencies,
-                    });
+                // The org setting gates uploading a new custom dependency set.
+                // Stored sets keep building after it is turned off.
+                const {
+                    dataAppCustomDependenciesEnabled: orgAllowsCustomDeps,
+                } = await this.organizationSettingsModel.get(organizationUuid);
                 if (!orgAllowsCustomDeps) {
                     trackUploadRejected('custom_dependencies_disabled_org', {
                         customDependencies,
                     });
                     throw new ParameterError(
-                        'Custom app dependencies are not enabled for your organization. Contact your admin to request access.',
+                        'Custom app dependencies are not enabled for your organization. An organization administrator can turn them on in Settings under Data apps > General.',
                     );
                 }
                 // Minimum-release-age guard (no-op unless the instance opts in
@@ -15068,7 +15262,6 @@ export class AppGenerateService extends BaseService {
 
         let sandbox: SandboxHandle | undefined;
         let sandboxUuid: string | undefined;
-        let becameReady = false;
         const heartbeat = setInterval(() => {
             void this.appModel
                 .touchVersionIfInProgress(appUuid, version)
@@ -15192,7 +15385,7 @@ export class AppGenerateService extends BaseService {
                 sourceTar,
             );
 
-            becameReady = await this.appModel.updateVersionStatusIfInProgress(
+            await this.appModel.updateVersionStatusIfInProgress(
                 appUuid,
                 version,
                 'ready',
@@ -15205,25 +15398,6 @@ export class AppGenerateService extends BaseService {
             clearInterval(heartbeat);
             if (sandbox !== undefined && sandboxUuid !== undefined) {
                 await this.suspendSandbox(sandboxUuid, sandbox, appUuid);
-            }
-        }
-
-        // Outside the build's try, so a thumbnail can never mark it failed.
-        if (becameReady) {
-            try {
-                const app = await this.appModel.getApp(appUuid, projectUuid);
-                await this.enqueueThumbnailCapture({
-                    organizationUuid,
-                    projectUuid,
-                    userUuid: payload.userUuid,
-                    appUuid,
-                    version,
-                    isCustomChartType: app.template === DATA_APP_VIZ_TEMPLATE,
-                });
-            } catch (error) {
-                this.logger.warn(
-                    `App ${appUuid}: could not enqueue thumbnail capture for version ${version}: ${getErrorMessage(error)}`,
-                );
             }
         }
     }
