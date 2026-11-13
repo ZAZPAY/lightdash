@@ -94,6 +94,8 @@ export type CaslSubjectNames =
     | 'EmbedUnderlyingData'
     | 'EmbedDataApps'
     | 'Explore'
+    | 'MergeQuery'
+    | 'ComposerChart'
     | 'ExternalConnection'
     | 'ExternalSource'
     | 'ExportCsv'

@@ -1,5 +1,6 @@
 import type {
     ApiConnectorType,
+    ApiSourceCapabilities,
     ApiSourcePayload,
     DimensionType,
     QueryExecutionContext,
@@ -29,6 +30,24 @@ export type ApiConnectorDescription = {
     /** How long the API lets one query run before failing it. */
     timeoutMs: number;
     limits: ApiConnectorLimits;
+    capabilities: ApiConnectorCapabilities;
+};
+
+/**
+ * What the connector can do with a metric query, declared once per
+ * connector. Metric additivity is tagged on each metric of the semantic
+ * layer and joins these when an explore is built.
+ */
+export type ApiConnectorCapabilities = Omit<ApiSourceCapabilities, 'metrics'>;
+
+/** Every feature the shared check gates, refused. */
+export const ALL_PUSHDOWN_REFUSED: ApiConnectorCapabilities['pushdown'] = {
+    tableCalculations: 'refused',
+    customDimensions: 'refused',
+    customMetrics: 'refused',
+    pivots: 'refused',
+    periodOverPeriod: 'refused',
+    dateZoom: 'refused',
 };
 
 export type ApiConnectorColumn = {
@@ -39,8 +58,11 @@ export type ApiConnectorColumn = {
 export type ApiConnectorResult = {
     columns: ApiConnectorColumn[];
     rows: Record<string, unknown>[];
-    /** True when the API had more rows than the requested limit. */
-    truncated: boolean;
+    /**
+     * True when the API had rows past the ones read. A query sorted on our
+     * side is refused then, see assertApiResultComplete.
+     */
+    hasMoreRows: boolean;
     /** Bytes the API reports reading, or null when it doesn't report them. */
     bytesRead: number | null;
 };
@@ -50,6 +72,8 @@ export type ApiConnectorRequest = {
     /** Path on the API's origin, e.g. /api/projects/1/query/ */
     path: string;
     query?: Record<string, string>;
+    /** A query string sent exactly as given, for APIs whose syntax must stay unencoded. */
+    rawQuery?: string;
     body: unknown;
 };
 
@@ -96,6 +120,7 @@ export type ApiConnectorCall = {
     durationMs: number;
     rowCount: number | null;
     columnCount: number | null;
+    /** True when the API had rows past the ones read; null when it wasn't called. */
     truncated: boolean | null;
 };
 

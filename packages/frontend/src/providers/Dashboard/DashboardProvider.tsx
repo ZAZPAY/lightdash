@@ -1,5 +1,6 @@
 import {
     applyDimensionOverrides,
+    isDashboardControlOrder,
     isStandardDateGranularity,
     type DashboardConfig,
     type DashboardFilterRule,
@@ -63,6 +64,7 @@ import {
     useDashboardVersionRefresh,
 } from '../../hooks/dashboard/useDashboard';
 import { useDashboardTileParameterReferences } from '../../hooks/dashboard/useDashboardTileParameterReferences';
+import { useSyncParameterControls } from '../../hooks/dashboard/useSyncParameterControls';
 import useToaster from '../../hooks/toaster/useToaster';
 import DashboardDateZoomSync from './DashboardDateZoomSync';
 import DashboardFiltersSync from './DashboardFiltersSync';
@@ -86,6 +88,9 @@ type DashboardProviderProps = React.PropsWithChildren<{
     // and scheduled deliveries must leave this off so a viewer's unpublished
     // draft never reaches a delivered image, PDF or spreadsheet.
     includeUnpublishedDraft?: boolean;
+    // A child sets the store's edit mode, not the route (default false): an
+    // embed has no route for it. The parameters and the date zoom follow it
+    isEditModeExternal?: boolean;
 }>;
 
 const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
@@ -99,6 +104,7 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
     dashboardCommentsCheck,
     defaultInvalidateCache,
     includeUnpublishedDraft = false,
+    isEditModeExternal = false,
     parameterLabelOverrides,
     children,
 }) => {
@@ -225,8 +231,14 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
     }, [store, parameterLabelOverrides]);
 
     useEffect(() => {
+        // Runs after a child's effects: it would undo the child's value
+        if (isEditModeExternal) return;
         store.dispatch(dashboardParametersActions.setIsEditMode(isEditMode));
-    }, [store, isEditMode]);
+    }, [store, isEditMode, isEditModeExternal]);
+    const isStoreEditMode = useStoreValue(
+        store,
+        (state) => state.parameters.isEditMode,
+    );
 
     useEffect(() => {
         if (urlRestoreErrors.parameters) {
@@ -275,6 +287,17 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             ),
         );
     }, [store, isDashboardLoaded, savedControlSections]);
+    const savedControlOrder = currentDashboardConfig?.controlOrder;
+    useEffect(() => {
+        if (!isDashboardLoaded) return;
+        store.dispatch(
+            dashboardEditActions.syncControlOrder(
+                isDashboardControlOrder(savedControlOrder)
+                    ? savedControlOrder
+                    : undefined,
+            ),
+        );
+    }, [store, isDashboardLoaded, savedControlOrder]);
 
     // Seed the staged custom-metrics registry from config; keep user edits
     // until save/cancel resets the changed flag.
@@ -309,6 +332,12 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             );
             store.dispatch(
                 dashboardParametersActions.setSavedParameters(dashboardParams),
+            );
+            // A delivery's values apply to every control that sets the key
+            store.dispatch(
+                dashboardParametersActions.setParameterPicks(
+                    schedulerParameters,
+                ),
             );
         }
     }, [store, schedulerParameters]);
@@ -357,7 +386,13 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         projectUuid,
         embedToken,
     );
-    useDashboardTileParameterReferences({ store, projectUuid, isEditMode });
+    useDashboardTileParameterReferences({ store, projectUuid });
+    useSyncParameterControls({
+        store,
+        config: currentDashboardConfig,
+        dashboardParameters: (dashboard ?? embedDashboard)?.parameters,
+        isDashboardLoaded,
+    });
 
     // Computed here as well as in the store, so the filter sync gets them in
     // the same render as the dashboard, not a commit later
@@ -468,13 +503,14 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             />
             <DashboardParametersSync
                 projectUuid={projectUuid}
-                isEditMode={isEditMode}
+                isEditMode={isEditModeExternal ? isStoreEditMode : isEditMode}
             />
             <ConnectedDashboardDateZoomSync
                 dashboardConfig={currentDashboardConfig}
                 dashboardUuid={dashboard?.uuid}
                 isDashboardLoaded={isDashboardLoaded}
-                isEditMode={isEditMode}
+                // No saved default over an embed editor's edit mode
+                isEditMode={isEditModeExternal ? isStoreEditMode : isEditMode}
                 configDefaultDateZoomGranularity={
                     currentDashboardConfig?.defaultDateZoomGranularity
                 }

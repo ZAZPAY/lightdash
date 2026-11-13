@@ -2,22 +2,31 @@ import {
     ExploreCompiler,
     ExploreType,
     FieldType,
+    flattenFilterGroup,
     getApiSourceQueryIssues,
     getItemId,
     ParameterError,
     type ApiConnectorType,
     type ApiSourceExplore,
+    type ApiSourceMetricAggregation,
+    type ApiSourceQueryContext,
+    type ApiSourceQueryIssue,
     type Dimension,
     type DimensionType,
     type Explore,
     type FieldId,
+    type FilterGroup,
     type FilterOperator,
+    type FilterRule,
+    type LiveSourceErrorData,
     type Metric,
     type MetricQuery,
     type MetricType,
     type SortField,
+    type TimeFrames,
     type WarehouseSqlBuilder,
 } from '@lightdash/common';
+import { type ApiConnectorCapabilities } from './ApiConnector';
 
 type ApiSourceFieldDefinition = {
     /** Stable within the explore: saved charts reference it forever, so never rename it. */
@@ -35,11 +44,19 @@ type ApiSourceFieldDefinition = {
 
 export type ApiSourceDimensionDefinition = ApiSourceFieldDefinition & {
     type: DimensionType;
+    /** A coarser grain of a date dimension that the API groups by itself. */
+    timeInterval?: { base: string; grain: TimeFrames };
 };
 
 export type ApiSourceMetricDefinition = ApiSourceFieldDefinition & {
     type: MetricType;
     format?: string;
+    /**
+     * Whether the metric's values can be summed, checked against the API's
+     * docs. Saved charts will rely on it, so never loosen a tag without
+     * evidence. Absent (scanned metrics) means `non_additive`.
+     */
+    aggregation?: ApiSourceMetricAggregation;
 };
 
 /** One explore of an integration's semantic layer, written by hand or found by a scan. */
@@ -49,7 +66,6 @@ export type ApiSourceExploreDefinition = {
     description: string;
     dimensions: ApiSourceDimensionDefinition[];
     metrics: ApiSourceMetricDefinition[];
-    filterGroups: ApiSourceExplore['filterGroups'];
     maxDimensions: number | null;
     maxMetrics: number | null;
     dateRange: { dimension: string; defaultDays: number } | null;
@@ -64,7 +80,10 @@ export const buildApiSourceExplore = ({
     connectionUuid,
     integration,
     baseVersion,
+    definitionHash,
+    capabilities,
     warehouseSqlBuilder,
+    aiHint,
 }: {
     definition: ApiSourceExploreDefinition;
     exploreName: string;
@@ -72,7 +91,10 @@ export const buildApiSourceExplore = ({
     connectionUuid: string;
     integration: ApiConnectorType;
     baseVersion: number;
+    definitionHash?: string;
+    capabilities: ApiConnectorCapabilities;
     warehouseSqlBuilder: WarehouseSqlBuilder;
+    aiHint?: string[];
 }): Explore => {
     const quote = warehouseSqlBuilder.getFieldQuoteChar();
     const base = {
@@ -86,6 +108,30 @@ export const buildApiSourceExplore = ({
         ...(field.aiHint ? { aiHint: field.aiHint } : {}),
         ...(field.groups ? { groups: field.groups } : {}),
     });
+    const intervalBases = new Set(
+        definition.dimensions.flatMap(({ timeInterval }) =>
+            timeInterval ? [timeInterval.base] : [],
+        ),
+    );
+    const toTimeIntervalProperties = (
+        dimension: ApiSourceDimensionDefinition,
+    ): Partial<Dimension> => {
+        // A base that is also its own finest grain stays selectable
+        if (!dimension.timeInterval) {
+            return intervalBases.has(dimension.name)
+                ? { isIntervalBase: true }
+                : {};
+        }
+        const baseDimension = definition.dimensions.find(
+            ({ name }) => name === dimension.timeInterval?.base,
+        );
+        return {
+            timeInterval: dimension.timeInterval.grain,
+            timeIntervalBaseDimensionName: dimension.timeInterval.base,
+            timeIntervalBaseDimensionType: baseDimension?.type,
+            groups: [baseDimension?.label ?? dimension.timeInterval.base],
+        };
+    };
     const dimensions = definition.dimensions.map(
         (dimension): Dimension => ({
             ...base,
@@ -96,6 +142,7 @@ export const buildApiSourceExplore = ({
             type: dimension.type,
             sql: toSql(dimension),
             ...toCuratedProperties(dimension),
+            ...toTimeIntervalProperties(dimension),
         }),
     );
     const metrics = definition.metrics.map(
@@ -139,6 +186,7 @@ export const buildApiSourceExplore = ({
         },
         targetDatabase: warehouseSqlBuilder.getAdapterType(),
         meta: {},
+        aiHint,
     });
     return {
         ...explore,
@@ -147,7 +195,12 @@ export const buildApiSourceExplore = ({
             connectionUuid,
             integration,
             baseVersion,
-            filterGroups: definition.filterGroups,
+            definitionHash,
+            // Kept for readers of explores built before capabilities
+            filterGroups: {
+                or: capabilities.filters.or,
+                nested: capabilities.filters.nestedGroups,
+            },
             maxDimensions: definition.maxDimensions,
             maxMetrics: definition.maxMetrics,
             dateRange: definition.dateRange
@@ -170,6 +223,15 @@ export const buildApiSourceExplore = ({
                 with: incompatibility.with.map(toFieldId),
                 reason: incompatibility.reason,
             })),
+            capabilities: {
+                ...capabilities,
+                metrics: Object.fromEntries(
+                    definition.metrics.map((metric) => [
+                        metric.name,
+                        metric.aggregation ?? { aggregation: 'non_additive' },
+                    ]),
+                ),
+            },
         },
     };
 };
@@ -185,24 +247,77 @@ export type CompiledApiSourceQuery = {
     fieldIdsByColumn: Record<string, FieldId>;
     /** Sorts the API can't apply; they run on the returned rows. */
     localSorts: SortField[];
+    /**
+     * Columns holding compact periods (GA4's YYYYWW ISO weeks, YYYYMM or
+     * YYYY), turned into the period's first day so they read as dates.
+     */
+    periodColumns?: Record<string, ApiSourcePeriodFormat>;
 };
 
-/** Fails with every fixable reason the API can't answer the query. */
-export const assertApiSourceQuery = (
-    explore: Explore,
-    metricQuery: MetricQuery,
-): ApiSourceExplore => {
+export type ApiSourcePeriodFormat = 'iso_week' | 'year_month' | 'year';
+
+/** The explore's live data source rules; fails for any other explore. */
+export const getApiSourceExplore = (explore: Explore): ApiSourceExplore => {
     const { apiSource } = explore;
     if (explore.type !== ExploreType.API_SOURCE || !apiSource) {
         throw new ParameterError(
             `"${explore.name}" isn't a live data source explore`,
         );
     }
-    const issues = getApiSourceQueryIssues(apiSource, metricQuery);
+    return apiSource;
+};
+
+/** The filters that apply: enabled, with something to compare against. */
+export const getActiveFilterRules = (
+    group: FilterGroup | undefined,
+): FilterRule[] =>
+    (group ? flattenFilterGroup(group) : []).filter(
+        (rule) => !rule.disabled && (rule.values ?? []).length > 0,
+    );
+
+/** A field the API can't report at the grain the query asked for. */
+export const toFieldCombinationIssue = (
+    fieldId: string | null,
+    message: string,
+): ApiSourceQueryIssue => ({
+    code: 'live_source.refused.field_combination',
+    fieldId,
+    message,
+});
+
+/**
+ * One error for every fixable reason the API can't answer a query, its
+ * messages joined and its refusal codes in `data`.
+ */
+export const toApiSourceQueryError = (
+    issues: ApiSourceQueryIssue[],
+): ParameterError => {
+    const data: LiveSourceErrorData & { liveSourceFieldIds: string[] } = {
+        liveSourceErrorCode: issues[0].code,
+        liveSourceErrorCodes: [...new Set(issues.map(({ code }) => code))],
+        liveSourceFieldIds: [
+            ...new Set(issues.flatMap(({ fieldId }) => fieldId ?? [])),
+        ],
+    };
+    return new ParameterError(
+        issues.map(({ message }) => message).join(' '),
+        data,
+    );
+};
+
+/**
+ * Fails with every fixable reason the API can't answer the query, from the
+ * shared check every entry point runs, so compilers only translate.
+ */
+export const assertApiSourceQuery = (
+    explore: Explore,
+    metricQuery: MetricQuery,
+    context: ApiSourceQueryContext = {},
+): ApiSourceExplore => {
+    const apiSource = getApiSourceExplore(explore);
+    const issues = getApiSourceQueryIssues(apiSource, metricQuery, context);
     if (issues.length > 0) {
-        throw new ParameterError(
-            issues.map(({ message }) => message).join(' '),
-        );
+        throw toApiSourceQueryError(issues);
     }
     return apiSource;
 };

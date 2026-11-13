@@ -90,15 +90,14 @@ const buildService = ({
     } = {
         getApp: async () => appRow,
         findApp: async () => appRow,
-        findAppByUuid: async () => appRow,
         appImageExists,
         getVersion: async () => version,
         getLatestReadyVersion: async () => version,
         hasAnyVersionThumbnail: async () =>
             version.thumbnail_captured_at !== null,
-        setVersionThumbnail: async (_appUuid, _version, { isManual }) => {
+        setVersionThumbnail: async () => {
             version.thumbnail_captured_at = new Date();
-            version.thumbnail_is_manual = isManual;
+            version.thumbnail_is_manual = true;
             return true;
         },
         clearVersionThumbnail: async () => {
@@ -112,7 +111,6 @@ const buildService = ({
         storage,
         capturesEnabledOnInstance,
         organizationSettingsModel: organizationSettingsModelWith(
-            () => null,
             () => captures.stored,
         ),
     });
@@ -126,6 +124,7 @@ const buildService = ({
         userModel: {} as never,
         appModel: appModel as never,
         featureFlagModel: { get: async () => ({ enabled: true }) } as never,
+        organizationSettingsModel: {} as never,
         organizationDesignModel: {} as never,
         pinnedListModel: {} as never,
         projectModel: {

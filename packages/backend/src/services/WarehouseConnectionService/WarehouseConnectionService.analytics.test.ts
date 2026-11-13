@@ -12,6 +12,7 @@ import {
     type CreateBigqueryCredentials,
     type CreatePostgresCredentials,
     type CreateRedshiftCredentials,
+    type CreateSnowflakeCredentials,
     type CreateTrinoCredentials,
     type PossibleAbilities,
     type ProjectSummary,
@@ -166,12 +167,7 @@ const buildService = (mixedTypesEnabled = false) => {
             .fn()
             .mockResolvedValue(credentials),
     };
-    const dbtSourceRefCatalogModel = {
-        deleteForProject: vi.fn(),
-        deleteForSource: vi.fn(),
-    };
     const service = new WarehouseConnectionService({
-        dbtSourceRefCatalogModel,
         warehouseConnectionModel: model as unknown as WarehouseConnectionModel,
         projectModel: projectModel as unknown as Pick<
             ProjectModel,
@@ -189,7 +185,6 @@ const buildService = (mixedTypesEnabled = false) => {
     });
     return {
         service,
-        dbtSourceRefCatalogModel,
         model,
         analytics,
         featureFlagService,
@@ -741,123 +736,6 @@ describe('connection type immutability', () => {
     });
 });
 
-describe('cross-source ref cache invalidation', () => {
-    it.each([true, false])(
-        'deletes only the removed connection group when the flag is %s',
-        async (enabled) => {
-            const h = buildService();
-            h.featureFlagService.get.mockImplementation(
-                async ({ featureFlagId }) => ({
-                    id: featureFlagId,
-                    enabled:
-                        featureFlagId !== FeatureFlags.CrossSourceDbtRefs ||
-                        enabled,
-                }),
-            );
-            h.model.get.mockResolvedValue(connection(extraUuid, false));
-            h.model.getBoundContent.mockResolvedValue({
-                explores: [],
-                dbtSources: [],
-                sqlCharts: [],
-                inFlightQueries: 0,
-            });
-            await h.service.delete(account, projectUuid, extraUuid);
-            expect(h.model.deleteExtra).toHaveBeenCalledWith(
-                project,
-                extraUuid,
-            );
-            if (enabled)
-                expect(
-                    h.dbtSourceRefCatalogModel.deleteForProject,
-                ).toHaveBeenCalledExactlyOnceWith(projectUuid, extraUuid);
-            else
-                expect(
-                    h.dbtSourceRefCatalogModel.deleteForProject,
-                ).not.toHaveBeenCalled();
-        },
-    );
-
-    it('keeps rows when the connection cannot be deleted', async () => {
-        const h = buildService();
-        h.model.get.mockResolvedValue(connection(extraUuid, false));
-        await expect(
-            h.service.delete(account, projectUuid, extraUuid),
-        ).rejects.toThrow('cannot be removed while content uses it');
-        expect(
-            h.dbtSourceRefCatalogModel.deleteForProject,
-        ).not.toHaveBeenCalled();
-    });
-
-    it.each([true, false])(
-        'deletes rows for a rebound source when the flag is %s, even if analytics cannot read bindings',
-        async (enabled) => {
-            const h = buildService();
-            const bindDbtSource = vi.fn();
-            const service = new WarehouseConnectionBindingService({
-                projectModel: {
-                    getSummary: h.projectModel.getSummary,
-                    getDbtSourceIdentity: vi.fn(async () => ({
-                        dbtSourceUuid: 'primary-source',
-                        dbtSourceName: 'primary',
-                    })),
-                },
-                warehouseConnectionModel: h.model,
-                warehouseConnectionCompileModel: {
-                    bindDbtSource,
-                    getDbtSourceBindings: vi
-                        .fn()
-                        .mockRejectedValue(new Error('analytics unavailable')),
-                } as never,
-                dbtSourceRefCatalogModel: h.dbtSourceRefCatalogModel,
-                featureFlagService: {
-                    get: vi.fn(async ({ featureFlagId }) => ({
-                        id: featureFlagId,
-                        enabled,
-                    })),
-                } as never,
-                credentialPolicy: h.credentialPolicy,
-                analytics: h.analytics,
-            });
-            await service.bindDbtSource(
-                account,
-                projectUuid,
-                'source',
-                extraUuid,
-            );
-            expect(bindDbtSource).toHaveBeenCalledWith(
-                projectUuid,
-                'source',
-                extraUuid,
-            );
-            if (enabled)
-                expect(
-                    h.dbtSourceRefCatalogModel.deleteForSource,
-                ).toHaveBeenCalledExactlyOnceWith(projectUuid, 'source');
-            else
-                expect(
-                    h.dbtSourceRefCatalogModel.deleteForSource,
-                ).not.toHaveBeenCalled();
-        },
-    );
-
-    it('does not fail a connection deletion when cache cleanup fails', async () => {
-        const h = buildService();
-        h.model.get.mockResolvedValue(connection(extraUuid, false));
-        h.model.getBoundContent.mockResolvedValue({
-            explores: [],
-            dbtSources: [],
-            sqlCharts: [],
-            inFlightQueries: 0,
-        });
-        h.dbtSourceRefCatalogModel.deleteForProject.mockRejectedValue(
-            new Error('cache unavailable'),
-        );
-        await expect(
-            h.service.delete(account, projectUuid, extraUuid),
-        ).resolves.toBeUndefined();
-    });
-});
-
 describe('preview extra connection CLI refresh', () => {
     const tunnel = {
         useSshTunnel: true,
@@ -956,6 +834,73 @@ describe('preview extra connection CLI refresh', () => {
                 sshTunnelPrivateKey: 'parent-private-key',
             });
             expect(stored).not.toMatchObject({ password: 'parent-password' });
+        },
+    );
+    it.each([false, true])(
+        'a Snowflake extra on a different warehouse requires user credentials only when inheriting across warehouses (%s)',
+        async (flagEnabled) => {
+            const developer: CreateSnowflakeCredentials = {
+                type: WarehouseTypes.SNOWFLAKE,
+                account: 'account',
+                user: 'developer',
+                password: 'fresh-password',
+                database: 'DEV',
+                warehouse: 'DEV_WH',
+                schema: 'dbt_developer',
+            };
+            const snowflakeExtra = (uuid: string) => ({
+                ...connection(uuid, false),
+                warehouseType: WarehouseTypes.SNOWFLAKE,
+            });
+            const h = setupRefresh();
+            h.model.get.mockResolvedValue(snowflakeExtra(extraUuid));
+            h.model.list.mockImplementation(async (p: typeof project) =>
+                p.projectUuid === upstream.projectUuid
+                    ? [snowflakeExtra('upstream-extra')]
+                    : [
+                          connection(primaryUuid, true),
+                          snowflakeExtra(extraUuid),
+                      ],
+            );
+            h.model.getCredentials.mockImplementation(
+                async (p: typeof project) =>
+                    p.projectUuid === upstream.projectUuid
+                        ? {
+                              ...developer,
+                              user: 'service_user',
+                              password: 'parent-password',
+                              warehouse: 'PROD_WH',
+                              requireUserCredentials: true,
+                          }
+                        : developer,
+            );
+            h.featureFlagService.get.mockImplementation(
+                async ({ featureFlagId }) => ({
+                    id: featureFlagId,
+                    enabled:
+                        featureFlagId ===
+                        FeatureFlags.PreviewInheritsAcrossWarehouses
+                            ? flagEnabled
+                            : true,
+                }),
+            );
+
+            await h.service.update(
+                account,
+                projectUuid,
+                extraUuid,
+                { warehouseConnection: developer },
+                RequestMethod.CLI,
+            );
+
+            const stored =
+                h.model.updateExtraCredentials.mock.calls[0][2].credentials;
+            expect(stored).toMatchObject(developer);
+            expect(stored.requireUserCredentials).toBe(flagEnabled);
+            expect(h.featureFlagService.get).toHaveBeenCalledWith({
+                user: { organizationUuid },
+                featureFlagId: FeatureFlags.PreviewInheritsAcrossWarehouses,
+            });
         },
     );
     it('preserves the preview own tunnel and explicit opt-out', async () => {

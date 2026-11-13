@@ -1,6 +1,7 @@
 import { subject } from '@casl/ability';
 import {
     ApiGetAsyncQueryResults,
+    APP_PDF_EXPORT_GLOBAL,
     assertUnreachable,
     AuthorizationError,
     ChartType,
@@ -25,6 +26,7 @@ import {
     LightdashRequestMethodHeader,
     NotFoundError,
     ParameterError,
+    parseAppPdfExportResult,
     parseDeliveryCaptureManifest,
     QueryHistoryStatus,
     RequestMethod,
@@ -44,6 +46,7 @@ import {
     type DashboardFilterRule,
     type DashboardFilters,
     type DeliveryCaptureManifest,
+    type ExportContentPayload,
     type Filters,
     type ParametersValuesMap,
     type UUID,
@@ -93,7 +96,6 @@ import type { DocumentService } from '../DocumentService/DocumentService';
 import { getOrganizationSettingsInstanceDefaults } from '../OrganizationSettingsService/getInstanceDefaults';
 import type { SpacePermissionService } from '../SpaceService/SpacePermissionService';
 import { countPdfPages } from './countPdfPages';
-import { obscureFramesText, obscureThumbnailImage } from './obscureThumbnail';
 
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const uuidRegex = new RegExp(uuid, 'g');
@@ -268,7 +270,6 @@ export enum ScreenshotContext {
     EXPORT_CHART = 'export_chart',
     EXPORT_AI_ARTIFACT = 'export_ai_artifact',
     EXPORT_DOCUMENT = 'export_document',
-    DATA_APP_THUMBNAIL = 'data_app_thumbnail',
 }
 
 // Default values
@@ -365,6 +366,7 @@ type EmbedDashboardExportArgs = {
     selectedTabs: string[] | null;
     dashboardFilters: DashboardFilters | null;
     parameters: ParametersValuesMap | null;
+    tileParameters?: ExportContentPayload['tileParameters'];
     dateZoomGranularity: string | null;
     gridWidth: number | null;
     contextId: string;
@@ -812,6 +814,7 @@ export class UnfurlService extends BaseService {
         sendNowSchedulerFilters,
         sendNowSchedulerChartFilters,
         sendNowSchedulerParameters,
+        tileParameters,
     }: {
         url: string;
         lightdashPage?: LightdashPage;
@@ -828,6 +831,7 @@ export class UnfurlService extends BaseService {
         sendNowSchedulerFilters?: DashboardFilterRule[] | undefined;
         sendNowSchedulerChartFilters?: Filters | undefined;
         sendNowSchedulerParameters?: ParametersValuesMap | undefined;
+        tileParameters?: ExportContentPayload['tileParameters'];
     }): Promise<{
         imageUrl?: string;
         pdfFile?: { source: string; fileName: string };
@@ -857,6 +861,7 @@ export class UnfurlService extends BaseService {
             sendNowSchedulerFilters,
             sendNowSchedulerChartFilters,
             sendNowSchedulerParameters,
+            tileParameters,
         };
 
         const result = await this.saveScreenshot({
@@ -957,6 +962,7 @@ export class UnfurlService extends BaseService {
         sendNowSchedulerDashboardFilters,
         sendNowSchedulerFilters,
         sendNowSchedulerParameters,
+        tileParameters,
     }: {
         minimalUrl: string;
         dashboardUuid: string;
@@ -969,6 +975,7 @@ export class UnfurlService extends BaseService {
         sendNowSchedulerDashboardFilters?: DashboardFilters;
         sendNowSchedulerFilters?: DashboardFilterRule[];
         sendNowSchedulerParameters?: ParametersValuesMap;
+        tileParameters?: ExportContentPayload['tileParameters'];
     }): Promise<{
         pdfFile: { source: string; fileName: string };
         pdfPageCount: number;
@@ -1052,6 +1059,7 @@ export class UnfurlService extends BaseService {
                     sendNowSchedulerDashboardFilters,
                     sendNowSchedulerFilters,
                     sendNowSchedulerParameters,
+                    tileParameters,
                     outputFormat: 'pdf',
                     withPdf: false,
                     pdfPagination: isUntabbed ? 'crop' : 'cssPaged',
@@ -1244,6 +1252,7 @@ export class UnfurlService extends BaseService {
             selectedTabs,
             dashboardFilters,
             parameters,
+            tileParameters,
             dateZoomGranularity,
             gridWidth,
             contextId,
@@ -1312,6 +1321,7 @@ export class UnfurlService extends BaseService {
             selectedTabs,
             sendNowSchedulerDashboardFilters: dashboardFilters ?? undefined,
             sendNowSchedulerParameters: parameters ?? undefined,
+            tileParameters,
             outputFormat,
         });
         return { dashboard, imageId, result };
@@ -1511,9 +1521,6 @@ export class UnfurlService extends BaseService {
             contextId,
             version: version ?? null,
             imageId,
-            singleAttempt: false,
-            requireReadyIndicator: false,
-            obscureText: false,
             failureMessage: 'Unable to export data app image',
         });
 
@@ -1529,40 +1536,6 @@ export class UnfurlService extends BaseService {
         return { imageBuffer, imageUrl };
     }
 
-    // Unhosted single-attempt obscured render of one version; fails when the version
-    // never signals it rendered or text cannot be obscured. The caller must check the version is ready.
-    async captureDataAppVersion({
-        projectUuid,
-        appUuid,
-        appName,
-        version,
-        authUserUuid,
-        organizationUuid,
-    }: {
-        projectUuid: UUID;
-        appUuid: UUID;
-        appName: string;
-        version: number;
-        authUserUuid: UUID;
-        organizationUuid: UUID;
-    }): Promise<Buffer> {
-        return this.renderDataApp({
-            projectUuid,
-            appUuid,
-            appName,
-            authUserUuid,
-            organizationUuid,
-            context: ScreenshotContext.DATA_APP_THUMBNAIL,
-            contextId: `${appUuid}:${version}`,
-            version,
-            imageId: `app-thumbnail_${snakeCaseName(appName)}_${useNanoid()}`,
-            singleAttempt: true,
-            requireReadyIndicator: true,
-            obscureText: true,
-            failureMessage: 'Unable to capture data app version',
-        });
-    }
-
     // The one data app render: the minimal page as the acting user, to a PNG buffer.
     private async renderDataApp({
         projectUuid,
@@ -1574,9 +1547,6 @@ export class UnfurlService extends BaseService {
         contextId,
         version,
         imageId,
-        singleAttempt,
-        requireReadyIndicator,
-        obscureText,
         failureMessage,
     }: {
         projectUuid: UUID;
@@ -1589,12 +1559,6 @@ export class UnfurlService extends BaseService {
         // Null renders the latest ready version.
         version: number | null;
         imageId: string;
-        // False retries up to the configured screenshot retry limit.
-        singleAttempt: boolean;
-        // True fails when the ready indicator never appears.
-        requireReadyIndicator: boolean;
-        // True blurs all text before the screenshot and the image after it.
-        obscureText: boolean;
         failureMessage: string;
     }): Promise<Buffer> {
         const minimalAppUrl = new URL(
@@ -1629,9 +1593,6 @@ export class UnfurlService extends BaseService {
             context,
             contextId,
             selectedTabs: null,
-            ...(singleAttempt ? { retries: 1 } : {}),
-            requireSuccessfulRender: requireReadyIndicator,
-            obscureAppText: obscureText,
         });
         if (!result?.imageBuffer) {
             throw new UnexpectedServerError(failureMessage);
@@ -1936,12 +1897,12 @@ export class UnfurlService extends BaseService {
         sendNowSchedulerFilters,
         sendNowSchedulerChartFilters,
         sendNowSchedulerParameters,
+        tileParameters,
         outputFormat = 'image',
         withPdf = false,
         pdfPagination = 'crop',
         signal,
         requireSuccessfulRender = false,
-        obscureAppText = false,
     }: {
         imageId: string;
         auth: HeadlessBrowserAuth;
@@ -1965,6 +1926,7 @@ export class UnfurlService extends BaseService {
         sendNowSchedulerFilters?: DashboardFilterRule[] | undefined;
         sendNowSchedulerChartFilters?: Filters | undefined;
         sendNowSchedulerParameters?: ParametersValuesMap | undefined;
+        tileParameters?: ExportContentPayload['tileParameters'];
         outputFormat?: 'image' | 'pdf';
         withPdf?: boolean;
         // 'crop' (default): single-page PDF clipped to content.
@@ -1974,8 +1936,6 @@ export class UnfurlService extends BaseService {
         pdfPagination?: 'crop' | 'cssPaged' | 'a4';
         signal?: AbortSignal;
         requireSuccessfulRender?: boolean;
-        // Data app pages only: never produce a readable image.
-        obscureAppText?: boolean;
     }): Promise<
         | {
               imageBuffer?: Buffer;
@@ -2196,6 +2156,8 @@ export class UnfurlService extends BaseService {
                                 sendNowSchedulerDashboardFilters,
                             [SessionStorageKeys.SEND_NOW_SCHEDULER_PARAMETERS]:
                                 sendNowSchedulerParameters,
+                            [`dashboardExportTileParameters:${resourceUuid}`]:
+                                tileParameters,
                         },
                     );
 
@@ -2594,9 +2556,6 @@ export class UnfurlService extends BaseService {
                                 }),
                             APP_ANIMATION_BUFFER_MS,
                         );
-                        if (obscureAppText) {
-                            await obscureFramesText(page.frames());
-                        }
                     } else {
                         if (
                             lightdashPage === LightdashPage.DASHBOARD ||
@@ -2836,10 +2795,7 @@ export class UnfurlService extends BaseService {
                         );
                     }
 
-                    // An obscured capture never writes its unblurred screenshot to disk.
-                    const path = obscureAppText
-                        ? undefined
-                        : `/tmp/${imageId}.png`;
+                    const path = `/tmp/${imageId}.png`;
 
                     let finalSelector = selector;
 
@@ -3126,10 +3082,6 @@ export class UnfurlService extends BaseService {
                         });
                     }
 
-                    if (obscureAppText) {
-                        imageBuffer = await obscureThumbnailImage(imageBuffer);
-                    }
-
                     // Also generate PDF in the same browser session
                     const pdfBuffer = withPdf ? await generatePdf() : undefined;
 
@@ -3202,12 +3154,12 @@ export class UnfurlService extends BaseService {
                             sendNowSchedulerFilters,
                             sendNowSchedulerChartFilters,
                             sendNowSchedulerParameters,
+                            tileParameters,
                             outputFormat,
                             withPdf,
                             pdfPagination,
                             signal,
                             requireSuccessfulRender,
-                            obscureAppText,
                         });
                     }
 
@@ -3393,6 +3345,132 @@ export class UnfurlService extends BaseService {
                 `App delivery capture returned ${manifest.items.length} queries (overflow ${manifest.overflowCount}) - contextId: ${contextId}`,
             );
             return manifest;
+        } finally {
+            if (page) await page.close().catch(() => {});
+            if (browser) await browser.close().catch(() => {});
+        }
+    }
+
+    /**
+     * Renders the app in `exportMode=pdf` and returns the PDF the app's own
+     * registered Download PDF builder produced. Fails loud — including for
+     * apps generated before the builder registration existed, which publish
+     * a typed "no PDF export" error — so a delivery never silently falls
+     * back to a page capture.
+     */
+    async unfurlAppPdf({
+        minimalUrl,
+        appName,
+        authUserUuid,
+        imageId,
+        contextId,
+    }: {
+        minimalUrl: string;
+        appName: string;
+        authUserUuid: string;
+        imageId: string;
+        contextId?: string;
+    }): Promise<{ pdfFile: { source: string; fileName: string } }> {
+        if (this.lightdashConfig.headlessBrowser?.host === undefined) {
+            throw new UnexpectedServerError(
+                `Can't export app PDF if HEADLESS_BROWSER_HOST env variable is not defined`,
+            );
+        }
+        const exportUrl = new URL(minimalUrl);
+        exportUrl.searchParams.set('exportMode', 'pdf');
+
+        const cookie = await this.getUserCookie(authUserUuid);
+
+        let browser: playwright.Browser | undefined;
+        let page: playwright.Page | undefined;
+        try {
+            browser = await playwright.chromium.connectOverCDP(
+                getAppBrowserEndpoint(
+                    this.lightdashConfig.headlessBrowser.browserEndpoint,
+                    appViewport,
+                    this.screenshotTimeoutMs + BROWSERLESS_SESSION_BUFFER_MS,
+                    this.lightdashConfig.headlessBrowser.internalLightdashHost,
+                ),
+                { timeout: 1000 * 60 * 30 },
+            );
+            page = await browser.newPage({
+                viewport: appViewport,
+                serviceWorkers: 'block',
+                ignoreHTTPSErrors:
+                    this.lightdashConfig.headlessBrowser
+                        .internalLightdashHostIgnoreHttpsErrors,
+            });
+            // Same geometry as the screenshot render so the app lays out the
+            // report the way its builder expects.
+            await this.overrideCdpViewport(
+                page,
+                appViewport,
+                `contextId: ${contextId}`,
+            );
+
+            await this.registerHeadlessBrowserRoutes({
+                browserContext: page.context(),
+                context: ScreenshotContext.SCHEDULED_DELIVERY,
+                contextId,
+            });
+
+            const cookieMatch = cookie.match(/connect\.sid=([^;]+)/);
+            if (!cookieMatch)
+                throw new UnexpectedServerError('Invalid cookie provided');
+            await page.context().addCookies([
+                {
+                    name: 'connect.sid',
+                    value: cookieMatch[1],
+                    domain: new URL(exportUrl).hostname,
+                    path: '/',
+                    sameSite: 'Strict',
+                },
+            ]);
+
+            page.on('console', (msg) => {
+                if (msg.type() === 'error') {
+                    this.logger.error(
+                        `App PDF export console error - contextId: ${contextId}, text: ${msg.text()}`,
+                    );
+                }
+            });
+
+            await page.goto(exportUrl.href, { timeout: 150000 });
+
+            // In exportMode=pdf the indicator mounts only once the app's PDF
+            // build settled (success or typed error), so the global is
+            // guaranteed readable right after.
+            await page.waitForSelector(SCREENSHOT_SELECTORS.READY_INDICATOR, {
+                state: 'attached',
+                timeout: this.screenshotTimeoutMs,
+            });
+
+            const raw = await page.evaluate(
+                (globalName) =>
+                    (window as unknown as Record<string, unknown>)[globalName],
+                APP_PDF_EXPORT_GLOBAL,
+            );
+            const result = parseAppPdfExportResult(raw);
+            if (result === null) {
+                throw new UnexpectedServerError(
+                    `App PDF export result missing or malformed - contextId: ${contextId}`,
+                );
+            }
+            if (result.status === 'error') {
+                throw new UnexpectedServerError(result.error);
+            }
+
+            const pdfBuffer = Buffer.from(result.pdfBase64, 'base64');
+            if (pdfBuffer.length === 0) {
+                throw new UnexpectedServerError(
+                    `App PDF export returned an empty document - contextId: ${contextId}`,
+                );
+            }
+            this.logger.info(
+                `App PDF export produced ${pdfBuffer.length} bytes - contextId: ${contextId}`,
+            );
+            const pdfFile = await this.uploadPdf(imageId, pdfBuffer, appName);
+            return { pdfFile };
         } finally {
             if (page) await page.close().catch(() => {});
             if (browser) await browser.close().catch(() => {});

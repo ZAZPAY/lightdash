@@ -10,6 +10,7 @@ import {
 } from '@lightdash/common';
 import {
     Badge,
+    ActionBar,
     ActionIcon,
     Box,
     Button,
@@ -22,7 +23,7 @@ import {
     Tooltip,
     UnstyledButton,
 } from '@mantine/core';
-import { useDisclosure } from '@mantine/hooks';
+import { useDisclosure, useHotkeys } from '@mantine/hooks';
 import {
     IconArrowAutofitHeight,
     IconBolt,
@@ -71,6 +72,11 @@ import {
 import DashboardAsCodeModal from '../../../features/contentAsCode/components/DashboardAsCodeModal';
 import ProjectContentAsCodeUploadModal from '../../../features/contentAsCode/components/ProjectContentAsCodeUploadModal';
 import { useCanUploadContentAsCode } from '../../../features/contentAsCode/hooks/useCanUploadContentAsCode';
+import { type PendingChange } from '../../../features/dashboard/pendingChanges/getPendingChanges';
+import {
+    EditFiltersVisibilityControl,
+    type EditFiltersVisibility,
+} from '../../../features/dashboardFilters/EditFiltersVisibilityControl';
 import {
     DirectAccessModal,
     useCanManageDirectAccess,
@@ -123,12 +129,21 @@ import ShareShortLinkButton from '../ShareShortLinkButton';
 import SpaceActionModal from '../SpaceActionModal';
 import { ActionType } from '../SpaceActionModal/types';
 import TransferItemsModal from '../TransferItemsModal/TransferItemsModal';
+import { CanvasBackgroundControl } from './CanvasBackgroundControl';
+import { CanvasZoomControls } from './CanvasZoomControls';
 import headerClasses from './DashboardHeader.module.css';
 import { DashboardPerformanceWarning } from './DashboardPerformanceWarning';
 import DashboardPreAggRefreshModal from './DashboardPreAggRefreshModal';
 import { DashboardRefreshButton } from './DashboardRefreshButton';
+import { EDIT_BAR_POSITION } from './editBarPosition';
+import { EDIT_SHORTCUTS, toHotkeyItems } from './editShortcuts';
+import { PendingChangesButton } from './PendingChangesButton';
 import { PreAggregateAuditDrawer } from './PreAggregateAuditIndicator';
+import { ShortcutHint } from './ShortcutHint';
+import { TidyTilesButton } from './TidyTilesButton';
+import { TileLayoutHistoryButtons } from './TileLayoutHistoryButtons';
 import { useDashboardManageAccess } from './useDashboardManageAccess';
+import { useShortcutHints } from './useShortcutHints';
 
 type DashboardHeaderProps = {
     dashboard: Dashboard;
@@ -164,6 +179,11 @@ type DashboardHeaderProps = {
     isFitToScreen: boolean;
     isFitToScreenAvailable: boolean;
     onToggleFitToScreen: () => void;
+    // null when the control is not offered
+    editFiltersVisibility: EditFiltersVisibility | null;
+    // Changes to settings tracked by a flag only; null hides the changes count
+    pendingSettingsChanges: PendingChange[] | null;
+    onEditFiltersVisibilityChange: (value: EditFiltersVisibility) => void;
     setAddingTab: (value: React.SetStateAction<boolean>) => void;
     onEditClicked: () => void;
     className?: string;
@@ -190,6 +210,7 @@ const DashboardHeader = memo(
         onNewChart,
         onCancel,
         onSaveDashboard,
+        pendingSettingsChanges,
         onDelete,
         onDuplicate,
         onMoveToSpace,
@@ -198,6 +219,8 @@ const DashboardHeader = memo(
         isFitToScreen,
         isFitToScreenAvailable,
         onToggleFitToScreen,
+        editFiltersVisibility,
+        onEditFiltersVisibilityChange,
         setAddingTab,
         onEditClicked,
         className,
@@ -216,6 +239,16 @@ const DashboardHeader = memo(
         const [isUploadModalOpen, uploadModalHandlers] = useDisclosure();
 
         const { track } = useTracking();
+
+        const hasEditBar = isEditMode && editFiltersVisibility !== null;
+        useShortcutHints(hasEditBar);
+        useHotkeys(
+            hasEditBar
+                ? toHotkeyItems(EDIT_SHORTCUTS.save, () => {
+                      if (hasDashboardChanged && !isSaving) onSaveDashboard();
+                  })
+                : [],
+        );
         const [isDetailsOpen, setIsDetailsOpen] = useState(false);
         const [isRefreshOptionsOpen, setIsRefreshOptionsOpen] = useState(false);
         const [isUpdating, setIsUpdating] = useState(false);
@@ -374,10 +407,12 @@ const DashboardHeader = memo(
         const { data: dashboardControlsFlag } = useServerFeatureFlag(
             FeatureFlags.DashboardControls,
         );
+        // The unsaved changes status next to Save replaces the badge
         const showEditingBadge =
             isEditMode &&
             userCanManageDashboard &&
-            dashboardControlsFlag?.enabled === true;
+            dashboardControlsFlag?.enabled === true &&
+            pendingSettingsChanges === null;
         const canEditDashboard =
             canAuthorDashboard && !isEditMode && !isFullscreen;
         const userCanDeleteDashboard =
@@ -714,53 +749,99 @@ const DashboardHeader = memo(
                             dashboardTabs={dashboardTabs}
                         />
 
-                        <AddTileButton
-                            onAddTiles={onAddTiles}
-                            disabled={isSaving}
-                            setAddingTab={setAddingTab}
-                            activeTabUuid={activeTabUuid}
-                            dashboardTabs={dashboardTabs}
-                            onNewChart={onNewChart}
-                            radius="md"
-                        />
-
-                        <Tooltip
-                            fz="xs"
-                            position="bottom"
-                            label="No changes to save"
-                            disabled={hasDashboardChanged}
-                            openDelay={200}
-                            transitionProps={{
-                                transition: 'fade',
-                                duration: 150,
-                            }}
-                        >
-                            <Box>
-                                <Button
-                                    size="xs"
-                                    className={headerClasses.save}
-                                    disabled={!hasDashboardChanged}
-                                    loading={isSaving}
-                                    onClick={onSaveDashboard}
-                                    // Walkthrough marker for manage:Dashboard:
-                                    // a new dashboard with a saved chart on
-                                    // it, then saved. The name is typed (the
-                                    // card suggests one); the space and chart
-                                    // are picked by name. See
-                                    // scripts/scope-tours/generate.ts.
-                                    data-tour-scope="manage:Dashboard"
-                                    data-tour-step="2"
-                                    data-tour-route="/projects/:projectUuid/dashboards/:dashboardUuid/edit"
-                                    data-tour-label="Click Save changes"
-                                    data-tour-title="Create a dashboard"
-                                    data-tour-interactive="true"
-                                    data-tour-via='[data-tour-nav="new"] >> [data-tour-nav="new-dashboard"] >> [data-tour-anchor="dashboard-name"] >> [data-tour-anchor="dashboard-create-next"] >> [data-tour-anchor="space-option"][data-tour-value="Shared"] >> [data-tour-anchor="dashboard-create-submit"] >> [data-tour-anchor="add-tile"] >> [data-tour-anchor="add-saved-chart"] >> [data-tour-anchor="chart-picker"] >> [data-tour-anchor="chart-option"][data-tour-value="Orders over time"] >> [data-tour-anchor="add-charts-submit"]'
-                                    data-tour-docs="explore/dashboards.mdx#save-your-dashboard:1"
+                        {editFiltersVisibility === null ? (
+                            <AddTileButton
+                                onAddTiles={onAddTiles}
+                                disabled={isSaving}
+                                setAddingTab={setAddingTab}
+                                activeTabUuid={activeTabUuid}
+                                dashboardTabs={dashboardTabs}
+                                onNewChart={onNewChart}
+                                radius="md"
+                            />
+                        ) : (
+                            <ActionBar
+                                opened
+                                shadow="md"
+                                aria-label="Dashboard editing tools"
+                                position={EDIT_BAR_POSITION}
+                                className={headerClasses.editBar}
+                            >
+                                <TileLayoutHistoryButtons />
+                                <ActionBar.Divider />
+                                <ShortcutHint
+                                    shortcut={EDIT_SHORTCUTS.addTile}
+                                    position="top"
                                 >
-                                    Save changes
-                                </Button>
-                            </Box>
-                        </Tooltip>
+                                    <AddTileButton
+                                        onAddTiles={onAddTiles}
+                                        disabled={isSaving}
+                                        setAddingTab={setAddingTab}
+                                        activeTabUuid={activeTabUuid}
+                                        dashboardTabs={dashboardTabs}
+                                        onNewChart={onNewChart}
+                                        radius="md"
+                                        shortcut={EDIT_SHORTCUTS.addTile}
+                                    />
+                                </ShortcutHint>
+                                <TidyTilesButton />
+                                <ActionBar.Divider />
+                                <CanvasZoomControls />
+                                <CanvasBackgroundControl />
+                                <EditFiltersVisibilityControl
+                                    value={editFiltersVisibility}
+                                    onChange={onEditFiltersVisibilityChange}
+                                />
+                            </ActionBar>
+                        )}
+
+                        {pendingSettingsChanges !== null && (
+                            <PendingChangesButton
+                                settingsChanges={pendingSettingsChanges}
+                            />
+                        )}
+                        <ShortcutHint
+                            shortcut={EDIT_SHORTCUTS.save}
+                            position="corner"
+                        >
+                            <Tooltip
+                                fz="xs"
+                                position="bottom"
+                                label="No changes to save"
+                                disabled={hasDashboardChanged}
+                                openDelay={200}
+                                transitionProps={{
+                                    transition: 'fade',
+                                    duration: 150,
+                                }}
+                            >
+                                <Box>
+                                    <Button
+                                        size="xs"
+                                        className={headerClasses.save}
+                                        disabled={!hasDashboardChanged}
+                                        loading={isSaving}
+                                        onClick={onSaveDashboard}
+                                        // Walkthrough marker for manage:Dashboard:
+                                        // a new dashboard with a saved chart on
+                                        // it, then saved. The name is typed (the
+                                        // card suggests one); the space and chart
+                                        // are picked by name. See
+                                        // scripts/scope-tours/generate.ts.
+                                        data-tour-scope="manage:Dashboard"
+                                        data-tour-step="2"
+                                        data-tour-route="/projects/:projectUuid/dashboards/:dashboardUuid/edit"
+                                        data-tour-label="Click Save changes"
+                                        data-tour-title="Create a dashboard"
+                                        data-tour-interactive="true"
+                                        data-tour-via='[data-tour-nav="new"] >> [data-tour-nav="new-dashboard"] >> [data-tour-anchor="dashboard-name"] >> [data-tour-anchor="dashboard-create-next"] >> [data-tour-anchor="space-option"][data-tour-value="Shared"] >> [data-tour-anchor="dashboard-create-submit"] >> [data-tour-anchor="add-tile"] >> [data-tour-anchor="add-saved-chart"] >> [data-tour-anchor="chart-picker"] >> [data-tour-anchor="chart-option"][data-tour-value="Orders over time"] >> [data-tour-anchor="add-charts-submit"]'
+                                        data-tour-docs="explore/dashboards.mdx#save-your-dashboard:1"
+                                    >
+                                        Save changes
+                                    </Button>
+                                </Box>
+                            </Tooltip>
+                        </ShortcutHint>
                         <Button
                             variant="default"
                             size="xs"

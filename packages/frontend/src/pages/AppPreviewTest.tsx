@@ -1,5 +1,13 @@
 import { FeatureFlags, isAppVersionInProgress } from '@lightdash/common';
-import { ActionIcon, Box, Loader, Stack, Text, Tooltip } from '@mantine/core';
+import {
+    ActionIcon,
+    Box,
+    Button,
+    Loader,
+    Stack,
+    Text,
+    Tooltip,
+} from '@mantine/core';
 import { IconAppsOff, IconMaximize, IconMinimize } from '@tabler/icons-react';
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Navigate, useNavigate, useParams } from 'react-router';
@@ -14,7 +22,10 @@ import {
 } from '../ee/features/aiCopilot/components/Launcher/launcherAnalysisAdapter';
 import { store as aiAgentStore } from '../ee/features/aiCopilot/store';
 import { openAnalysisPanel } from '../ee/features/aiCopilot/store/aiAgentLauncherSlice';
-import { useDataAppAnalysisAvailability } from '../features/apps/analysis/useDataAppAnalysisAvailability';
+import {
+    useDataAppAnalysisAvailability,
+    useIsAnalysisEntryVisible,
+} from '../features/apps/analysis/useDataAppAnalysisAvailability';
 import { useDataAppAnalysisController } from '../features/apps/analysis/useDataAppAnalysisController';
 import AppIframePreview, {
     type AppIframePreviewHandle,
@@ -29,6 +40,7 @@ import { useAppInspector } from '../features/apps/hooks/useAppInspector';
 import { useAppPreviewToken } from '../features/apps/hooks/useAppPreviewToken';
 import { useCanEditVerifiedDataApp } from '../features/apps/hooks/useCanEditDataApp';
 import { useGetApp } from '../features/apps/hooks/useGetApp';
+import { useNewerAppVersion } from '../features/apps/hooks/useNewerAppVersion';
 import { usePreviewOrigin } from '../features/apps/previewOrigin';
 import { useProjectUuid } from '../hooks/useProjectUuid';
 import { useRecordContentView } from '../hooks/useRecordContentView';
@@ -109,6 +121,13 @@ export default function AppPreviewTest() {
         error: tokenError,
     } = useAppPreviewToken(projectUuid, appUuid, version, 'standalone');
 
+    const { onNewerVersion, isOutdated } = useNewerAppVersion({
+        appUuid,
+        version,
+        tokenError,
+        refetchApp: appQuery.refetch,
+    });
+
     // Panel is opt-in here (most viewers aren't technical), but bridge events
     // are captured regardless so earlier queries show once it's opened.
     const identityKey = `${appUuid}:${version}`;
@@ -116,13 +135,9 @@ export default function AppPreviewTest() {
     const { rolloverLogs } = inspector;
 
     // "Analyse this view": host-side AI analysis over the queries the app
-    // ran. Hidden entirely until the org is rolled out; otherwise the panel
-    // explains any remaining reason it is unavailable.
+    // ran.
     const analysisAvailability = useDataAppAnalysisAvailability();
-    const showAnalysis =
-        analysisAvailability.status === 'available' ||
-        (analysisAvailability.status === 'unavailable' &&
-            analysisAvailability.reason !== 'not_rolled_out');
+    const showAnalysis = useIsAnalysisEntryVisible(analysisAvailability);
     // Manual refresh: bumping the counter changes the iframe URL, forcing a
     // reload so the app's metric queries re-fire. `invalidateCache` latches on
     // with the first refresh so those re-fired queries bypass the warehouse
@@ -220,6 +235,39 @@ export default function AppPreviewTest() {
         return <div>Missing route params</div>;
     }
 
+    if (isOutdated && !appQuery.error) {
+        // Following the latest version: the refetch moves the page on to it.
+        if (!explicitVersion && appQuery.isFetching) {
+            return (
+                <Box mt="30vh">
+                    <SuboptimalState loading title="Loading latest version" />
+                </Box>
+            );
+        }
+        return (
+            <Box mt="30vh">
+                <SuboptimalState
+                    icon={IconAppsOff}
+                    title="This app has a newer version"
+                    description="Open the latest version to keep using this app."
+                    action={
+                        <Button
+                            onClick={() =>
+                                explicitVersion
+                                    ? navigate(
+                                          `/projects/${projectUuid}/apps/${appUuid}/view`,
+                                      )
+                                    : window.location.reload()
+                            }
+                        >
+                            Open latest version
+                        </Button>
+                    }
+                />
+            </Box>
+        );
+    }
+
     const visibleTokenError = getVisiblePreviewTokenError(tokenError, !!token);
     const error = appQuery.error ?? visibleTokenError;
 
@@ -306,6 +354,7 @@ export default function AppPreviewTest() {
                     identityKey={identityKey}
                     onScreenshotAvailabilityChange={setScreenshotAvailable}
                     invalidateCache={invalidateCache}
+                    onNewerVersion={onNewerVersion}
                     urlStateSync
                     capabilities={{ gsheetExport: true }}
                     insights={

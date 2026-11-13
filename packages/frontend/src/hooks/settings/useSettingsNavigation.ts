@@ -17,6 +17,7 @@ import {
     IconDatabase,
     IconDatabaseCog,
     IconDatabaseExport,
+    IconDeviceMobile,
     IconEyeCheck,
     IconFileExport,
     IconFolders,
@@ -53,6 +54,12 @@ import {
     IconWorldCog,
 } from '@tabler/icons-react';
 import { useMemo } from 'react';
+import { AI_ANALYSIS_SETTINGS_PATH } from '../../features/apps/analysis/useDataAppAnalysisAvailability';
+import { MOBILE_STRINGS } from '../../features/mobile/mobileStrings';
+import {
+    getSemanticStudioExternalSourcesUrl,
+    getSemanticStudioLiveSourcesUrl,
+} from '../../features/semanticStudio/urls';
 import useTracking from '../../providers/Tracking/useTracking';
 import { EventName } from '../../types/Events';
 import { canAccessDeepResearchSettings } from './deepResearchSettingsAccess';
@@ -80,7 +87,6 @@ export const useSettingsNavigation = (
         health,
         allowPasswordAuthentication,
         hasSocialLogin,
-        isGroupManagementEnabled,
         canAccessAnalyticsSettings,
         isOrganizationRoadmapEnabled,
         canAccessAiCredits,
@@ -97,12 +103,10 @@ export const useSettingsNavigation = (
         hasAnyAiAgentAccess,
         embeddingEnabled,
         dataAppsFlag,
-        dataAppAnalysisFlag,
-        dashboardAnalysisFlag,
         isChartStudioAvailable,
         isApiQuerySourcesEnabled,
-        externalSourcesFlag,
-        isResultsCacheEnabled,
+        isMobileSettingsEnabled,
+        isResultsCacheAvailable,
         isGitProject,
         isContentReviewAvailable,
         projectSettingsAccess,
@@ -111,11 +115,8 @@ export const useSettingsNavigation = (
     const isEmbeddingEnabled = embeddingEnabled?.enabled ?? false;
     const isScimEnabled = isScimTokenManagementEnabled?.enabled ?? false;
     const isDataAppsEnabled = dataAppsFlag?.enabled ?? false;
-    const isDataAppAnalysisEnabled = dataAppAnalysisFlag?.enabled ?? false;
-    const isDashboardAnalysisEnabled = dashboardAnalysisFlag?.enabled ?? false;
     const isExternalSourcesEnabled =
-        (externalSourcesFlag?.enabled ?? false) &&
-        (health?.externalSources.engineAvailable ?? false);
+        health?.externalSources.engineAvailable ?? false;
 
     return useMemo<SettingsNavigationSection[]>(() => {
         const ability = user?.ability;
@@ -204,6 +205,17 @@ export const useSettingsNavigation = (
             });
         }
 
+        if (isMobileSettingsEnabled) {
+            yourSettings.push({
+                label: MOBILE_STRINGS.navLabel,
+                to: '/generalSettings/mobile',
+                icon: IconDeviceMobile,
+                keywords: ['phone', 'app', 'ios', 'android', 'iphone'],
+                children: [],
+                exact: true,
+            });
+        }
+
         const organizationItems: SettingsNavigationItem[] = [];
 
         if (ability?.can('manage', 'Organization')) {
@@ -279,9 +291,7 @@ export const useSettingsNavigation = (
 
         if (ability?.can('update', 'OrganizationMemberProfile')) {
             organizationItems.push({
-                label: isGroupManagementEnabled
-                    ? 'Users & groups'
-                    : 'User management',
+                label: 'Users & groups',
                 to: '/generalSettings/userManagement',
                 icon: IconUserPlus,
                 keywords: ['members', 'invite', 'teams', 'groups'],
@@ -299,9 +309,7 @@ export const useSettingsNavigation = (
             )
         ) {
             organizationItems.push({
-                label: isGroupManagementEnabled
-                    ? 'User & group attributes'
-                    : 'User attributes',
+                label: 'User & group attributes',
                 to: '/generalSettings/userAttributes',
                 icon: IconUserShield,
                 keywords: ['attributes', 'access control'],
@@ -381,27 +389,6 @@ export const useSettingsNavigation = (
                 });
             }
 
-            if (
-                (isDataAppAnalysisEnabled || isDashboardAnalysisEnabled) &&
-                ability?.can('manage', 'Organization')
-            ) {
-                dataAppChildren.push({
-                    label: 'AI analysis',
-                    to: '/generalSettings/dataApps/aiAnalysis',
-                    icon: IconSparkles,
-                    keywords: [
-                        'ai',
-                        'analysis',
-                        'insights',
-                        'anomalies',
-                        'investigate',
-                        'auto',
-                    ],
-                    children: [],
-                    exact: true,
-                });
-            }
-
             if (dataAppChildren.length > 0) {
                 organizationItems.push({
                     label: 'Data apps',
@@ -421,28 +408,6 @@ export const useSettingsNavigation = (
                     to: '/generalSettings/dataApps/themes',
                     icon: IconBrush,
                     keywords: ['design', 'colors', 'charts', 'chart types'],
-                    children: [],
-                    exact: true,
-                });
-            }
-            // Dashboard analysis shares the consent toggle that lives on the
-            // data-apps AI-analysis page; surface it even without data apps.
-            if (
-                isDashboardAnalysisEnabled &&
-                ability?.can('manage', 'Organization')
-            ) {
-                organizationItems.push({
-                    label: 'AI analysis',
-                    to: '/generalSettings/dataApps/aiAnalysis',
-                    icon: IconSparkles,
-                    keywords: [
-                        'ai',
-                        'analysis',
-                        'insights',
-                        'anomalies',
-                        'investigate',
-                        'dashboards',
-                    ],
                     children: [],
                     exact: true,
                 });
@@ -548,7 +513,6 @@ export const useSettingsNavigation = (
                 label: 'Lightdash analytics',
                 to: '/generalSettings/lightdashAnalytics',
                 icon: IconReportAnalytics,
-                isBeta: true,
                 keywords: ['usage', 'analytics', 'tokens', 'queries'],
                 children: [],
                 exact: true,
@@ -664,6 +628,24 @@ export const useSettingsNavigation = (
                     to: '/generalSettings/ai/deep-research',
                     icon: IconTelescope,
                     keywords: ['research', 'limits', 'tools', 'queries'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (ability?.can('manage', 'Organization')) {
+                aiChildren.push({
+                    label: 'AI analysis',
+                    to: AI_ANALYSIS_SETTINGS_PATH,
+                    icon: IconSparkles,
+                    keywords: [
+                        'analysis',
+                        'insights',
+                        'anomalies',
+                        'investigate',
+                        'data apps',
+                        'dashboards',
+                    ],
                     children: [],
                     exact: true,
                 });
@@ -1005,7 +987,7 @@ export const useSettingsNavigation = (
                 });
             }
 
-            if (isResultsCacheEnabled) {
+            if (isResultsCacheAvailable) {
                 projectItems.push({
                     label: 'Results caching',
                     to: `${base}/caching`,
@@ -1097,13 +1079,26 @@ export const useSettingsNavigation = (
                     }),
                 )
             ) {
+                // Managed on the Semantic Layer page; still listed here so
+                // people who look for it in settings find their way.
                 projectItems.push({
                     label: 'External sources',
-                    to: `${base}/externalSources`,
+                    to: getSemanticStudioExternalSourcesUrl(
+                        project.projectUuid,
+                    ),
                     icon: IconDatabaseExport,
-                    keywords: ['csv', 'upload', 'files', 'google sheets'],
+                    keywords: [
+                        'csv',
+                        'upload',
+                        'files',
+                        'google sheets',
+                        'spreadsheet',
+                        'sources',
+                        'semantic layer',
+                    ],
                     children: [],
                     exact: true,
+                    movedTo: 'Semantic Layer',
                 });
             }
 
@@ -1158,13 +1153,26 @@ export const useSettingsNavigation = (
             }
 
             if (isApiQuerySourcesEnabled && canManageProjectConnections) {
+                // Managed on the Semantic Layer page; still listed here so
+                // people who look for it in settings find their way.
                 projectItems.push({
                     label: 'Live data sources',
-                    to: `${base}/liveDataSources`,
+                    to: getSemanticStudioLiveSourcesUrl(project.projectUuid),
                     icon: IconBroadcast,
-                    keywords: ['posthog', 'api', 'saas', 'live', 'sources'],
+                    keywords: [
+                        'posthog',
+                        'google analytics',
+                        'search console',
+                        'integration',
+                        'api',
+                        'saas',
+                        'live',
+                        'sources',
+                        'semantic layer',
+                    ],
                     children: [],
                     exact: true,
+                    movedTo: 'Semantic Layer',
                 });
             }
 
@@ -1370,7 +1378,6 @@ export const useSettingsNavigation = (
         health,
         allowPasswordAuthentication,
         hasSocialLogin,
-        isGroupManagementEnabled,
         canAccessAnalyticsSettings,
         isOrganizationRoadmapEnabled,
         canAccessAiCredits,
@@ -1387,12 +1394,11 @@ export const useSettingsNavigation = (
         hasAnyAiAgentAccess,
         isEmbeddingEnabled,
         isDataAppsEnabled,
-        isDataAppAnalysisEnabled,
-        isDashboardAnalysisEnabled,
         isChartStudioAvailable,
         isApiQuerySourcesEnabled,
         isExternalSourcesEnabled,
-        isResultsCacheEnabled,
+        isMobileSettingsEnabled,
+        isResultsCacheAvailable,
         isGitProject,
         isContentReviewAvailable,
         projectSettingsAccess,

@@ -21,6 +21,10 @@ import {
     AiAgentReasoningTableName,
 } from '../database/entities/aiAgentReasoning';
 import {
+    AiAgentWarehouseTableListsTable,
+    AiAgentWarehouseTableListsTableName,
+} from '../database/entities/aiAgentWarehouseTableLists';
+import {
     AiServiceAccountCredentialsTable,
     AiServiceAccountCredentialsTableName,
 } from '../database/entities/aiServiceAccountCredentials';
@@ -51,6 +55,10 @@ import {
     AppVersionsTableName,
 } from '../database/entities/apps';
 import {
+    AppSlugMappingsTableName,
+    AppSlugMappingTable,
+} from '../database/entities/appSlugMappings';
+import {
     AwsWebIdentityAudiencesTable,
     AwsWebIdentityAudiencesTableName,
 } from '../database/entities/awsWebIdentityAudiences';
@@ -72,6 +80,14 @@ import {
     DashboardTileCommentsTable,
     DashboardTileCommentsTableName,
 } from '../database/entities/comments';
+import {
+    ComposerChartsTable,
+    ComposerChartsTableName,
+    ComposerChartVersionsTable,
+    ComposerChartVersionsTableName,
+    DashboardTileComposerChartsTable,
+    DashboardTileComposerChartsTableName,
+} from '../database/entities/composerCharts';
 import {
     ContentAsCodeSnapshotsTableName,
     ContentAsCodeSnapshotTable,
@@ -246,6 +262,16 @@ import {
     ManagedSignInTokenUsesTableName,
 } from '../database/entities/managedSignInTokenUses';
 import {
+    MobileAppLinkRateCountersTable,
+    MobileAppLinkRateCountersTableName,
+    MobileAppLinksTable,
+    MobileAppLinksTableName,
+} from '../database/entities/mobileAppLinks';
+import {
+    MobileSignInCodesTable,
+    MobileSignInCodesTableName,
+} from '../database/entities/mobileSignInCodes';
+import {
     NotificationsTable,
     NotificationsTableName,
 } from '../database/entities/notifications';
@@ -373,6 +399,24 @@ import {
     ProjectMembershipsTable,
     ProjectMembershipsTableName,
 } from '../database/entities/projectMemberships';
+import {
+    ProjectModelChangeSetsTable,
+    ProjectModelChangeSetsTableName,
+    ProjectModelRevisionsTable,
+    ProjectModelRevisionsTableName,
+} from '../database/entities/projectModelChangeSets';
+import {
+    ProjectModelDocumentsTable,
+    ProjectModelDocumentsTableName,
+} from '../database/entities/projectModelDocuments';
+import {
+    ProjectModelDraftChangesTable,
+    ProjectModelDraftChangesTableName,
+} from '../database/entities/projectModelDraftChanges';
+import {
+    ProjectModelDraftImpactsTable,
+    ProjectModelDraftImpactsTableName,
+} from '../database/entities/projectModelDraftImpacts';
 import {
     ProjectParametersTable,
     ProjectParametersTableName,
@@ -531,10 +575,6 @@ import {
     WarehouseCredentialTable,
     WarehouseCredentialTableName,
 } from '../database/entities/warehouseCredentials';
-import {
-    AgentOnboardingRunsTable,
-    AgentOnboardingRunsTableName,
-} from '../ee/database/entities/agentOnboarding';
 import {
     AiAgentToolCallErrorTable,
     AiAgentToolCallErrorTableName,
@@ -788,6 +828,10 @@ import {
     ScimRequestLogTable,
 } from '../ee/database/entities/scimRequestLogs';
 import {
+    SemanticStudioWorkspacesTable,
+    SemanticStudioWorkspacesTableName,
+} from '../ee/database/entities/semanticStudioWorkspaces';
+import {
     ServiceAccountsTableName,
     ServiceAccountTable,
 } from '../ee/database/entities/serviceAccounts';
@@ -815,6 +859,7 @@ declare module 'knex/types/tables' {
         [CredentialsTableName]: CredentialsTable;
         [OrganizationAgentIdentityRulesTableName]: OrganizationAgentIdentityRulesTable;
         [AiServiceAccountCredentialsTableName]: AiServiceAccountCredentialsTable;
+        [AiAgentWarehouseTableListsTableName]: AiAgentWarehouseTableListsTable;
         [OrganizationSnowflakeAgentClientsTableName]: OrganizationSnowflakeAgentClientsTable;
         [DocumentsTableName]: DocumentsTable;
         [DocumentVersionsTableName]: DocumentVersionsTable;
@@ -841,6 +886,7 @@ declare module 'knex/types/tables' {
         [SavedChartsTableName]: SavedChartTable;
         [SavedChartSlugMappingsTableName]: SavedChartSlugMappingTable;
         [DashboardSlugMappingsTableName]: DashboardSlugMappingTable;
+        [AppSlugMappingsTableName]: AppSlugMappingTable;
         [SavedChartVersionsTableName]: SavedChartVersionsTable;
         [SavedChartVersionFieldsTableName]: SavedChartVersionFieldsTable;
         [SavedChartVersionSortsTableName]: SavedChartVersionSortsTable;
@@ -865,6 +911,9 @@ declare module 'knex/types/tables' {
         [DashboardTileMarkdownsTableName]: DashboardTileMarkdownsTable;
         [DashboardTileHeadingsTableName]: DashboardTileHeadingsTable;
         [DashboardTileDataAppsTableName]: DashboardTileDataAppsTable;
+        [DashboardTileComposerChartsTableName]: DashboardTileComposerChartsTable;
+        [ComposerChartsTableName]: ComposerChartsTable;
+        [ComposerChartVersionsTableName]: ComposerChartVersionsTable;
         [OnboardingTableName]: OnboardingTable;
         [OpenIdIdentitiesTableName]: OpenIdIdentitiesTable;
         [OrganizationMembershipsTableName]: OrganizationMembershipsTable;
@@ -912,6 +961,7 @@ declare module 'knex/types/tables' {
         [GroupTableName]: GroupTable;
         [GroupMembershipTableName]: GroupMembershipTable;
         [HeadlessBrowserLoginGrantsTableName]: HeadlessBrowserLoginGrantTable;
+        [MobileSignInCodesTableName]: MobileSignInCodesTable;
         [SshKeyPairTableName]: SshKeyPairTable;
         [AwsWebIdentityAudiencesTableName]: AwsWebIdentityAudiencesTable;
         [UserAttributesTable]: UserAttributeTable;
@@ -953,8 +1003,13 @@ declare module 'knex/types/tables' {
         [MobilePushInstallationsTableName]: MobilePushInstallationTable;
         [AiAgentLiveActivitiesTableName]: AiAgentLiveActivityTable;
         [AiAgentLiveActivityStartAttemptsTableName]: AiAgentLiveActivityStartAttemptTable;
-        [AgentOnboardingRunsTableName]: AgentOnboardingRunsTable;
         [HomepageRecommendedActionSkipsTableName]: HomepageRecommendedActionSkipsTable;
+        [ProjectModelDocumentsTableName]: ProjectModelDocumentsTable;
+        [ProjectModelChangeSetsTableName]: ProjectModelChangeSetsTable;
+        [ProjectModelRevisionsTableName]: ProjectModelRevisionsTable;
+        [ProjectModelDraftChangesTableName]: ProjectModelDraftChangesTable;
+        [SemanticStudioWorkspacesTableName]: SemanticStudioWorkspacesTable;
+        [ProjectModelDraftImpactsTableName]: ProjectModelDraftImpactsTable;
         [AiAgentTableName]: AiAgentTable;
         [AiAgentDocumentTableName]: AiAgentDocumentTable;
         [AiAgentDocumentAccessTableName]: AiAgentDocumentAccessTable;
@@ -998,6 +1053,8 @@ declare module 'knex/types/tables' {
         [SlackChannelProjectMappingsTableName]: SlackChannelProjectMappingsTable;
         [WarehouseAvailableTablesTableName]: WarehouseAvailableTablesTable;
         [WarehouseConnectCodeTableName]: WarehouseConnectCodeTable;
+        [MobileAppLinksTableName]: MobileAppLinksTable;
+        [MobileAppLinkRateCountersTableName]: MobileAppLinkRateCountersTable;
         [AiUsageLedgerTableName]: AiUsageLedgerTable;
         [UsageProcessingStatusTableName]: UsageProcessingStatusTable;
         [AiCreditRateCardTableName]: AiCreditRateCardTable;

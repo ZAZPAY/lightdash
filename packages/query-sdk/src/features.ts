@@ -98,6 +98,14 @@ export const SDK_FEATURES: SdkFeature[] = [
             'Lets the host rasterize the app to an image for thumbnails and scheduled deliveries.',
     },
     {
+        key: 'pdf-export',
+        appliesTo: ['data_app'],
+        label: 'Scheduled PDF export',
+        description:
+            'Lets scheduled deliveries send the same PDF the app’s Download PDF button produces.',
+        wiring: "Register the Download PDF builder with `registerPdfExport` from `@/lib/pdfExport`, resolving to `pdf.output('blob')`; without it scheduled PDF deliveries of the app fail.",
+    },
+    {
         key: 'external-fetch',
         appliesTo: ['data_app', 'chart_type'],
         label: 'External data fetch',
@@ -329,6 +337,13 @@ export const SDK_FIXES: SdkFix[] = [
         label: 'Field names on custom explores',
         description:
             'Queries on explores defined under meta.explores use the right field names instead of failing with an unknown field id error.',
+        appliesTo: ['data_app'],
+    },
+    {
+        key: 'shared-state-unavailable',
+        label: 'Shared values for viewers without access',
+        description:
+            'Tells the app up front when a viewer cannot use shared values, so comment and commentary controls can be turned off instead of failing when used.',
         appliesTo: ['data_app'],
     },
 ];

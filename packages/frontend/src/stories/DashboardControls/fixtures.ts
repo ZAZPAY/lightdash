@@ -1,15 +1,18 @@
 import {
     DashboardTileTypes,
+    DateGranularity,
     DimensionType,
     FieldType,
     FilterOperator,
+    QueryHistoryStatus,
     getItemId,
     UnitOfTime,
     type ApiError,
     type DashboardControlSection,
+    type DateZoomControl,
     type DashboardFilterRule,
     type DashboardTab,
-    type FieldValueSearchResult,
+    type ApiExecuteAsyncFieldValueSearchResults,
     type DashboardFilterableField,
     type DashboardFilters,
     type DashboardTile,
@@ -376,11 +379,6 @@ export const dashboardFilters: DashboardFilters = {
     tableCalculations: [],
 };
 
-/** Fields a filter on the bar already uses: the add menu says so. */
-export const ON_BAR_FIELD_IDS = dashboardFilters.dimensions.map(
-    ({ target }) => target.fieldId,
-);
-
 const FIRST_NAMES = [
     'Aaron',
     'Adam',
@@ -432,17 +430,35 @@ const VALUES_BY_FIELD: Record<string, string[]> = {
 // Suggestions for this field fail, to show the picker's error and retry
 const FAILING_FIELD_ID = getItemId(fields.city);
 
-const FIELD_SEARCH_URL = /^\/projects\/[^/]+\/field\/([^/]+)\/search$/;
+const FIELD_VALUES_URL = /^\/projects\/[^/]+\/query\/field-values$/;
+const QUERY_RESULTS_URL = /^\/projects\/[^/]+\/query\/([^/]+)$/;
+const VALUE_COLUMN = 'value';
 
-type FieldSearchBody = { search: string; parameters: ParametersValuesMap };
+// The values each started search answers with, read back by its query uuid
+const fieldValueQueries = new Map<string, string[]>();
+
+type FieldSearchBody = {
+    fieldId: string;
+    search: string;
+    parameters: ParametersValuesMap;
+};
+
+const EMPTY_SEARCH: FieldSearchBody = {
+    fieldId: '',
+    search: '',
+    parameters: {},
+};
 
 const readBody = (body: LightdashApiProps['body']): FieldSearchBody => {
-    if (typeof body !== 'string') return { search: '', parameters: {} };
+    if (typeof body !== 'string') return EMPTY_SEARCH;
     try {
         const parsed: unknown = JSON.parse(body);
-        if (typeof parsed !== 'object' || parsed === null)
-            return { search: '', parameters: {} };
+        if (typeof parsed !== 'object' || parsed === null) return EMPTY_SEARCH;
         return {
+            fieldId:
+                'fieldId' in parsed && typeof parsed.fieldId === 'string'
+                    ? parsed.fieldId
+                    : '',
             search:
                 'search' in parsed && typeof parsed.search === 'string'
                     ? parsed.search
@@ -455,7 +471,7 @@ const readBody = (body: LightdashApiProps['body']): FieldSearchBody => {
                     : {},
         };
     } catch {
-        return { search: '', parameters: {} };
+        return EMPTY_SEARCH;
     }
 };
 
@@ -497,24 +513,38 @@ const answer = async (props: LightdashApiProps): Promise<unknown> => {
             name: 'Jaffle shop',
             useProjectTimezoneInFilters: false,
         };
-    const fieldSearch = FIELD_SEARCH_URL.exec(props.url);
-    if (fieldSearch) {
-        const fieldId = fieldSearch[1];
-        const body = readBody(props.body);
-        fieldSearchRequests.push({ fieldId, parameters: body.parameters });
+    if (FIELD_VALUES_URL.test(props.url)) {
+        const { fieldId, search, parameters } = readBody(props.body);
+        fieldSearchRequests.push({ fieldId, parameters });
         await delay(300);
         if (fieldId === FAILING_FIELD_ID) throw warehouseError;
-        const search = body.search.toLowerCase();
-        const results = (VALUES_BY_FIELD[fieldId] ?? []).filter((value) =>
-            value.toLowerCase().includes(search),
+        const queryUuid = `field-values-${fieldValueQueries.size}`;
+        fieldValueQueries.set(
+            queryUuid,
+            (VALUES_BY_FIELD[fieldId] ?? []).filter((value) =>
+                value.toLowerCase().includes(search.toLowerCase()),
+            ),
         );
         return {
-            search,
-            results,
-            cached: true,
-            refreshedAt: new Date(),
-        } satisfies FieldValueSearchResult<string>;
+            queryUuid,
+            cacheMetadata: { cacheHit: true },
+            valueFieldId: VALUE_COLUMN,
+            labelFieldId: null,
+        } satisfies ApiExecuteAsyncFieldValueSearchResults;
     }
+    const queryResults = QUERY_RESULTS_URL.exec(props.url);
+    if (queryResults && props.method === 'GET')
+        // Only what the value search reads from a ready results page
+        return {
+            status: QueryHistoryStatus.READY,
+            queryUuid: queryResults[1],
+            columns: {},
+            rows: (fieldValueQueries.get(queryResults[1]) ?? []).map(
+                (value) => ({
+                    [VALUE_COLUMN]: { value: { raw: value, formatted: value } },
+                }),
+            ),
+        };
     throw new Error(`Not stubbed in this story: ${props.method} ${props.url}`);
 };
 
@@ -700,7 +730,7 @@ export const manyFieldsByTile: Record<string, DashboardFilterableField[]> = {
     'tile-wide': manyFields,
 };
 
-/** Already set by a control on the bar: the add menu says so, and a pick adds a second one. */
+/** Already set by a control on the bar: a pick in the add menu adds a second one. */
 export const ON_BAR_PARAMETER_KEYS = [parameters.ordersWeekStart.key];
 
 /** A control setting `options` on every tile that uses them, or on `tileUuids`. */
@@ -718,3 +748,60 @@ export const createParameterControl = (
     sectionId: null,
     value,
 });
+
+/** The dashboard's custom grains, as the tiles' dbt project names them. */
+export const customGranularityLabels: Record<string, string> = {
+    fiscal_quarter: 'Fiscal quarter',
+    retail_week: 'Retail week',
+};
+
+/** The grains viewers can pick: the shipped list's usual five. */
+export const enabledGranularities: string[] = [
+    DateGranularity.DAY,
+    DateGranularity.WEEK,
+    DateGranularity.MONTH,
+    DateGranularity.QUARTER,
+    DateGranularity.YEAR,
+];
+
+/** A named zoom at Week, on no section, shown to viewers. */
+export const createDateZoomControl = (
+    overrides: Partial<DateZoomControl> = {},
+): DateZoomControl => ({
+    uuid: 'zoom-revenue',
+    name: 'Revenue zoom',
+    granularity: DateGranularity.WEEK,
+    ...overrides,
+});
+
+const orderDate = {
+    fieldId: 'orders_order_date',
+    label: 'Order date',
+    tableName: 'orders',
+};
+
+/** The date fields each tile can be zoomed on: every tile but payments. */
+export const zoomableFieldsByTile = Object.fromEntries(
+    tiles
+        .filter(({ uuid }) => uuid !== 'tile-payments')
+        .map(({ uuid }) => [uuid, [orderDate]]),
+);
+
+/** Revenue zoom at Week on the revenue and weekly tiles; the default at Month. */
+export const dateZoomSettings = {
+    dateZoomGranularities: enabledGranularities,
+    defaultDateZoomGranularity: DateGranularity.MONTH,
+    dateZoomConfig: {
+        controls: [createDateZoomControl()],
+        tileTargets: Object.fromEntries(
+            ['tile-revenue', 'tile-weekly'].map((tileUuid) => [
+                tileUuid,
+                {
+                    controlUuid: 'zoom-revenue',
+                    fieldId: orderDate.fieldId,
+                    tableName: orderDate.tableName,
+                },
+            ]),
+        ),
+    },
+};

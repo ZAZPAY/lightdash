@@ -33,6 +33,10 @@ import {
 import { MCP_FILTER_EXPRESSION_SKILL_INSTRUCTION } from '../filterExpressions/mcpGuidance';
 import { structuredToolOutputSchema } from '../outputMetadata';
 import {
+    DOCUMENT_CREATE_CONTENT_DESCRIPTION,
+    DOCUMENT_EDIT_CONTENT_DESCRIPTION,
+    documentCreateContentArgsSchema,
+    documentEditContentArgsSchema,
     MCP_CREATE_CONTENT_DESCRIPTION,
     MCP_EDIT_CONTENT_DESCRIPTION,
     MCP_READ_CONTENT_DESCRIPTION,
@@ -49,6 +53,12 @@ import {
     toolAnalyzeFieldImpactArgsSchema,
     toolAnalyzeFieldImpactOutputSchema,
 } from './toolAnalyzeFieldImpactArgs';
+import {
+    ASK_USER_TOOL_NAME,
+    TOOL_ASK_USER_DESCRIPTION,
+    toolAskUserArgsSchema,
+    toolAskUserOutputSchema,
+} from './toolAskUserArgs';
 import {
     TOOL_LIST_SKILLS_DESCRIPTION,
     TOOL_LOAD_SKILL_DESCRIPTION_MCP,
@@ -364,6 +374,14 @@ import {
     toolSearchSemanticLayerArgsSchema,
     toolSearchSemanticLayerOutputSchema,
 } from './toolSearchSemanticLayerArgs';
+import {
+    TOOL_PROPOSE_SEMANTIC_LAYER_CHANGE_DESCRIPTION,
+    TOOL_READ_SEMANTIC_MODEL_DESCRIPTION,
+    toolProposeSemanticLayerChangeArgsSchema,
+    toolProposeSemanticLayerChangeOutputSchema,
+    toolReadSemanticModelArgsSchema,
+    toolReadSemanticModelOutputSchema,
+} from './toolSemanticStudioArgs';
 import {
     TOOL_SYNC_DBT_PROJECT_DESCRIPTION,
     toolSyncDbtProjectArgsSchema,
@@ -1055,6 +1073,20 @@ export const updateUserNameToolDefinition: ToolDefinitionWithoutMcpOutput<
     agent: { outputSchema: toolUpdateUserNameOutputSchema },
 });
 
+export const askUserToolDefinition: ToolDefinitionWithoutMcpOutput<
+    'askUser',
+    typeof toolAskUserArgsSchema,
+    typeof toolAskUserArgsSchema,
+    typeof toolAskUserOutputSchema
+> = defineTool({
+    name: ASK_USER_TOOL_NAME,
+    title: 'Ask user',
+    description: TOOL_ASK_USER_DESCRIPTION,
+    availability: ['agent'],
+    inputSchema: toolAskUserArgsSchema,
+    agent: { outputSchema: toolAskUserOutputSchema },
+});
+
 export const runContentQueryToolDefinition: ToolDefinitionWithoutMcpOutput<
     'runContentQuery',
     typeof toolRunContentQueryArgsSchema,
@@ -1278,6 +1310,34 @@ export const editProjectContextToolDefinition: ToolDefinitionWithoutMcpOutput<
     availability: ['agent'],
     inputSchema: toolEditProjectContextArgsSchema,
     agent: { outputSchema: toolEditProjectContextOutputSchema },
+});
+
+export const proposeSemanticLayerChangeToolDefinition: ToolDefinitionWithoutMcpOutput<
+    'proposeSemanticLayerChange',
+    typeof toolProposeSemanticLayerChangeArgsSchema,
+    typeof toolProposeSemanticLayerChangeArgsSchema,
+    typeof toolProposeSemanticLayerChangeOutputSchema
+> = defineTool({
+    name: 'proposeSemanticLayerChange',
+    title: 'Propose semantic layer change',
+    description: TOOL_PROPOSE_SEMANTIC_LAYER_CHANGE_DESCRIPTION,
+    availability: ['agent'],
+    inputSchema: toolProposeSemanticLayerChangeArgsSchema,
+    agent: { outputSchema: toolProposeSemanticLayerChangeOutputSchema },
+});
+
+export const readSemanticModelToolDefinition: ToolDefinitionWithoutMcpOutput<
+    'readSemanticModel',
+    typeof toolReadSemanticModelArgsSchema,
+    typeof toolReadSemanticModelArgsSchema,
+    typeof toolReadSemanticModelOutputSchema
+> = defineTool({
+    name: 'readSemanticModel',
+    title: 'Read semantic model',
+    description: TOOL_READ_SEMANTIC_MODEL_DESCRIPTION,
+    availability: ['agent'],
+    inputSchema: toolReadSemanticModelArgsSchema,
+    agent: { outputSchema: toolReadSemanticModelOutputSchema },
 });
 
 export const syncDbtProjectToolDefinition: ToolDefinitionWithoutMcpOutput<
@@ -1953,6 +2013,7 @@ type AgentToolDefinitionsByName = {
     createContent: typeof createContentToolDefinition;
     createScheduledDelivery: typeof createScheduledDeliveryToolDefinition;
     updateUserName: typeof updateUserNameToolDefinition;
+    askUser: typeof askUserToolDefinition;
     runContentQuery: typeof runContentQueryToolDefinition;
     listContent: typeof listContentToolDefinition;
     loadSkill: typeof loadSkillToolDefinition;
@@ -1964,6 +2025,8 @@ type AgentToolDefinitionsByName = {
     listDataAppConnections: typeof listDataAppConnectionsToolDefinition;
     editDbtProject: typeof editDbtProjectToolDefinition;
     editProjectContext: typeof editProjectContextToolDefinition;
+    proposeSemanticLayerChange: typeof proposeSemanticLayerChangeToolDefinition;
+    readSemanticModel: typeof readSemanticModelToolDefinition;
     syncDbtProject: typeof syncDbtProjectToolDefinition;
     exploreRepo: typeof exploreRepoToolDefinition;
     discoverRepos: typeof discoverReposToolDefinition;
@@ -2013,6 +2076,7 @@ export const agentToolDefinitionsByName: AgentToolDefinitionsByName = {
     createContent: createContentToolDefinition,
     createScheduledDelivery: createScheduledDeliveryToolDefinition,
     updateUserName: updateUserNameToolDefinition,
+    askUser: askUserToolDefinition,
     runContentQuery: runContentQueryToolDefinition,
     listContent: listContentToolDefinition,
     loadSkill: loadSkillToolDefinition,
@@ -2024,6 +2088,8 @@ export const agentToolDefinitionsByName: AgentToolDefinitionsByName = {
     listDataAppConnections: listDataAppConnectionsToolDefinition,
     editDbtProject: editDbtProjectToolDefinition,
     editProjectContext: editProjectContextToolDefinition,
+    proposeSemanticLayerChange: proposeSemanticLayerChangeToolDefinition,
+    readSemanticModel: readSemanticModelToolDefinition,
     syncDbtProject: syncDbtProjectToolDefinition,
     exploreRepo: exploreRepoToolDefinition,
     discoverRepos: discoverReposToolDefinition,
@@ -2080,6 +2146,7 @@ export const builtInToolDefinitions: readonly ToolDefinitionInstance[] = [
     createContentToolDefinition,
     createScheduledDeliveryToolDefinition,
     updateUserNameToolDefinition,
+    askUserToolDefinition,
     runContentQueryToolDefinition,
     listContentToolDefinition,
     loadSkillToolDefinition,
@@ -2091,6 +2158,8 @@ export const builtInToolDefinitions: readonly ToolDefinitionInstance[] = [
     listDataAppConnectionsToolDefinition,
     editDbtProjectToolDefinition,
     editProjectContextToolDefinition,
+    proposeSemanticLayerChangeToolDefinition,
+    readSemanticModelToolDefinition,
     syncDbtProjectToolDefinition,
     exploreRepoToolDefinition,
     discoverReposToolDefinition,
@@ -2164,6 +2233,23 @@ export const mcpEditContentToolDefinition = defineTool({
     availability: ['agent', 'mcp'],
     inputSchema: mcpEditContentArgsSchema,
     mcp: { name: 'edit_content', annotations: writeAnnotations },
+});
+
+// Agent tools for an actor who can save Documents but not charts or dashboards.
+export const documentCreateContentToolDefinition = defineTool({
+    name: 'createContent',
+    title: 'Create content',
+    description: DOCUMENT_CREATE_CONTENT_DESCRIPTION,
+    availability: ['agent'],
+    inputSchema: documentCreateContentArgsSchema,
+});
+
+export const documentEditContentToolDefinition = defineTool({
+    name: 'editContent',
+    title: 'Edit content',
+    description: DOCUMENT_EDIT_CONTENT_DESCRIPTION,
+    availability: ['agent'],
+    inputSchema: documentEditContentArgsSchema,
 });
 
 export const mcpToolDefinitions: readonly ToolDefinitionInstance[] =

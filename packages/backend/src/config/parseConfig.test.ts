@@ -67,6 +67,39 @@ describe('Python E2B template configuration', () => {
     });
 });
 
+describe('RESULTS_CACHE_ENABLED', () => {
+    it.each([
+        [undefined, null],
+        ['', null],
+        ['true', true],
+        [' TRUE ', true],
+        ['false', false],
+        ['False', false],
+        ['1', true],
+        ['0', false],
+    ])('parses %j as %s', (value, expected) => {
+        if (value !== undefined) process.env.RESULTS_CACHE_ENABLED = value;
+        expect(parseConfig().results.cacheEnabled).toBe(expected);
+    });
+});
+
+describe('MOBILE_ANDROID_CERT_FINGERPRINTS', () => {
+    const playAppSigning =
+        'EB:2C:4B:A2:0C:21:91:EB:9A:47:DF:1C:09:69:36:80:89:95:93:F5:6A:E5:AF:E8:9F:3D:4B:B0:C1:E2:8C:90';
+
+    it.each([
+        [undefined, [playAppSigning]],
+        ['', []],
+        ['AA:BB, CC:DD', ['AA:BB', 'CC:DD']],
+    ])('parses %j as %j', (value, expected) => {
+        if (value !== undefined)
+            process.env.MOBILE_ANDROID_CERT_FINGERPRINTS = value;
+        expect(
+            parseConfig().mobileAppAssociation.androidCertificateFingerprints,
+        ).toEqual(expected);
+    });
+});
+
 describe('agent result identity check configuration', () => {
     it.each([
         [undefined, true],
@@ -351,62 +384,17 @@ describe('managed agent runtime variable', () => {
 });
 
 describe('query history retention', () => {
-    it('warns when cleanup can expire charts before their Deep Research reports', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        process.env.QUERY_HISTORY_RETENTION_DAYS = '29';
-
-        try {
-            expect(
-                parseConfig().scheduler.queryHistory.cleanup.retentionDays,
-            ).toBe(29);
-            expect(warn).toHaveBeenCalledWith(
-                'WARNING: QUERY_HISTORY_RETENTION_DAYS is below the 30-day Deep Research report retention. Report charts may become unavailable before their reports expire.',
-            );
-        } finally {
-            warn.mockRestore();
-        }
-    });
-
-    it.each([undefined, '30', '32', '60'])(
-        'does not warn for a sufficient retention window: %s',
+    it.each([undefined, '1', '60'])(
+        'reads the retention window: %s',
         (retentionDays) => {
-            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
             if (retentionDays !== undefined) {
                 process.env.QUERY_HISTORY_RETENTION_DAYS = retentionDays;
             }
-
-            try {
-                expect(
-                    parseConfig().scheduler.queryHistory.cleanup.retentionDays,
-                ).toBe(
-                    retentionDays === undefined ? 32 : Number(retentionDays),
-                );
-                expect(warn).not.toHaveBeenCalledWith(
-                    expect.stringContaining('QUERY_HISTORY_RETENTION_DAYS'),
-                );
-            } finally {
-                warn.mockRestore();
-            }
+            expect(
+                parseConfig().scheduler.queryHistory.cleanup.retentionDays,
+            ).toBe(retentionDays === undefined ? 32 : Number(retentionDays));
         },
     );
-
-    it('does not warn when query history cleanup is disabled', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        process.env.QUERY_HISTORY_RETENTION_DAYS = '1';
-        process.env.QUERY_HISTORY_CLEANUP_ENABLED = 'false';
-
-        try {
-            expect(parseConfig().scheduler.queryHistory.cleanup).toMatchObject({
-                enabled: false,
-                retentionDays: 1,
-            });
-            expect(warn).not.toHaveBeenCalledWith(
-                expect.stringContaining('QUERY_HISTORY_RETENTION_DAYS'),
-            );
-        } finally {
-            warn.mockRestore();
-        }
-    });
 });
 
 describe('dashboard tile query concurrency', () => {
@@ -443,6 +431,67 @@ describe('scheduler daily job generation concurrency', () => {
 
         expect(() => parseConfig()).toThrow(ParseError);
     });
+});
+
+describe('scheduler query polling timeout', () => {
+    it('defaults to 5 minutes', () => {
+        expect(parseConfig().scheduler.queryPollingTimeout).toBe(300_000);
+    });
+
+    it('reads the configured timeout', () => {
+        process.env.SCHEDULER_QUERY_POLLING_TIMEOUT = '540000';
+
+        expect(parseConfig().scheduler.queryPollingTimeout).toBe(540_000);
+    });
+
+    it('accepts a timeout that leaves a tenth of the job timeout', () => {
+        process.env.SCHEDULER_JOB_TIMEOUT = '1800000';
+        process.env.SCHEDULER_QUERY_POLLING_TIMEOUT = '1620000';
+
+        expect(parseConfig().scheduler.queryPollingTimeout).toBe(1_620_000);
+    });
+
+    it('keeps the default wait below a short job timeout', () => {
+        process.env.SCHEDULER_JOB_TIMEOUT = '120000';
+
+        expect(parseConfig().scheduler).toMatchObject({
+            jobTimeout: 120_000,
+            queryPollingTimeout: 108_000,
+        });
+    });
+
+    it.each(['0', '-1', 'invalid', '2147483648'])(
+        'rejects an invalid timeout: %s',
+        (value) => {
+            process.env.SCHEDULER_QUERY_POLLING_TIMEOUT = value;
+
+            expect(() => parseConfig()).toThrow(ParseError);
+        },
+    );
+
+    it.each([
+        ['equal to the job timeout', undefined, '600000'],
+        ['without headroom below the job timeout', undefined, '540001'],
+        ['above a short job timeout', '120000', '300000'],
+    ])('rejects a timeout %s', (_case, jobTimeout, queryPollingTimeout) => {
+        if (jobTimeout) process.env.SCHEDULER_JOB_TIMEOUT = jobTimeout;
+        process.env.SCHEDULER_QUERY_POLLING_TIMEOUT = queryPollingTimeout;
+
+        expect(() => parseConfig()).toThrow(ParseError);
+        expect(() => parseConfig()).toThrow(
+            /SCHEDULER_QUERY_POLLING_TIMEOUT.*SCHEDULER_JOB_TIMEOUT/,
+        );
+    });
+
+    it.each(['0', '-1', 'invalid'])(
+        'rejects an invalid job timeout: %s',
+        (value) => {
+            process.env.SCHEDULER_JOB_TIMEOUT = value;
+
+            expect(() => parseConfig()).toThrow(ParseError);
+            expect(() => parseConfig()).toThrow(/SCHEDULER_JOB_TIMEOUT/);
+        },
+    );
 });
 
 describe('usage events storage endpoint', () => {
@@ -681,6 +730,21 @@ describe('mobile push notification config', () => {
 });
 
 describe('license config', () => {
+    it.each([undefined, ''])(
+        'enables EE with an absent or empty key (%s)',
+        (key) => {
+            if (key !== undefined) process.env.LIGHTDASH_LICENSE_KEY = key;
+            process.env.PRE_AGGREGATES_ENABLED = 'true';
+            process.env.PRE_AGGREGATE_RESULTS_S3_BUCKET = 'pre-aggregates';
+            process.env.PRE_AGGREGATE_RESULTS_S3_REGION = 'us-east-1';
+
+            const config = parseConfig();
+            expect(config.license.licenseKey).toBe('self-hosted-enterprise');
+            expect(config.license.licenseCertificate).toBeNull();
+            expect(config.preAggregates.enabled).toBe(true);
+        },
+    );
+
     it('supports an offline license file with a license key', () => {
         process.env.LIGHTDASH_LICENSE_KEY = 'license-key';
         process.env.LIGHTDASH_LICENSE_CERTIFICATE = 'license-certificate';
@@ -691,12 +755,10 @@ describe('license config', () => {
         });
     });
 
-    it('requires a license key with an offline license file', () => {
+    it('enables EE without a key even with a legacy certificate', () => {
         process.env.LIGHTDASH_LICENSE_CERTIFICATE = 'license-certificate';
 
-        expect(() => parseConfig()).toThrow(
-            'LIGHTDASH_LICENSE_KEY is required when LIGHTDASH_LICENSE_CERTIFICATE is set',
-        );
+        expect(parseConfig().license.licenseKey).toBe('self-hosted-enterprise');
     });
 });
 
@@ -2710,19 +2772,6 @@ describe('scheduler migration quiesce', () => {
     });
 });
 
-test('should set groups.enabled only when the environment variable is set', () => {
-    const undefinedConfig = parseConfig();
-    expect(undefinedConfig.groups.enabled).toBeUndefined();
-
-    process.env.GROUPS_ENABLED = 'true';
-    const trueConfig = parseConfig();
-    expect(trueConfig.groups.enabled).toBe(true);
-
-    process.env.GROUPS_ENABLED = 'false';
-    const falseConfig = parseConfig();
-    expect(falseConfig.groups.enabled).toBe(false);
-});
-
 describe('LD_SETUP_START_OF_WEEK', () => {
     beforeEach(() => {
         process.env.LD_SETUP_ADMIN_EMAIL = 'admin@example.com';
@@ -2981,7 +3030,6 @@ describe('getMultiProjectSetupConfig', () => {
 describe('legacy feature-flag env vars (compat repair for trivial-batch)', () => {
     test.each([
         ['USER_IMPERSONATION_ENABLED', 'user-impersonation'],
-        ['GROUPS_ENABLED', 'user-groups-enabled'],
         ['SHOW_EXECUTION_TIME', 'show-execution-time'],
         ['EMBEDDING_ENABLED', 'embedding'],
         ['SCIM_ENABLED', 'scim-token-management'],
@@ -3034,6 +3082,13 @@ describe('feature flag env-var allowlists', () => {
         process.env.DISABLE_DASHBOARD_COMMENTS = 'true';
         const config = parseConfig();
         expect(config.dashboardComments.enabled).toBe(false);
+    });
+
+    test('DISABLE_MERGE_QUERY_AUTHORING=true disables mergeQueryAuthoring', () => {
+        delete process.env.DISABLE_MERGE_QUERY_AUTHORING;
+        expect(parseConfig().mergeQueryAuthoring.enabled).toBe(true);
+        process.env.DISABLE_MERGE_QUERY_AUTHORING = 'true';
+        expect(parseConfig().mergeQueryAuthoring.enabled).toBe(false);
     });
 });
 
@@ -3244,10 +3299,10 @@ describe('usage capture infrastructure', () => {
             expect(parseConfig().usageEvents.enabled).toBe(true);
         },
     );
-    it('does not create capture infrastructure without a license', () => {
+    it('creates configured capture infrastructure without a license', () => {
         delete process.env.LIGHTDASH_LICENSE_KEY;
         delete process.env.LIGHTDASH_LICENSE_CERTIFICATE;
-        expect(parseConfig().usageEvents.enabled).toBe(false);
+        expect(parseConfig().usageEvents.enabled).toBe(true);
     });
 });
 
@@ -3286,29 +3341,6 @@ describe('database slow transaction threshold', () => {
     it('reads a positive threshold in milliseconds', () => {
         process.env.PG_SLOW_TRANSACTION_THRESHOLD_MS = '60000';
         expect(parseConfig().database.slowTransactionThresholdMs).toBe(60000);
-    });
-});
-
-describe('cross-source dbt deadlines', () => {
-    it('uses the default deadlines', () => {
-        expect(parseConfig().dbt).toMatchObject({
-            crossSourceMaxPasses: 3,
-            crossSourcePrepareTimeoutMs: 180000,
-            crossSourceLsTimeoutMs: 300000,
-            crossSourceResolutionTimeoutMs: 1200000,
-        });
-    });
-    it('reads each deadline from the environment', () => {
-        process.env.DBT_CROSS_SOURCE_MAX_PASSES = '5';
-        process.env.DBT_SOURCE_PREPARE_TIMEOUT_MS = '120';
-        process.env.DBT_SOURCE_LS_TIMEOUT_MS = '240';
-        process.env.DBT_CROSS_SOURCE_RESOLUTION_TIMEOUT_MS = '480';
-        expect(parseConfig().dbt).toMatchObject({
-            crossSourceMaxPasses: 5,
-            crossSourcePrepareTimeoutMs: 120,
-            crossSourceLsTimeoutMs: 240,
-            crossSourceResolutionTimeoutMs: 480,
-        });
     });
 });
 

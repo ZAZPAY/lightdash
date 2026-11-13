@@ -1,5 +1,8 @@
 import {
+    assertUnreachable,
+    friendlyName,
     QuerySourceType,
+    type MergeSourceQuery,
     type ToolComposerQueriesArgs,
     type ToolComposerQueryNode,
     WarehouseTypes,
@@ -15,6 +18,7 @@ import {
 } from '@mantine/core';
 import {
     IconApi,
+    IconArrowsJoin,
     IconBrandPython,
     IconChevronRight,
     IconDatabase,
@@ -33,12 +37,16 @@ import {
 import { getLiveSource } from '../../../../../../../features/externalConnections/liveSources/liveSourceCatalog';
 import { LiveSourceIcon } from '../../../../../../../features/externalConnections/liveSources/LiveSourceIcon';
 import { useLiveSourceConnection } from '../../../../../../../features/externalConnections/liveSources/useLiveSourceConnection';
+import { useUiStrings } from '../../../../../../providers/Embed/useUiStrings';
 import { useCanViewAiAgentSql } from '../../../../hooks/useCanViewAiAgentSql';
 import {
     useComposerNodeStatusLabel,
     type ComposerQueryNodeStatus,
 } from '../../composerNodeStatus';
-import { NodeStatusIndicator } from '../../ComposerNodeStatusIndicator';
+import { summarizeMergeNode } from '../../composerPipeline/mergeNodeSummary';
+import { RepeatsValuesBadge } from '../../composerPipeline/MergeStepParts';
+import { useMergeNodeCopy } from '../../composerPipeline/useMergeNodeCopy';
+import shimmerStyles from '../../shimmer.module.css';
 import {
     SqlApprovalActions,
     type SqlApprovalTarget,
@@ -56,16 +64,18 @@ type ComposerQueriesToolCallDescriptionProps = {
     approval?: SqlApprovalTarget;
 };
 
-const isActiveStatus = (nodeStatus: ComposerQueryNodeStatus | undefined) =>
-    nodeStatus?.status === 'running' ||
-    nodeStatus?.status === 'awaiting_approval';
-
 const referenceAliases = (items: string[] | Record<string, string>) =>
     Array.isArray(items) ? items : Object.keys(items);
 
 // Reads of nodes from earlier versions have no title in this submission
 const referenceTargets = (items: string[] | Record<string, string>) =>
     Array.isArray(items) ? items : Object.values(items);
+
+// Streaming args can land before their inputs, so an empty list says nothing.
+const readsDetail = (inputs: string[]) => {
+    const named = inputs.filter((input) => input.length > 0);
+    return named.length > 0 ? `Reads ${named.join(', ')}` : '';
+};
 
 // One look for every query on a live data source, through its explore or an
 // api node from an older thread.
@@ -84,20 +94,20 @@ const getNodePresentation = (
             return {
                 icon: IconSitemap,
                 badge: 'Semantic layer',
-                detail: `${node.exploreName} · ${node.dimensions.length} dimension${node.dimensions.length === 1 ? '' : 's'} · ${node.metrics.length} metric${node.metrics.length === 1 ? '' : 's'}`,
+                detail: '',
             } as const;
         case QuerySourceType.SQL:
             return {
                 icon: IconDatabase,
                 badge: 'Warehouse SQL',
-                detail: 'Project warehouse',
+                detail: '',
             } as const;
         case QuerySourceType.EXTERNAL: {
             const tables = referenceAliases(node.tables);
             return {
                 icon: IconFileSpreadsheet,
                 badge: 'External data',
-                detail: `Reads ${tables.join(', ')}`,
+                detail: readsDetail(tables),
             } as const;
         }
         case QuerySourceType.DUCKDB: {
@@ -107,7 +117,7 @@ const getNodePresentation = (
             return {
                 icon: IconGitMerge,
                 badge: 'DuckDB compose',
-                detail: `Reads ${references.join(', ')}`,
+                detail: readsDetail(references),
             } as const;
         }
         case QuerySourceType.PYTHON: {
@@ -117,35 +127,178 @@ const getNodePresentation = (
             return {
                 icon: IconBrandPython,
                 badge: 'Python',
-                detail: `Reads ${references.join(', ')}`,
+                detail: readsDetail(references),
             } as const;
         }
         case QuerySourceType.API:
             return LIVE_SOURCE_PRESENTATION;
+        case QuerySourceType.MERGE:
+            // Its body names every merged step
+            return {
+                icon: IconArrowsJoin,
+                badge: 'Merge',
+                detail: '',
+            } as const;
+        default:
+            return assertUnreachable(node, 'Unknown composer node');
     }
 };
 
 /** A live data source explore reads by its label, e.g. "Events". */
-const NodeExploreName: FC<{ exploreName: string }> = ({ exploreName }) => {
+const NodeExploreFields: FC<{ exploreName: string; fieldIds: string[] }> = ({
+    exploreName,
+    fieldIds,
+}) => {
     const liveSource = useLiveSourceExplore(exploreName);
+    const prefix = `${exploreName}_`;
     return (
-        <Text size="xs" c="dimmed">
-            {liveSource?.label ?? exploreName}
-        </Text>
+        <Group gap={4} wrap="wrap">
+            <Text size="xs" c="dimmed">
+                {liveSource?.label ?? exploreName}
+            </Text>
+            {fieldIds.map((fieldId) => (
+                <ToolCallChip key={fieldId} ff="monospace">
+                    {fieldId.startsWith(prefix)
+                        ? fieldId.slice(prefix.length)
+                        : fieldId}
+                </ToolCallChip>
+            ))}
+        </Group>
     );
 };
 
-const NodeBody: FC<{ node: ToolComposerQueryNode }> = ({ node }) => {
+type ToolComposerMergeNode = Extract<
+    ToolComposerQueryNode,
+    { sourceType: QuerySourceType.MERGE }
+>;
+
+// Streaming args can be partial: keep only the parts that have arrived.
+const toMergeSourceQuery = (
+    node: ToolComposerMergeNode,
+): MergeSourceQuery | null => {
+    if (!Array.isArray(node.sources) || !node.joinType) return null;
+    return {
+        sourceType: QuerySourceType.MERGE,
+        sources: node.sources
+            .filter((source) => typeof source?.nodeId === 'string')
+            .map(({ nodeId, repeatValues }) => ({
+                nodeId,
+                repeatValues: !!repeatValues,
+            })),
+        joinKey: (node.joinKey ?? [])
+            .filter((part) => Array.isArray(part?.fields))
+            .map(({ name, fields }) => ({
+                name,
+                fieldIdBySourceId: Object.fromEntries(
+                    fields
+                        .filter((field) => field?.nodeId && field.fieldId)
+                        .map((field) => [field.nodeId, field.fieldId]),
+                ),
+            })),
+        joinType: node.joinType,
+        tableCalculations: (node.tableCalculations ?? [])
+            .filter((calc) => !!calc?.name)
+            .map((calc) => ({
+                name: calc.name,
+                displayName: calc.displayName ?? calc.name,
+                sql: '',
+                formula: calc.formula,
+            })),
+    };
+};
+
+const MergeNodeBody: FC<{
+    node: ToolComposerMergeNode;
+    queries: ToolComposerQueryNode[];
+}> = ({ node, queries }) => {
+    const getUiString = useUiStrings();
+    const { joinTypeLabel, joinTypeHelp, repeatsHelp } = useMergeNodeCopy();
+    const summary = useMemo(() => {
+        const query = toMergeSourceQuery(node);
+        if (!query) return null;
+        const byId = new Map(queries.map((query) => [query.nodeId, query]));
+        const sourceInfo = Object.fromEntries(
+            query.sources.map(({ nodeId }) => {
+                const source = byId.get(nodeId);
+                return [
+                    nodeId,
+                    {
+                        title: source?.title ?? friendlyName(nodeId),
+                        exploreName:
+                            source?.sourceType ===
+                            QuerySourceType.SEMANTIC_LAYER
+                                ? source.exploreName
+                                : null,
+                    },
+                ];
+            }),
+        );
+        return summarizeMergeNode(query, sourceInfo, (nodeId, fieldId) => {
+            const exploreName = sourceInfo[nodeId]?.exploreName;
+            return friendlyName(
+                exploreName && fieldId.startsWith(`${exploreName}_`)
+                    ? fieldId.slice(exploreName.length + 1)
+                    : fieldId,
+            );
+        });
+    }, [node, queries]);
+    if (!summary) return null;
+    return (
+        <Stack gap={4}>
+            {summary.sources.map((source) => (
+                <Group key={source.nodeId} gap={4} wrap="wrap">
+                    <Text size="xs">{source.title}</Text>
+                    {source.exploreName && (
+                        <Text size="xs" c="dimmed">
+                            {source.exploreName}
+                        </Text>
+                    )}
+                    {source.keyFields.length > 0 && (
+                        <Text size="xs" c="dimmed">
+                            {getUiString('aiAgent.composer.mergeNode.joinedOn')}
+                        </Text>
+                    )}
+                    {source.keyFields.map(({ fieldId, label }) => (
+                        <ToolCallChip key={fieldId}>{label}</ToolCallChip>
+                    ))}
+                    {source.repeatValues && (
+                        <RepeatsValuesBadge
+                            help={repeatsHelp(summary, source.nodeId)}
+                        />
+                    )}
+                </Group>
+            ))}
+            <Text size="xs" c="dimmed">
+                <Text span size="xs" fw={500} className={styles.mergeValue}>
+                    {joinTypeLabel(summary)}
+                </Text>{' '}
+                {joinTypeHelp(summary)}
+            </Text>
+            {summary.calculations.length > 0 && (
+                <Group gap={4} wrap="wrap">
+                    {summary.calculations.map((calc) => (
+                        <ToolCallChip key={calc.name}>
+                            {calc.displayName}
+                        </ToolCallChip>
+                    ))}
+                </Group>
+            )}
+        </Stack>
+    );
+};
+
+const NodeBody: FC<{
+    node: ToolComposerQueryNode;
+    queries: ToolComposerQueryNode[];
+}> = ({ node, queries }) => {
     const canViewSql = useCanViewAiAgentSql();
 
     if (node.sourceType === QuerySourceType.SEMANTIC_LAYER) {
         return (
-            <Group gap={4} wrap="wrap">
-                <NodeExploreName exploreName={node.exploreName} />
-                {[...node.dimensions, ...node.metrics].map((fieldId) => (
-                    <ToolCallChip key={fieldId}>{fieldId}</ToolCallChip>
-                ))}
-            </Group>
+            <NodeExploreFields
+                exploreName={node.exploreName}
+                fieldIds={[...node.dimensions, ...node.metrics]}
+            />
         );
     }
     if (node.sourceType === QuerySourceType.PYTHON) {
@@ -178,6 +331,9 @@ const NodeBody: FC<{ node: ToolComposerQueryNode }> = ({ node }) => {
             </Box>
         );
     }
+    if (node.sourceType === QuerySourceType.MERGE) {
+        return <MergeNodeBody node={node} queries={queries} />;
+    }
     if (!canViewSql || !node.sql) return null;
     return (
         <ToolCallSqlBlock
@@ -194,10 +350,11 @@ const NodeBody: FC<{ node: ToolComposerQueryNode }> = ({ node }) => {
 
 const ComposerQueryNode: FC<{
     node: ToolComposerQueryNode;
+    queries: ToolComposerQueryNode[];
     titlesByNodeId: Record<string, string>;
     nodeStatus?: ComposerQueryNodeStatus;
     approval?: SqlApprovalTarget;
-}> = ({ node, titlesByNodeId, nodeStatus, approval }) => {
+}> = ({ node, queries, titlesByNodeId, nodeStatus, approval }) => {
     const exploreConnectionUuid = useApiSourceExploreConnectionUuid(
         node.sourceType === QuerySourceType.SEMANTIC_LAYER
             ? node.exploreName
@@ -211,7 +368,6 @@ const ComposerQueryNode: FC<{
     const presentation = liveSourceConnectionUuid
         ? LIVE_SOURCE_PRESENTATION
         : getNodePresentation(node, titlesByNodeId);
-    const active = isActiveStatus(nodeStatus);
     // Only nodes awaiting approval open by default; a user toggle wins until
     // the status changes.
     const defaultOpen = nodeStatus?.status === 'awaiting_approval';
@@ -225,9 +381,9 @@ const ComposerQueryNode: FC<{
         setUserToggle({ status: nodeStatus?.status, open: value });
     const open = userOpen ?? defaultOpen;
     const statusLabel = useComposerNodeStatusLabel();
-    // Trailing status word on the row; success reads from the check mark alone.
+    // Queued, running and done read from the title; only approval gets words.
     const statusText =
-        nodeStatus && nodeStatus.status !== 'success'
+        nodeStatus?.status === 'awaiting_approval'
             ? statusLabel(nodeStatus.status).toLowerCase()
             : null;
     const showApproval =
@@ -249,11 +405,8 @@ const ComposerQueryNode: FC<{
                     gap={8}
                     align="center"
                     wrap="nowrap"
-                    className={rowStyles.head}
+                    className={styles.head}
                 >
-                    {nodeStatus ? (
-                        <NodeStatusIndicator status={nodeStatus.status} />
-                    ) : null}
                     {liveSourceConnectionUuid ? (
                         <Tooltip
                             label={
@@ -268,10 +421,12 @@ const ComposerQueryNode: FC<{
                                 display="inline-flex"
                                 role="img"
                                 aria-label={
-                                    liveSource
-                                        ? getLiveSource(liveSource.connector)
-                                              .label
-                                        : presentation.badge
+                                    nodeStatus
+                                        ? statusLabel(nodeStatus.status)
+                                        : liveSource
+                                          ? getLiveSource(liveSource.connector)
+                                                .label
+                                          : presentation.badge
                                 }
                             >
                                 <LiveSourceIcon
@@ -285,21 +440,30 @@ const ComposerQueryNode: FC<{
                             icon={presentation.icon}
                             size={13}
                             stroke={1.6}
-                            className={rowStyles.icon}
-                            data-status={active ? 'running' : undefined}
+                            className={styles.icon}
+                            data-status={nodeStatus?.status}
+                            role={nodeStatus ? 'img' : undefined}
+                            aria-label={
+                                nodeStatus
+                                    ? statusLabel(nodeStatus.status)
+                                    : undefined
+                            }
                         />
                     )}
-                    <Text size="xs" className={rowStyles.label} truncate>
-                        {node.title ?? node.nodeId}
-                    </Text>
-                    <ToolCallChip>{presentation.badge}</ToolCallChip>
                     <Text
                         size="xs"
-                        c="dimmed"
                         truncate
-                        className={styles.detail}
+                        className={clsx(
+                            styles.title,
+                            nodeStatus?.status === 'running' &&
+                                shimmerStyles.shimmer,
+                        )}
+                        data-status={nodeStatus?.status}
                     >
-                        {liveSource?.name ?? presentation.detail}
+                        {node.title ?? node.nodeId}
+                    </Text>
+                    <Text size="xs" truncate className={styles.suffix}>
+                        {liveSource?.name ?? presentation.badge}
                     </Text>
                     {statusText ? (
                         <Text
@@ -323,7 +487,12 @@ const ComposerQueryNode: FC<{
             </UnstyledButton>
             <Collapse expanded={open} transitionDuration={200}>
                 <Stack gap={6} className={styles.body}>
-                    <NodeBody node={node} />
+                    {presentation.detail ? (
+                        <Text size="xs" c="dimmed">
+                            {presentation.detail}
+                        </Text>
+                    ) : null}
+                    <NodeBody node={node} queries={queries} />
                     {showApproval ? (
                         <SqlApprovalActions {...approval} review={null} />
                     ) : null}
@@ -354,6 +523,7 @@ export const ComposerQueriesToolCallDescription: FC<
                 <ComposerQueryNode
                     key={node.nodeId}
                     node={node}
+                    queries={queries}
                     titlesByNodeId={titlesByNodeId}
                     nodeStatus={nodeStatuses?.[node.nodeId]}
                     approval={

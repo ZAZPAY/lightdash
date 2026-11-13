@@ -1,111 +1,74 @@
-import {
-    assertUnreachable,
-    createDashboardFilterRuleFromField,
-    getItemId,
-    type DashboardFilterableField,
-} from '@lightdash/common';
-import { useState, type FC } from 'react';
-import { action } from 'storybook/actions';
-import { AddControlMenu } from './AddControlMenu';
-import {
-    availableTileFilters,
-    createParameterControl,
-    fields,
-    ON_BAR_FIELD_IDS,
-    ON_BAR_PARAMETER_KEYS,
-    parameterList,
-    tabs,
-    tiles,
-} from './fixtures';
-import { type ParameterOption } from './parameterOptions';
-import {
-    StatefulFilterPopover,
-    StatefulParameterPopover,
-} from './StatefulPopovers';
+import { Box, Paper, SimpleGrid, Text } from '@mantine/core';
+import { type FC } from 'react';
+import { ControlsBar } from '../../features/dashboardControls/ControlsBar';
+import { ControlsEditorProvider } from '../../features/dashboardControls/ControlsEditorProvider';
+import { DateZoomTileOverlays } from '../../features/dashboardControls/DateZoomTileOverlay';
+import { DateZoomTilesBar } from '../../features/dashboardControls/DateZoomTilesBar';
+import { FilterBarPopoversProvider } from '../../features/dashboardFilters/FilterRequirements/FilterBarPopoversProvider';
+import { tabs, tiles } from './fixtures';
 
-// The tiles a new filter reaches: those that can filter by its field, as the
-// picker counts them
-const getFieldTileCount = (field: DashboardFilterableField) =>
-    Object.values(availableTileFilters).filter((tileFields) =>
-        tileFields.some(
-            (candidate) => getItemId(candidate) === getItemId(field),
-        ),
-    ).length;
+const noop = () => {};
 
-type Step =
-    | { step: 'menu' }
-    | { step: 'field'; field: DashboardFilterableField }
-    | { step: 'parameter'; parameter: ParameterOption };
-
-/** "Add", then a field's filter or a parameter's control; Cancel goes back to
- * the Add menu, its choice open again. */
-export const AddControlFlow: FC = () => {
-    const [flow, setFlow] = useState<Step>({ step: 'menu' });
-    const backToMenu = () => setFlow({ step: 'menu' });
-    switch (flow.step) {
-        case 'menu':
-            return (
-                <AddControlMenu
-                    fields={Object.values(fields)}
-                    tabs={tabs}
-                    tiles={tiles}
-                    availableTileFilters={availableTileFilters}
-                    onBarFieldIds={ON_BAR_FIELD_IDS}
-                    parameters={parameterList}
-                    onBarParameterKeys={ON_BAR_PARAMETER_KEYS}
-                    isViewer={false}
-                    onPickField={(field) => setFlow({ step: 'field', field })}
-                    onPickParameter={(parameter) =>
-                        setFlow({ step: 'parameter', parameter })
-                    }
-                />
-            );
-        case 'field':
-            return (
-                <StatefulFilterPopover
-                    initialRule={createDashboardFilterRuleFromField({
-                        field: flow.field,
-                        availableTileFilters,
-                        isTemporary: false,
-                    })}
-                    field={flow.field}
-                    isViewer={false}
-                    isOwnFilter={false}
-                    isCreatingNew={false}
-                    canManageExplore
-                    appliedTileCount={getFieldTileCount(flow.field)}
-                    isAsking={false}
-                    initialView="value"
-                    footerLayout="row"
-                    onApply={action('onApply')}
-                    onCancel={backToMenu}
-                    onChooseTiles={action('onChooseTiles')}
-                    onEditRules={action('onEditRules')}
-                    onChangeOthers={action('onChangeOthers')}
-                    onDraftChange={action('onDraftChange')}
-                />
-            );
-        case 'parameter':
-            return (
-                <StatefulParameterPopover
-                    initialControl={createParameterControl(
-                        [flow.parameter],
-                        null,
-                        // A second control on a parameter starts with no tiles
-                        ON_BAR_PARAMETER_KEYS.includes(flow.parameter.key)
-                            ? []
-                            : flow.parameter.tileUuids,
-                    )}
-                    isViewer={false}
-                    isMissingRequired={false}
-                    initialView="value"
+/** The dashboard bar with deterministic fields, tiles and saved controls. */
+export const AddControlFlow: FC<{
+    isEditMode?: boolean;
+    /** The first tab's tiles under the bar, for choosing a date zoom's tiles. */
+    withTiles?: boolean;
+}> = ({ isEditMode = true, withTiles = false }) => {
+    return (
+        <ControlsEditorProvider isEditMode={isEditMode}>
+            <FilterBarPopoversProvider>
+                <ControlsBar
+                    isEditMode={isEditMode}
+                    activeTabUuid={tabs[0]?.uuid}
+                    hasTilesThatSupportFilters
+                    hasDashboardTiles
+                    parameters={{}}
                     shadowedReservedNames={[]}
-                    onApply={action('onApply')}
-                    onCancel={backToMenu}
-                    onChooseTiles={action('onChooseTiles')}
+                    parameterValues={{}}
+                    onParameterChange={noop}
+                    onParameterClearAll={noop}
+                    isParameterLoading={false}
+                    missingRequiredParameters={[]}
+                    pinnedParameters={[]}
+                    onParameterPin={noop}
+                    parameterOrder={[]}
+                    onParameterReorder={noop}
+                    isDateZoomDisabled={false}
+                    onCollapse={noop}
                 />
-            );
-        default:
-            return assertUnreachable(flow, 'Unknown add step');
-    }
+            </FilterBarPopoversProvider>
+            <Box
+                aria-hidden={!withTiles}
+                className="react-grid-layout"
+                mih={120}
+            >
+                {withTiles && (
+                    <SimpleGrid cols={3} mt="md">
+                        {tiles
+                            .filter(({ tabUuid }) => tabUuid === tabs[0]?.uuid)
+                            .map(({ uuid }) => (
+                                <Paper
+                                    key={uuid}
+                                    data-tile-uuid={uuid}
+                                    h={160}
+                                    p="sm"
+                                    pos="relative"
+                                >
+                                    <Text fz="xs" c="dimmed">
+                                        {uuid}
+                                    </Text>
+                                </Paper>
+                            ))}
+                    </SimpleGrid>
+                )}
+            </Box>
+            {withTiles && (
+                <>
+                    <DateZoomTileOverlays />
+                    <DateZoomTilesBar />
+                </>
+            )}
+        </ControlsEditorProvider>
+    );
 };

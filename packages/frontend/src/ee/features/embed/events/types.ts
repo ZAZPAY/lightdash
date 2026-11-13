@@ -1,26 +1,46 @@
+import {
+    type CreateSavedChartVersion,
+    type DashboardVersionedFields,
+    type DownloadAsyncQueryResultsRequestParams,
+    type ExportContentRequest,
+    type ParametersValuesMap,
+} from '@lightdash/common';
+
 /**
  * Enum of all supported Lightdash embed event types
  */
 export enum LightdashEventType {
     LocationChanged = 'locationChanged',
     FilterChanged = 'filterChanged',
+    ParameterChanged = 'parameterChanged',
     TabChanged = 'tabChanged',
     Error = 'error',
     AllTilesLoaded = 'allTilesLoaded',
     ChartSaved = 'chartSaved',
     DashboardSaved = 'dashboardSaved',
     Notification = 'notification',
+    ContentHeightChanged = 'contentHeightChanged',
+    ContentStateChanged = 'contentStateChanged',
 }
 
 /**
  * Payload for FilterChanged events.
- * Sanitized to exclude actual filter values and sensitive data.
+ * @deprecated Use ContentStateChanged, which carries the filter values.
  */
 export type FilterChangedPayload = {
     /** Whether any filters are currently active */
     hasFilters: boolean;
     /** Total number of active filters */
     filterCount: number;
+};
+
+/**
+ * Payload for ParameterChanged events.
+ * Parameter values are the viewer's own inputs, not query results, so they are sent as-is.
+ */
+export type ParameterChangedPayload = {
+    /** The values the dashboard now runs with, by parameter name */
+    parameters: ParametersValuesMap;
 };
 
 /**
@@ -93,15 +113,83 @@ export type NotificationPayload = {
     message: string | null;
 };
 
+/**
+ * Payload for ContentHeightChanged events.
+ * Rendered content height in CSS pixels, so the host can size the iframe.
+ */
+export type ContentHeightChangedPayload = {
+    height: number;
+};
+
+/** What an embedded dashboard currently runs with */
+export type DashboardContentState = {
+    type: 'dashboard';
+    dashboardUuid: string;
+    activeTabUuid: string | null;
+    // The dashboard as it is now: unsaved edits, added filters and current parameters
+    dashboard: DashboardVersionedFields;
+    // Ready for the export request, add format; omitted keys must stay omitted
+    exportRequest: Pick<
+        ExportContentRequest,
+        | 'dashboardFilters'
+        | 'parameters'
+        | 'tileParameters'
+        | 'dateZoomGranularity'
+    >;
+};
+
+/** Ready for the schedule-download request, add type; omitted keys must stay omitted */
+export type ChartExportRequest = Pick<
+    DownloadAsyncQueryResultsRequestParams,
+    | 'columnOrder'
+    | 'customLabels'
+    | 'hiddenFields'
+    | 'showTableNames'
+    | 'pivotConfig'
+    | 'exportPivotedData'
+    | 'conditionalFormattings'
+    | 'showColumnTotals'
+> & {
+    // The last query that ran, for the request path; null before the first run
+    queryUuid: string | null;
+};
+
+/** A saved chart open in the explorer, unsaved edits included */
+export type ChartContentState = {
+    type: 'chart';
+    chartUuid: string;
+    chart: CreateSavedChartVersion;
+    exportRequest: ChartExportRequest;
+};
+
+/** An explore query that isn't a saved chart */
+export type ExploreContentState = {
+    type: 'explore';
+    chart: CreateSavedChartVersion;
+    exportRequest: ChartExportRequest;
+};
+
+/**
+ * Payload for ContentStateChanged events.
+ * The state the user sees, emitted once it settles and after every change.
+ */
+export type ContentStateChangedPayload =
+    | DashboardContentState
+    | ChartContentState
+    | ExploreContentState;
+
 export type LightdashEventPayload =
     | FilterChangedPayload
+    | ParameterChangedPayload
     | TabChangedPayload
     | ErrorPayload
     | AllTilesLoadedPayload
     | LocationChangedPayload
     | ChartSavedPayload
     | DashboardSavedPayload
-    | NotificationPayload;
+    | NotificationPayload
+    | ContentHeightChangedPayload
+    | ContentStateChangedPayload;
 
 /**
  * Generic event structure for all Lightdash events
@@ -118,12 +206,15 @@ export type LightdashEmbedEvent<T extends LightdashEventPayload | undefined> = {
 type LightdashEventPayloads = {
     [LightdashEventType.LocationChanged]: LocationChangedPayload;
     [LightdashEventType.FilterChanged]: FilterChangedPayload;
+    [LightdashEventType.ParameterChanged]: ParameterChangedPayload;
     [LightdashEventType.TabChanged]: TabChangedPayload;
     [LightdashEventType.Error]: ErrorPayload;
     [LightdashEventType.AllTilesLoaded]: AllTilesLoadedPayload;
     [LightdashEventType.ChartSaved]: ChartSavedPayload;
     [LightdashEventType.DashboardSaved]: DashboardSavedPayload;
     [LightdashEventType.Notification]: NotificationPayload;
+    [LightdashEventType.ContentHeightChanged]: ContentHeightChangedPayload;
+    [LightdashEventType.ContentStateChanged]: ContentStateChangedPayload;
 };
 
 export type LightdashEventPayloadFor<K extends LightdashEventType> =

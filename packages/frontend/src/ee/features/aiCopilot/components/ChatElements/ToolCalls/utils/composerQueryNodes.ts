@@ -22,3 +22,14 @@ export const getComposerQueryNodes = (
 
 export const isWarehouseSqlNode = (node: ToolComposerQueryNode) =>
     node.sourceType === QuerySourceType.SQL;
+
+/** Node ids a node reads: DuckDB and Python references, merge sources. */
+export const getComposerNodeReads = (node: ToolComposerQueryNode): string[] => {
+    if (node.sourceType === QuerySourceType.MERGE) {
+        return node.sources.map(({ nodeId }) => nodeId);
+    }
+    if (!('references' in node) || !node.references) return [];
+    return Array.isArray(node.references)
+        ? node.references
+        : Object.values(node.references);
+};

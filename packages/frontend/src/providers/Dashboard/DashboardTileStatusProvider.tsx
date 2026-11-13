@@ -1,5 +1,6 @@
 import {
     isDashboardChartTileType,
+    isDashboardComposerChartTile,
     isDashboardDataAppTileType,
     isDashboardSqlChartTile,
     isTileInPagedExport,
@@ -40,6 +41,13 @@ import {
     type TilePreAggregateStatus,
 } from './types';
 import useDashboardContext from './useDashboardContext';
+
+// Tiles that report ready or errored; screenshots wait for each of them.
+const isScreenshotAwaitedTile = (tile: Dashboard['tiles'][number]) =>
+    isDashboardChartTileType(tile) ||
+    isDashboardSqlChartTile(tile) ||
+    isDashboardDataAppTileType(tile) ||
+    isDashboardComposerChartTile(tile);
 
 export type DashboardTileStatusProviderProps = {
     dashboardTiles: Dashboard['tiles'] | undefined;
@@ -237,12 +245,7 @@ const DashboardTileStatusProvider: React.FC<
                     (t): t is string => t !== null,
                 );
                 return dashboardTiles
-                    .filter(
-                        (tile) =>
-                            isDashboardChartTileType(tile) ||
-                            isDashboardSqlChartTile(tile) ||
-                            isDashboardDataAppTileType(tile),
-                    )
+                    .filter(isScreenshotAwaitedTile)
                     .filter((tile) =>
                         isTileInPagedExport(tile, resolvedTabUuids),
                     )
@@ -251,12 +254,7 @@ const DashboardTileStatusProvider: React.FC<
             // Stacked multi-tab image: mirror MinimalDashboard, which renders
             // orphans for any selection, with or without the null sentinel.
             return dashboardTiles
-                .filter(
-                    (tile) =>
-                        isDashboardChartTileType(tile) ||
-                        isDashboardSqlChartTile(tile) ||
-                        isDashboardDataAppTileType(tile),
-                )
+                .filter(isScreenshotAwaitedTile)
                 .filter((tile) =>
                     isTileInSelectedTabs(tile, schedulerTabsSelected),
                 )
@@ -266,12 +264,7 @@ const DashboardTileStatusProvider: React.FC<
         if (dashboardTabs && dashboardTabs.length > 0 && !activeTab) return [];
 
         return dashboardTiles
-            .filter(
-                (tile) =>
-                    isDashboardChartTileType(tile) ||
-                    isDashboardSqlChartTile(tile) ||
-                    isDashboardDataAppTileType(tile),
-            )
+            .filter(isScreenshotAwaitedTile)
             .filter(isTileOnActiveTab)
             .map((tile) => tile.uuid);
     }, [
@@ -326,11 +319,9 @@ const DashboardTileStatusProvider: React.FC<
         [dispatch],
     );
 
-    // Clears the cache time and loaded tiles, sets invalidateCache (causes
-    // results refetch) and bumps refreshCounter, which drives the iframe reload
-    // for data-app tiles (charts re-fetch via React Query invalidation, which
-    // happens separately in the refresh button). Bumping every call covers
-    // repeat refreshes — unlike invalidateCache, which is sticky once true.
+    // Clears the cache time and loaded tiles, sets invalidateCache and bumps
+    // refreshCounter, which is in every tile's query key (and reloads data-app
+    // iframes), so each refresh refetches even once invalidateCache is true.
     const clearCacheAndFetch = useCallback(() => {
         dispatch(dashboardTileStatusActions.refresh());
     }, [dispatch]);

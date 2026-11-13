@@ -279,9 +279,9 @@ in `legacy` mode. Saving with limits on activates `managed` mode; resetting
 restores `legacy` and clears the organization capability list. Disabling the flag preserves the
 saved policy and makes the permission service return `off` without new checks.
 
-Managed policy resolution unions system-role matrix grants with custom-role
-capability scopes, then intersects them with `allowedCapabilities` when it is
-not null. Null preserves existing grants until the first save. New policy
+Managed policy resolution gives built-in roles every capability, adds
+custom-role capability scopes, then intersects the result with
+`allowedCapabilities` when it is not null. Null preserves existing grants until the first save. New policy
 defaults contain all eleven capabilities. An empty saved list refuses agent
 turns on every covered surface. Custom roles keep their own scopes. MCP owns
 Agents over MCP and Allow content changes via MCP; neither setting limits
@@ -324,12 +324,11 @@ reads as `[]` and admits nobody. It applies with capability limits off and on,
 on MCP tools and resource reads, in-app and Slack agents, OAuth REST, and query
 sources. Slack requires a verified sender when the restriction is active.
 
-A valid deployment licence and the organization-level `UserGroupsEnabled` flag
-allow new group restrictions. Saved restrictions still apply when groups later
+A valid deployment licence allows new group restrictions. Saved restrictions still apply when groups later
 become unavailable. Clearing a restriction is always allowed. Personal-access-token
 and service-account calls keep their existing exemptions. With `agent-identity`
 off, group admission adds no checks or reads. A PUT can set
-`mode: 'legacy'` to save group admission and preserve the dormant role matrix.
+`mode: 'legacy'` to save group admission.
 Reset keeps groups and clears the capability list. Old people and project lists
 are ignored and omitted from GET, PUT and reset. An old browser save succeeds
 and drops those choices. The page uses the final policy API for Same as the
@@ -448,3 +447,24 @@ An existing extra cannot change its type with either flag value; add a new
 connection instead. It does not remove
 saved connections or change query execution. Mixed-type extras keep their own
 user-credential requirement; same-type extras still inherit the original's.
+
+### Previews inherit across warehouses
+
+`preview-inherits-across-warehouses` is off by default; organisation scope. With
+it on, a CLI preview on a different Snowflake warehouse than its parent inherits
+the parent's connection settings. It applies when a preview is created or its
+credentials are refreshed from the CLI; saved previews are not changed.
+
+### Composer charts
+
+`composer-charts` is off by default; organisation scope. It gates composer
+charts shown as dashboard tiles.
+
+Rollout rule: do not enable it for an organisation that embeds dashboards with
+`@lightdash/sdk` until its apps run version **TBD** or later, the first SDK
+release containing PR #32548. Replace TBD with that version once it is
+published. Older SDKs throw on the unknown `composer_chart` tile type, and the
+whole embedded dashboard shows the error fallback. Turning the flag off later
+does not hide tiles already added. Iframe embeds and the web app are not
+affected. Check an organisation's SDK versions in request logs before enabling:
+`sdkVersion`, or `clientVersion` for SDKs older than 0.2617.0.

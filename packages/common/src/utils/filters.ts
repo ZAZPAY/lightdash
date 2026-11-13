@@ -540,6 +540,7 @@ export const isTileFilterable = (tile: DashboardTile) =>
         DashboardTileTypes.MARKDOWN,
         DashboardTileTypes.LOOM,
         DashboardTileTypes.DATA_APP,
+        DashboardTileTypes.COMPOSER_CHART,
     ].includes(tile.type);
 
 const isChartTile = (tile: Pick<DashboardTile, 'type'>): boolean =>
@@ -1305,7 +1306,7 @@ export const addFiltersToMetricQuery = (
  * unmatched override on the same field (an override authored against a rule
  * the chart has since recreated). Mirrors getDashboardDimensionOverrideMatches.
  */
-const getChartFilterRuleOverrideMatches = (
+export const getChartFilterRuleOverrideMatches = (
     savedRules: FilterRule[],
     overrides: FilterRule[],
 ): {

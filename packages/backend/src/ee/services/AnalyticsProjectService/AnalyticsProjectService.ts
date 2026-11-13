@@ -1,6 +1,9 @@
+import { subject } from '@casl/ability';
 import {
     AnalyticsHistoryBackfillStatus,
     AnalyticsProjectStatus,
+    AnalyticsProjectView,
+    assertIsAccountWithOrg,
     ConflictError,
     ContentType,
     EnsureAnalyticsProjectResult,
@@ -9,14 +12,18 @@ import {
     getLtreePathFromContentAsCodePath,
     isUserWithOrg,
     NotFoundError,
+    RegisteredAccount,
     SessionUser,
 } from '@lightdash/common';
 import { memoize } from 'es-toolkit/compat';
 import { UsageHistoryBackfill } from '../../../analytics/eventStream/UsageHistoryBackfill';
+import { type LightdashAnalytics } from '../../../analytics/LightdashAnalytics';
 import {
     analyticsContentAsCode,
     analyticsDefaultSpace,
 } from '../../../analytics/systemExplores/sampleContent';
+import { trackSafely } from '../../../analytics/trackSafely';
+import { toSessionUser } from '../../../auth/account';
 import type { LightdashConfig } from '../../../config/parseConfig';
 import {
     ANALYTICS_BUNDLE_SNAPSHOT_TYPE,
@@ -24,7 +31,6 @@ import {
 } from '../../../models/ContentAsCodeSnapshotModel';
 import { type ContentVerificationModel } from '../../../models/ContentVerificationModel';
 import { type DashboardModel } from '../../../models/DashboardModel/DashboardModel';
-import type { FeatureFlagModel } from '../../../models/FeatureFlagModel/FeatureFlagModel';
 import type { OrganizationMemberProfileModel } from '../../../models/OrganizationMemberProfileModel';
 import { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import { type SavedChartModel } from '../../../models/SavedChartModel';
@@ -35,16 +41,26 @@ import { UserModel } from '../../../models/UserModel';
 import type { SchedulerClient } from '../../../scheduler/SchedulerClient';
 import { BaseService } from '../../../services/BaseService';
 import { type CoderService } from '../../../services/CoderService/CoderService';
-import { isAnalyticsProjectEnabled } from '../../../services/ProjectService/analyticsProject/analyticsProjectClient';
 import {
     analyticsExploreNames,
     createAnalyticsExplores,
 } from '../../../services/ProjectService/analyticsProject/createAnalyticsExplores';
 import { ProjectService } from '../../../services/ProjectService/ProjectService';
+import type { AiAgentModel } from '../../models/AiAgentModel';
+import type { ProjectHomepageModel } from '../../models/ProjectHomepageModel';
+import type { AiAgentService } from '../AiAgentService/AiAgentService';
+import { analyticsAgent } from './analyticsAgent';
 import { getAnalyticsContentHash } from './analyticsContentHash';
+import { analyticsHomepage } from './analyticsHomepage';
 
 type Dependencies = {
+    analytics: Pick<LightdashAnalytics, 'track'>;
     lightdashConfig: Pick<LightdashConfig, 'usageEvents'>;
+    aiAgentModel: Pick<AiAgentModel, 'findAllAgents'>;
+    getAiAgentService: () => Pick<
+        AiAgentService,
+        'getIsCopilotEnabled' | 'createAgent'
+    >;
     schedulerClient: Pick<
         SchedulerClient,
         | 'getUsageHistoryBackfillJob'
@@ -55,7 +71,6 @@ type Dependencies = {
         ContentAsCodeSnapshotModel,
         'get' | 'upsert'
     >;
-    featureFlagModel: Pick<FeatureFlagModel, 'get'>;
     organizationMemberProfileModel: Pick<
         OrganizationMemberProfileModel,
         'getOrganizationAdmins'
@@ -67,18 +82,25 @@ type Dependencies = {
         'getByContentUuids'
     >;
     dashboardModel: Pick<DashboardModel, 'find' | 'getByIdOrSlug'>;
+    projectHomepageModel: Pick<
+        ProjectHomepageModel,
+        'createPublishedDefaultIfAbsent'
+    >;
     savedChartModel: Pick<SavedChartModel, 'get' | 'find'>;
     spaceModel: Pick<SpaceModel, 'get' | 'find'>;
     projectModel: Pick<
         ProjectModel,
         | 'getAllByOrganizationUuid'
+        | 'getSummary'
         | 'getAnalyticsModelCounts'
         | 'runInAnalyticsProvisioningLock'
         | 'saveExploresToCache'
     >;
     projectService: Pick<
         ProjectService,
+        | 'isAnalyticsProjectEnabled'
         | 'assertAnalyticsProjectAdministration'
+        | 'assertAnalyticsProjectAccess'
         | 'ensureAnalyticsProject'
         | 'delete'
     >;
@@ -122,6 +144,72 @@ export class AnalyticsProjectService extends BaseService {
             user,
         );
         return user.organizationUuid;
+    }
+
+    async trackView(
+        account: RegisteredAccount,
+        view: AnalyticsProjectView,
+    ): Promise<void> {
+        assertIsAccountWithOrg(account);
+        const { organizationUuid } = account.organization;
+        if (view.source === 'settings') {
+            await this.authorize(toSessionUser(account));
+        }
+        if (view.projectUuid !== null) {
+            const project = await this.dependencies.projectModel.getSummary(
+                view.projectUuid,
+            );
+            if (
+                project.organizationUuid !== organizationUuid ||
+                project.provisioningSource !== 'analytics'
+            ) {
+                throw new ForbiddenError();
+            }
+            if (view.source !== 'settings') {
+                await this.dependencies.projectService.assertAnalyticsProjectAccess(
+                    account,
+                    project,
+                );
+                if (
+                    this.createAuditedAbility(account).cannot(
+                        'view',
+                        subject('Project', project),
+                    )
+                ) {
+                    throw new ForbiddenError();
+                }
+            }
+        }
+        trackSafely(() =>
+            this.dependencies.analytics.track({
+                event: 'analytics_project.viewed',
+                userId: account.user.id,
+                properties: {
+                    organizationId: organizationUuid,
+                    projectId: view.projectUuid,
+                    source: view.source,
+                },
+            }),
+        );
+    }
+
+    private async needsAnalyticsAgent(
+        user: SessionUser,
+        organizationUuid: string,
+        projectUuid: string,
+    ): Promise<boolean> {
+        if (
+            !(await this.dependencies
+                .getAiAgentService()
+                .getIsCopilotEnabled(user))
+        ) {
+            return false;
+        }
+        const agents = await this.dependencies.aiAgentModel.findAllAgents({
+            organizationUuid,
+            filter: { projectFilter: { projectUuid } },
+        });
+        return agents.length === 0;
     }
 
     private async assertBackfill(user: SessionUser): Promise<string> {
@@ -216,7 +304,7 @@ export class AnalyticsProjectService extends BaseService {
         const chartSlugs = analyticsContentAsCode.flatMap(({ charts }) =>
             charts.map(({ slug }) => slug),
         );
-        const [models, dashboards, charts, snapshot, processing] =
+        const [models, dashboards, charts, snapshot, processing, needsAgent] =
             await Promise.all([
                 this.dependencies.projectModel.getAnalyticsModelCounts(
                     project.projectUuid,
@@ -236,6 +324,11 @@ export class AnalyticsProjectService extends BaseService {
                     bundleSnapshotSlug,
                 ),
                 this.dependencies.usageProcessingModel.find(organizationUuid),
+                this.needsAnalyticsAgent(
+                    user,
+                    organizationUuid,
+                    project.projectUuid,
+                ),
             ]);
         const verifications =
             await this.dependencies.contentVerificationModel.getByContentUuids(
@@ -260,6 +353,7 @@ export class AnalyticsProjectService extends BaseService {
                 createdAt: new Date(project.createdAt).toISOString(),
                 hasContentUpdates:
                     snapshot?.snapshotHash !== contentHash() ||
+                    needsAgent ||
                     !modelsAreCurrent ||
                     dashboards.length !== dashboardSlugs.length ||
                     charts.length !== chartSlugs.length ||
@@ -435,6 +529,29 @@ export class AnalyticsProjectService extends BaseService {
                     );
                 }
                 /* eslint-enable no-await-in-loop */
+                if (
+                    await this.needsAnalyticsAgent(
+                        user,
+                        organizationUuid,
+                        project.projectUuid,
+                    )
+                ) {
+                    await this.dependencies.getAiAgentService().createAgent(
+                        user,
+                        {
+                            ...analyticsAgent,
+                            projectUuid: project.projectUuid,
+                        },
+                        { autoProvisioned: true },
+                    );
+                }
+                await this.dependencies.projectHomepageModel.createPublishedDefaultIfAbsent(
+                    {
+                        projectUuid: project.projectUuid,
+                        ...analyticsHomepage,
+                        userUuid: user.userUuid,
+                    },
+                );
                 await this.dependencies.contentAsCodeSnapshotModel.upsert({
                     projectUuid: project.projectUuid,
                     contentType: ANALYTICS_BUNDLE_SNAPSHOT_TYPE,
@@ -453,6 +570,8 @@ export class AnalyticsProjectService extends BaseService {
     }: {
         organizationUuid: string | null;
     }): Promise<void> {
+        if (!this.dependencies.projectService.isAnalyticsProjectEnabled())
+            return;
         for await (const organization of this.dependencies.usageDimensionsModel.getOrganizations(
             organizationUuid ?? undefined,
         )) {
@@ -470,10 +589,7 @@ export class AnalyticsProjectService extends BaseService {
         if (
             !this.dependencies.lightdashConfig.usageEvents.enabled ||
             !this.dependencies.lightdashConfig.usageEvents.s3 ||
-            !(await isAnalyticsProjectEnabled(
-                this.dependencies.featureFlagModel,
-                organizationUuid,
-            ))
+            !this.dependencies.projectService.isAnalyticsProjectEnabled()
         )
             return;
         const admins =

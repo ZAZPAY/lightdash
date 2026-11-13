@@ -1,6 +1,17 @@
-import { ListObjectsV2Command } from '@aws-sdk/client-s3';
-import { ParameterError } from '@lightdash/common';
-import { type DuckdbParquetSource } from '@lightdash/warehouses';
+import {
+    ListObjectsV2Command,
+    S3ServiceException,
+    type S3Client,
+} from '@aws-sdk/client-s3';
+import {
+    ParameterError,
+    type AnalyticsActivityWindow,
+} from '@lightdash/common';
+import {
+    AnalyticsQueryError,
+    type DuckdbParquetSource,
+} from '@lightdash/warehouses';
+import { createHash } from 'crypto';
 import { compactedStreamSchemas } from '../../../analytics/eventStream/registry';
 import {
     usageDimensionKey,
@@ -21,23 +32,104 @@ import {
     createS3ClientFromConfig,
     type S3ConnectionConfig,
 } from '../../../clients/Aws/S3BaseClient';
-import { analyticsFileCache } from './AnalyticsFileCache';
+import Logger from '../../../logging/logger';
+import {
+    analyticsFileCache,
+    MAX_ANALYTICS_CACHE_FILE_BYTES,
+} from './AnalyticsFileCache';
+import { analyticsSignedUrlCache } from './AnalyticsSignedUrlCache';
 
 type S3AnalyticsSourceConfig = {
     storage: S3ConnectionConfig & { bucket: string };
     organizationUuid: string;
+    activityWindow?: AnalyticsActivityWindow;
     // Provisioning must authenticate storage before the first processing job.
     allowEmpty?: boolean;
 };
 
 const SIGNED_URL_LIFETIME_SECONDS = 900;
 const MAX_FILES = 10_000;
-const SIGNING_CONCURRENCY = 8;
+const PREPARATION_CONCURRENCY = 8;
+const EXPIRY_MARGIN_MS = 120_000;
+const MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+
+type AnalyticsFile = {
+    key: string;
+    etag?: string;
+    size?: number;
+};
+
+// Drain started requests before destroying their SDK client, including failures.
+const mapFiles = async <T>(
+    files: readonly AnalyticsFile[],
+    prepare: (file: AnalyticsFile) => Promise<T>,
+): Promise<T[]> => {
+    const values: T[] = [];
+    let next = 0;
+    let failure: { error: unknown } | undefined;
+    await Promise.all(
+        Array.from(
+            { length: Math.min(files.length, PREPARATION_CONCURRENCY) },
+            async () => {
+                while (!failure && next < files.length) {
+                    const index = next;
+                    next += 1;
+                    try {
+                        // eslint-disable-next-line no-await-in-loop
+                        values[index] = await prepare(files[index]);
+                    } catch (error) {
+                        failure ??= { error };
+                    }
+                }
+            },
+        ),
+    );
+    if (failure) throw failure.error;
+    return values;
+};
+
+const storageError = (error: unknown): AnalyticsQueryError => {
+    if (error instanceof AnalyticsQueryError) return error;
+
+    const status =
+        error instanceof S3ServiceException
+            ? error.$metadata.httpStatusCode
+            : undefined;
+    if (
+        status === 401 ||
+        status === 403 ||
+        (error instanceof Error &&
+            [
+                'AccessDenied',
+                'CredentialsProviderError',
+                'ExpiredToken',
+            ].includes(error.name))
+    ) {
+        return new AnalyticsQueryError('storage_access_denied', status);
+    }
+    if (
+        error instanceof Error &&
+        (['AbortError', 'TimeoutError'].includes(error.name) ||
+            ('code' in error &&
+                typeof error.code === 'string' &&
+                [
+                    'EAI_AGAIN',
+                    'ECONNREFUSED',
+                    'ECONNRESET',
+                    'ENOTFOUND',
+                    'ETIMEDOUT',
+                ].includes(error.code)))
+    ) {
+        return new AnalyticsQueryError('storage_network_error', status);
+    }
+    return new AnalyticsQueryError('storage_read_failed', status);
+};
 
 /** Server-only: the caller must authorize the persisted project org first. */
 export const createS3AnalyticsSourceResolver = ({
     storage,
     organizationUuid,
+    activityWindow,
     allowEmpty = false,
 }: S3AnalyticsSourceConfig): ((
     referencedTables?: readonly string[],
@@ -81,12 +173,70 @@ export const createS3AnalyticsSourceResolver = ({
             ? new Set(referencedTables)
             : undefined;
         const client = createS3ClientFromConfig(config);
-        const urlSigner = createObjectUrlSigner(client, config);
+        const started = performance.now();
+        const filesByTable = new Map<string, AnalyticsFile[]>();
+        const bufferedFiles = new Map<string, AnalyticsFile>();
         const tables = new Map<string, string[]>();
         const fileBuffers = new Map<string, Buffer>();
         let bufferedBytes = 0;
+        let listingMs = 0;
+        let downloadMs = 0;
+        let signingMs = 0;
+        let signedFiles = 0;
+        let signatureCacheHits = 0;
         let hasEvents = false;
         const historySources = new Set<string>();
+        const signingContext = async (s3: S3Client) => {
+            // Resolve temporary credentials too: a cache hit cannot outlive them
+            // or survive a changed credential/provider configuration.
+            const credentials =
+                config.authMode === 'gcp_oauth'
+                    ? undefined
+                    : await s3.config.credentials();
+            const identity = createHash('sha256')
+                .update(JSON.stringify([scope, config, credentials]))
+                .digest('hex');
+            const signer = createObjectUrlSigner(s3, config);
+            return {
+                identity,
+                sign: async (file: AnalyticsFile) => {
+                    const sign = () =>
+                        signer.getSignedDownloadUrl(
+                            bucket,
+                            file.key,
+                            SIGNED_URL_LIFETIME_SECONDS,
+                        );
+                    // Unversioned listings cannot safely identify reusable files.
+                    const result = await analyticsSignedUrlCache.get({
+                        identity: createHash('sha256')
+                            .update(
+                                JSON.stringify([
+                                    identity,
+                                    file.key,
+                                    file.etag,
+                                    file.size,
+                                ]),
+                            )
+                            .digest('hex'),
+                        expiresAt:
+                            !file.etag || file.size === undefined
+                                ? 0
+                                : Math.min(
+                                      Date.now() +
+                                          SIGNED_URL_LIFETIME_SECONDS * 1000,
+                                      credentials?.expiration?.getTime() ??
+                                          Infinity,
+                                  ) - EXPIRY_MARGIN_MS,
+                        sign,
+                    });
+                    if (result.cacheHit) signatureCacheHits += 1;
+                    else signedFiles += 1;
+                    return result.url;
+                },
+            };
+        };
+        const objectUrl = (key: string) =>
+            `${endpoint.origin}/${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`;
         try {
             let continuationToken: string | undefined;
             let pages = 0;
@@ -102,12 +252,6 @@ export const createS3AnalyticsSourceResolver = ({
                     }),
                     { abortSignal: AbortSignal.timeout(30_000) },
                 );
-                const files: {
-                    key: string;
-                    tableName: string;
-                    etag?: string;
-                    size?: number;
-                }[] = [];
                 // eslint-disable-next-line no-restricted-syntax
                 for (const {
                     Key: key,
@@ -128,7 +272,7 @@ export const createS3AnalyticsSourceResolver = ({
                     );
                     if (history) historySources.add(history.name);
                     const userActivity =
-                        /^model=user_activity\/stream=(query_events|ai_usage|data_app_events|export_events|agent_steps|mcp_tool_calls|content_views)\/dt=(\d{4}-\d{2}-\d{2})\/activity\.parquet$/.test(
+                        /^model=user_activity\/stream=(?:query_events|ai_usage|data_app_events|export_events|agent_steps|mcp_tool_calls|content_views)\/dt=(\d{4}-\d{2}-\d{2})\/activity\.parquet$/.exec(
                             key.slice(prefix.length),
                         );
                     const dimension = usageDimensionNames.find(
@@ -140,8 +284,6 @@ export const createS3AnalyticsSourceResolver = ({
                         : (match?.[1] ?? null);
                     if (userActivity) tableName = 'user_activity';
                     if (history) tableName = history.name;
-                    // Expose all retained partitions. Date filters belong to
-                    // the Explore query, not a fixed source-level window.
                     if (tableName) {
                         if (
                             match ||
@@ -151,62 +293,25 @@ export const createS3AnalyticsSourceResolver = ({
                             dimension === 'people'
                         )
                             hasEvents = true;
-                        fileCount += 1;
-                        if (fileCount > MAX_FILES)
-                            throw new Error(
-                                'Analytics manifest exceeds file limit',
-                            );
-                        if (!requested || requested.has(tableName)) {
-                            files.push({ key, tableName, etag, size });
+                        // The activity builder writes each row's UTC day from its partition key.
+                        const outsideActivityWindow =
+                            userActivity &&
+                            activityWindow &&
+                            (userActivity[1] < activityWindow.start ||
+                                userActivity[1] >= activityWindow.end);
+                        if (
+                            !outsideActivityWindow &&
+                            (!requested || requested.has(tableName))
+                        ) {
+                            fileCount += 1;
+                            if (fileCount > MAX_FILES)
+                                throw new AnalyticsQueryError(
+                                    'file_limit_exceeded',
+                                );
+                            const files = filesByTable.get(tableName) ?? [];
+                            files.push({ key, etag, size });
+                            filesByTable.set(tableName, files);
                         }
-                    }
-                }
-                // GCS workload identity signs each URL remotely. Bound each
-                // batch, and drain all started requests before destroying the
-                // client on failure. Never return a partial manifest.
-                for (let i = 0; i < files.length; i += SIGNING_CONCURRENCY) {
-                    // eslint-disable-next-line no-await-in-loop
-                    const signed = await Promise.allSettled(
-                        files
-                            .slice(i, i + SIGNING_CONCURRENCY)
-                            // Reserve each buffer synchronously before any download awaits.
-                            // eslint-disable-next-line no-loop-func
-                            .map(async ({ key, tableName, etag, size }) => {
-                                // Bound retained buffers and temporary files per query too.
-                                const cacheable =
-                                    !!size &&
-                                    size <= 1024 * 1024 &&
-                                    bufferedBytes + size <= 32 * 1024 * 1024;
-                                if (cacheable) bufferedBytes += size!;
-                                const buffer = cacheable
-                                    ? await analyticsFileCache.get(
-                                          scope,
-                                          client,
-                                          bucket,
-                                          key,
-                                          etag,
-                                          size,
-                                      )
-                                    : undefined;
-                                const url =
-                                    await urlSigner.getSignedDownloadUrl(
-                                        bucket,
-                                        key,
-                                        SIGNED_URL_LIFETIME_SECONDS,
-                                    );
-                                if (buffer) fileBuffers.set(url, buffer);
-                                return { tableName, url };
-                            }),
-                    );
-                    for (const result of signed) {
-                        if (result.status === 'rejected') {
-                            // The outer handler sanitizes all storage failures.
-                            throw new Error('Analytics URL signing failed');
-                        }
-                        const { tableName, url } = result.value;
-                        const urls = tables.get(tableName) ?? [];
-                        urls.push(url);
-                        tables.set(tableName, urls);
                     }
                 }
                 pages += 1;
@@ -216,11 +321,76 @@ export const createS3AnalyticsSourceResolver = ({
                 if (page.IsTruncated && (!continuationToken || pages >= 100))
                     throw new Error('Analytics listing cannot be completed');
             } while (continuationToken);
-        } catch {
+            listingMs = performance.now() - started;
+            const signing = await signingContext(client);
+            for (const [tableName, files] of filesByTable) {
+                // DuckDB stages whole tables to preserve Hive partition paths.
+                // Avoid downloading a partial table that can only be read remotely.
+                const bytes = files.reduce(
+                    (sum, file) => sum + (file.size ?? 0),
+                    0,
+                );
+                const canBuffer =
+                    files.every(
+                        ({ etag, size }) =>
+                            etag &&
+                            size &&
+                            Number.isSafeInteger(size) &&
+                            size > 0 &&
+                            size <= MAX_ANALYTICS_CACHE_FILE_BYTES,
+                    ) && bufferedBytes + bytes <= MAX_BUFFERED_BYTES;
+                const downloadStart = performance.now();
+                const buffers = canBuffer
+                    ? // eslint-disable-next-line no-await-in-loop
+                      await mapFiles(files, (file) =>
+                          analyticsFileCache.get(
+                              signing.identity,
+                              client,
+                              bucket,
+                              file.key,
+                              file.etag,
+                              file.size,
+                          ),
+                      )
+                    : [];
+                downloadMs += performance.now() - downloadStart;
+                if (
+                    buffers.length &&
+                    buffers.every((buffer) => buffer !== undefined)
+                ) {
+                    bufferedBytes += bytes;
+                    tables.set(
+                        tableName,
+                        files.map((file, index) => {
+                            const url = objectUrl(file.key);
+                            fileBuffers.set(url, buffers[index]!);
+                            bufferedFiles.set(url, file);
+                            return url;
+                        }),
+                    );
+                } else {
+                    const signStart = performance.now();
+                    // eslint-disable-next-line no-await-in-loop
+                    tables.set(tableName, await mapFiles(files, signing.sign));
+                    signingMs += performance.now() - signStart;
+                }
+            }
+            Logger.info('Analytics source prepared', {
+                organizationUuid,
+                files: fileCount,
+                pages,
+                bufferedFiles: fileBuffers.size,
+                bufferedBytes,
+                signedFiles,
+                signatureCacheHits,
+                listingMs: Math.round(listingMs),
+                downloadMs: Math.round(downloadMs),
+                signingMs: Math.round(signingMs),
+                totalMs: Math.round(performance.now() - started),
+            });
+        } catch (error) {
             // SDK errors may contain credentials, signatures, or object contents.
-            throw new Error(
-                'Analytics storage access failed. Check bucket credentials, organization and compacted data availability.',
-            );
+            throw storageError(error);
         } finally {
             client.destroy();
         }
@@ -255,7 +425,42 @@ export const createS3AnalyticsSourceResolver = ({
         return {
             scope,
             signedUrls: true,
-            ...(fileBuffers.size ? { fileBuffers } : {}),
+            ...(fileBuffers.size
+                ? {
+                      fileBuffers,
+                      getSignedUrls: async (urls: readonly string[]) => {
+                          // Staging happens after this resolver's SDK client is closed.
+                          // Only exact buffered objects from this manifest may fall back.
+                          const fallbackClient =
+                              createS3ClientFromConfig(config);
+                          const fallbackStart = performance.now();
+                          try {
+                              const files = urls.map((url) => {
+                                  const file = bufferedFiles.get(url);
+                                  if (!file)
+                                      throw new Error(
+                                          'Unexpected analytics object',
+                                      );
+                                  return file;
+                              });
+                              const signing =
+                                  await signingContext(fallbackClient);
+                              return await mapFiles(files, signing.sign);
+                          } catch (error) {
+                              throw storageError(error);
+                          } finally {
+                              fallbackClient.destroy();
+                              Logger.info('Analytics source staging fallback', {
+                                  organizationUuid,
+                                  files: urls.length,
+                                  signingMs: Math.round(
+                                      performance.now() - fallbackStart,
+                                  ),
+                              });
+                          }
+                      },
+                  }
+                : {}),
             emptyTables: schemas.filter(({ name }) => !tables.has(name)),
             tables: [...tables].map(([name, urls]) => ({
                 name,

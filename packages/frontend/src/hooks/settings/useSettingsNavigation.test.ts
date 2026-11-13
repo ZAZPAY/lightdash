@@ -22,7 +22,7 @@ const settingsContext = (
     showImpersonationPanel: false,
     isCustomRolesEnabled: false,
     canAccessAnalyticsSettings: false,
-    isAnalyticsProjectFlagLoading: false,
+    isAnalyticsProjectLoading: false,
     isOrganizationRoadmapEnabled: false,
     canAccessAiCredits: false,
     isAiCreditsLoading: false,
@@ -36,17 +36,15 @@ const settingsContext = (
     hasAnyAiAgentAccess: true,
     isAiOrganizationSettingsLoading: false,
     dataAppsFlag: undefined,
-    dataAppAnalysisFlag: undefined,
-    dashboardAnalysisFlag: undefined,
     isDataAppsFlagLoading: false,
     isApiQuerySourcesEnabled: false,
     isChartStudioAvailable: false,
-    externalSourcesFlag: undefined,
-    isResultsCacheEnabled: false,
+    isMobileSettingsEnabled: false,
+    isMobileSettingsFlagLoading: false,
+    isResultsCacheAvailable: false,
     embeddingEnabled: undefined,
     allowPasswordAuthentication: false,
     hasSocialLogin: false,
-    isGroupManagementEnabled: false,
     isAgentIdentityEnabled: false,
     isAgentIdentityFlagLoading: false,
     isGitProject: false,
@@ -160,6 +158,40 @@ describe('Agents settings navigation', () => {
             'Identity',
             'Permissions',
         ]);
+    });
+});
+
+describe('Mobile settings navigation', () => {
+    const yourSettingsLabels = (isMobileSettingsEnabled: boolean) => {
+        const { result } = renderHook(() =>
+            useSettingsNavigation(
+                settingsContext({
+                    user: {
+                        ability: new Ability([
+                            {
+                                action: 'manage',
+                                subject: 'PersonalAccessToken',
+                            },
+                        ]),
+                    } as unknown as SettingsContext['user'],
+                    isMobileSettingsEnabled,
+                }),
+            ),
+        );
+        return result.current
+            .find((section) => section.id === 'your-settings')
+            ?.items.map(({ label }) => label);
+    };
+
+    it('shows Mobile after Personal access tokens when the flag is on', () => {
+        expect(yourSettingsLabels(true)?.slice(-2)).toEqual([
+            'Personal access tokens',
+            'Mobile',
+        ]);
+    });
+
+    it('hides Mobile when the flag is off', () => {
+        expect(yourSettingsLabels(false)).not.toContain('Mobile');
     });
 });
 
@@ -363,6 +395,7 @@ describe('managed analytics project settings navigation', () => {
                         health: {
                             softDelete: { enabled: true },
                             preAggregates: { enabled: false },
+                            externalSources: { engineAvailable: false },
                         } as SettingsContext['health'],
                         user: {
                             ability: new Ability([
@@ -454,7 +487,7 @@ describe('Agent identity settings navigation', () => {
 });
 
 describe('Project connections settings navigation', () => {
-    const projectLabels = (overrides: Partial<SettingsContext>) => {
+    const projectItems = (overrides: Partial<SettingsContext>) => {
         const { result } = renderHook(() =>
             useSettingsNavigation(
                 settingsContext({
@@ -487,10 +520,52 @@ describe('Project connections settings navigation', () => {
                 }),
             ),
         );
-        return result.current
-            .find(({ id }) => id === 'current-project')!
-            .items.map(({ label }) => label);
+        return result.current.find(({ id }) => id === 'current-project')!.items;
     };
+    const projectLabels = (overrides: Partial<SettingsContext>) =>
+        projectItems(overrides).map(({ label }) => label);
+
+    it('links Live data sources to the Semantic Layer page, marked as moved', () => {
+        const item = projectItems({ isApiQuerySourcesEnabled: true }).find(
+            ({ label }) => label === 'Live data sources',
+        );
+        expect(item).toMatchObject({
+            to: '/projects/project/semantic-layer/kinds/live',
+            movedTo: 'Semantic Layer',
+        });
+        expect(item?.keywords).toEqual(
+            expect.arrayContaining(['posthog', 'semantic layer']),
+        );
+    });
+
+    it('links External sources to the Semantic Layer page, marked as moved', () => {
+        const item = projectItems({
+            health: {
+                softDelete: { enabled: false },
+                preAggregates: { enabled: false },
+                externalSources: { engineAvailable: true },
+            } as SettingsContext['health'],
+            user: {
+                ability: new Ability([
+                    {
+                        action: 'manage',
+                        subject: 'ExternalSource',
+                        conditions: {
+                            organizationUuid: 'org',
+                            projectUuid: 'project',
+                        },
+                    },
+                ]),
+            } as SettingsContext['user'],
+        }).find(({ label }) => label === 'External sources');
+        expect(item).toMatchObject({
+            to: '/projects/project/semantic-layer/kinds/files',
+            movedTo: 'Semantic Layer',
+        });
+        expect(item?.keywords).toEqual(
+            expect.arrayContaining(['csv', 'semantic layer']),
+        );
+    });
 
     it('shows Live data sources without Data app connections when only live sources are enabled', () => {
         const labels = projectLabels({ isApiQuerySourcesEnabled: true });
@@ -542,4 +617,54 @@ describe('My agent connections navigation', () => {
             }
         },
     );
+});
+
+describe('AI analysis settings navigation', () => {
+    const navigation = (
+        rules: { action: string; subject: string }[],
+        overrides: Partial<SettingsContext> = {},
+    ) =>
+        organizationNavigation({
+            user: {
+                ability: new Ability(rules),
+            } as unknown as SettingsContext['user'],
+            ...overrides,
+        });
+    const askAiChild = (items: ReturnType<typeof navigation>) =>
+        items
+            ?.find((item) => item.label === 'Ask AI')
+            ?.children.find((item) => item.label === 'AI analysis');
+    const manageOrganization = [{ action: 'manage', subject: 'Organization' }];
+
+    it.each([false, true])(
+        'lives under Ask AI only (data apps on: %s)',
+        (dataAppsEnabled) => {
+            const items = navigation(manageOrganization, {
+                dataAppsFlag: {
+                    id: 'data-apps',
+                    enabled: dataAppsEnabled,
+                } as SettingsContext['dataAppsFlag'],
+            });
+            expect(askAiChild(items)?.to).toBe('/generalSettings/ai/analysis');
+            const elsewhere = items
+                ?.filter((item) => item.label !== 'Ask AI')
+                .flatMap((item) => [item, ...item.children])
+                .filter((item) => item.label === 'AI analysis');
+            expect(elsewhere).toEqual([]);
+        },
+    );
+
+    it('hides AI analysis from users who cannot manage the organization', () => {
+        expect(askAiChild(navigation([]))).toBeUndefined();
+    });
+
+    it('hides AI analysis without AI', () => {
+        expect(
+            askAiChild(
+                navigation(manageOrganization, {
+                    isAiCopilotEnabledOrTrial: false,
+                }),
+            ),
+        ).toBeUndefined();
+    });
 });

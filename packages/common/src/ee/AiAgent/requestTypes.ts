@@ -9,6 +9,7 @@ import { type PullRequestProvider } from '../../types/gitIntegration';
 import { type ParametersValuesMap } from '../../types/parameters';
 import { type ChartKind } from '../../types/savedCharts';
 import { type TraceTaskBase } from '../../types/scheduler';
+import { type DateGranularity } from '../../types/timeFrames';
 import {
     type AiAgentEvidenceExcerpt,
     type AiAgentJudgeProjectContextEntry,
@@ -51,11 +52,35 @@ export type AiDashboardActiveTab = {
     name: string;
 };
 
+export type AiDashboardTileRef = {
+    uuid: string;
+    name: string;
+};
+
+export type AiDashboardDateZoomControl = {
+    uuid: string;
+    name: string;
+    /** The viewer's pick, else the control's saved grain */
+    granularity: DateGranularity | string;
+    /** False: the saved grain when the context was attached, which the saved config supersedes */
+    isViewerPick: boolean;
+    tiles: AiDashboardTileRef[];
+};
+
+export type AiDashboardTileParameters = {
+    tile: AiDashboardTileRef;
+    parameters: ParametersValuesMap;
+};
+
 export type AiDashboardRuntimeOverrides = {
     activeTab?: AiDashboardActiveTab;
     dashboardFilters?: AiDashboardFilters;
     dashboardParameters?: ParametersValuesMap;
     dateZoom?: DateZoom | null;
+    /** Every named date zoom on the dashboard; absent when it has none */
+    dateZoomControls?: AiDashboardDateZoomControl[];
+    /** The values each tile runs with; present only when the viewer's picks on parameter controls change them */
+    tileParameters?: AiDashboardTileParameters[];
 };
 
 export type AiThread = {
@@ -124,6 +149,7 @@ export const AI_THREAD_CREATED_FROM = [
     'scheduler',
     'data_app',
     'dashboard_analysis',
+    'semantic_studio',
 ] as const;
 export type AiThreadCreatedFrom = (typeof AI_THREAD_CREATED_FROM)[number];
 
@@ -139,6 +165,7 @@ export const AI_WEB_APP_THREAD_CREATED_FROM = [
     'scheduler',
     'data_app',
     'dashboard_analysis',
+    'semantic_studio',
 ] as const satisfies readonly AiThreadCreatedFrom[];
 export type AiWebAppThreadCreatedFrom =
     (typeof AI_WEB_APP_THREAD_CREATED_FROM)[number];
@@ -201,6 +228,8 @@ export type CreateWebAppThread = {
     agentUuid: string | null;
     // Every write space of the embed token; the first one is used for attribution.
     embedSpaceUuids?: string[];
+    // The embed token's viewer; owns the thread when the token has no write spaces.
+    embedExternalUserId?: string | null;
     battleProfile?: AiAgentBattleProfile | null;
     binding?: AiThreadBinding | null;
     threadContext?: string | null;
@@ -224,7 +253,8 @@ export type AiAgentLoadoutBase =
     | 'composer'
     | 'no_data_access'
     | 'deep_research_worker'
-    | 'deep_research_coordinator';
+    | 'deep_research_coordinator'
+    | 'semantic_studio';
 
 export type AiAgentPromptLoadout = {
     base: AiAgentLoadoutBase;
@@ -395,6 +425,12 @@ export type AiPromptContextItemInput =
           type: 'skill';
           name: string;
           arguments: string;
+      }
+    | {
+          // The model or field open in Semantic Studio when the message was sent.
+          type: 'semantic_model';
+          modelName: string;
+          fieldName: string | null;
       };
 
 export type AiPromptContextInput = AiPromptContextItemInput[];
@@ -551,6 +587,12 @@ export type AiPromptContextItem =
           documentSlug: string | null;
           pinnedVersionUuid: string | null;
           displayName: string | null;
+      }
+    | {
+          // The model or field open in Semantic Studio when the message was sent.
+          type: 'semantic_model';
+          modelName: string;
+          fieldName: string | null;
       }
     | {
           type: 'design';

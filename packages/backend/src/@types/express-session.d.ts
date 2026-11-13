@@ -1,6 +1,8 @@
 import 'express-session';
 import {
     type GoogleOAuthSession,
+    type LinkedInAdsOAuthSession,
+    type LiveSourceReturnTo,
     type PendingGoogleLiveSource,
     type PostHogOAuthSession,
 } from '../ee/services/ExternalConnectionService/ExternalConnectionService';
@@ -30,6 +32,7 @@ declare module 'express-session' {
             state?: string | undefined;
             linear?: {
                 clientId: string;
+                encryptedClientSecret: string;
                 codeVerifier: string;
                 redirectUri: string;
             };
@@ -39,7 +42,9 @@ declare module 'express-session' {
                 encryptedClientSecret: string;
             };
             postHog?: PostHogOAuthSession;
+            linkedInAds?: LinkedInAdsOAuthSession;
             googleLiveSource?: GoogleOAuthSession;
+            liveSourceReturnTo?: LiveSourceReturnTo;
             isPopup?: boolean | undefined;
             databricks?: {
                 projectUuid?: string | undefined;
@@ -63,6 +68,10 @@ declare module 'express-session' {
             messageTs?: string | undefined;
             threadTs?: string | undefined;
             trigger?: 'vote' | 'app_mention' | undefined;
+        };
+        headlessServiceAccount?: {
+            userUuid: string;
+            serviceAccountUuid: string;
         };
         impersonation?: {
             adminUserUuid: string;

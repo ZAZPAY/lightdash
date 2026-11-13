@@ -6,6 +6,7 @@ import {
     type QueryRowsResponse,
 } from '@google-cloud/bigquery';
 import {
+    BIGQUERY_UNSUPPORTED_KEYFILE_MESSAGE,
     BigqueryAuthenticationType,
     BigqueryTokenError,
     DimensionType,
@@ -1285,6 +1286,145 @@ describe('BigqueryWarehouseClient key file credentials', () => {
                 }),
         ).toThrow(WarehouseConnectionError);
     });
+
+    it('rejects an unsupported key file before listing datasets', async () => {
+        await expect(
+            BigqueryWarehouseClient.getDatasetsWithKeyfile({
+                type: 'external_account',
+                audience: 'audience',
+                credential_source: { file: '/var/run/token' },
+            }),
+        ).rejects.toThrow(BIGQUERY_UNSUPPORTED_KEYFILE_MESSAGE);
+    });
+});
+
+describe('BigqueryWarehouseClient Google Drive access', () => {
+    const DRIVE_READONLY_SCOPE =
+        'https://www.googleapis.com/auth/drive.readonly';
+
+    const serviceAccountKeyfile = {
+        type: 'service_account',
+        client_email: 'robot@example.iam.gserviceaccount.com',
+        private_key: 'private-key',
+    };
+    const userKeyfile = {
+        type: 'authorized_user',
+        client_id: 'client-id',
+        client_secret: 'client-secret',
+        refresh_token: 'refresh-token',
+    };
+
+    const getScopes = (warehouse: BigqueryWarehouseClient) =>
+        (warehouse.client.authClient as unknown as { scopes: string[] }).scopes;
+
+    it.each([
+        BigqueryAuthenticationType.PRIVATE_KEY,
+        BigqueryAuthenticationType.SSO,
+        undefined,
+    ])(
+        'requests BigQuery and Drive read scopes for a service account key (%s)',
+        async (authenticationType) => {
+            const warehouse = new BigqueryWarehouseClient({
+                ...credentials,
+                authenticationType,
+                keyfileContents: serviceAccountKeyfile,
+            });
+            expect(getScopes(warehouse)).toEqual([
+                'https://www.googleapis.com/auth/bigquery',
+                DRIVE_READONLY_SCOPE,
+            ]);
+            const client = await warehouse.client.authClient.getClient();
+            expect((client as unknown as { scopes: string[] }).scopes).toEqual(
+                getScopes(warehouse),
+            );
+        },
+    );
+
+    it('requests the Drive read scope for ADC', () => {
+        const warehouse = new BigqueryWarehouseClient({
+            ...credentials,
+            authenticationType: BigqueryAuthenticationType.ADC,
+        });
+        expect(getScopes(warehouse)).toContain(DRIVE_READONLY_SCOPE);
+    });
+
+    it('requests the Drive read scope for workload identity federation', () => {
+        const warehouse = new BigqueryWarehouseClient(
+            {
+                ...credentials,
+                authenticationType:
+                    BigqueryAuthenticationType.WORKLOAD_IDENTITY_FEDERATION,
+                keyfileContents: {},
+            },
+            {
+                bigqueryExternalAccount: {
+                    type: 'external_account',
+                    audience: 'audience',
+                    subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+                    token_url: 'https://sts.googleapis.com/v1/token',
+                    subject_token_supplier: {
+                        getSubjectToken: async () => 'token',
+                    },
+                },
+            },
+        );
+        expect(getScopes(warehouse)).toContain(DRIVE_READONLY_SCOPE);
+    });
+
+    it.each([
+        BigqueryAuthenticationType.SSO,
+        BigqueryAuthenticationType.PRIVATE_KEY,
+    ])(
+        'does not request extra scopes for user OAuth credentials (%s)',
+        (authenticationType) => {
+            const warehouse = new BigqueryWarehouseClient({
+                ...credentials,
+                authenticationType,
+                keyfileContents: userKeyfile,
+            });
+            expect(getScopes(warehouse)).toEqual([
+                'https://www.googleapis.com/auth/bigquery',
+            ]);
+        },
+    );
+
+    const driveError = {
+        reason: 'accessDenied',
+        message:
+            'Access Denied: BigQuery BigQuery: Permission denied while getting Drive credentials.',
+    };
+
+    it('tells service account connections to share the Drive file', () => {
+        const warehouse = new BigqueryWarehouseClient({
+            ...credentials,
+            keyfileContents: serviceAccountKeyfile,
+        });
+        expect(warehouse.parseError(driveError).message).toBe(
+            `${driveError.message} Share the Google Drive file with the account used by this connection.`,
+        );
+    });
+
+    it('tells user OAuth connections to use a service account', () => {
+        const warehouse = new BigqueryWarehouseClient({
+            ...credentials,
+            authenticationType: BigqueryAuthenticationType.SSO,
+            keyfileContents: userKeyfile,
+        });
+        expect(warehouse.parseError(driveError).message).toBe(
+            `${driveError.message} Tables backed by Google Drive files need a service account connection that the file is shared with.`,
+        );
+    });
+
+    it('keeps other access denied messages unchanged', () => {
+        const warehouse = new BigqueryWarehouseClient(credentials);
+        expect(
+            warehouse.parseError({
+                reason: 'accessDenied',
+                message:
+                    'Access Denied: Table x: User does not have permission',
+            }).message,
+        ).toBe('Access Denied: Table x: User does not have permission');
+    });
 });
 
 describe('BigQuery agent job options', () => {
@@ -1584,5 +1724,82 @@ describe('BigqueryWarehouseClient.getTablePartitioning', () => {
         await expect(partitioningFor({ schema: { fields: [] } })).resolves.toBe(
             null,
         );
+    });
+});
+
+describe('BigQuery result streaming pages', () => {
+    it('caps raw SDK pages and preserves all values and order across empty and partial pages', async () => {
+        const warehouse = new BigqueryWarehouseClient(credentials);
+        const schema = {
+            fields: [
+                { name: 'id', type: 'INTEGER' },
+                { name: 'timestamp', type: 'TIMESTAMP' },
+                { name: 'value', type: 'STRING' },
+                {
+                    name: 'nested',
+                    type: 'RECORD',
+                    fields: [{ name: 'label', type: 'STRING' }],
+                },
+            ],
+        };
+        const raw = Array.from({ length: 1203 }, (_, id) => ({
+            f: [
+                { v: String(id) },
+                { v: '1672531200123456' },
+                { v: id % 2 ? null : 'é\u2028\n' },
+                { v: { f: [{ v: `label-${id}` }] } },
+            ],
+        }));
+        const expected = raw.map((_, id) => ({
+            id,
+            timestamp: new Date('2023-01-01T00:00:00.123Z'),
+            value: id % 2 ? null : 'é\u2028\n',
+            nested: JSON.stringify({ label: `label-${id}` }),
+        }));
+        const getQueryResults = vi
+            .fn()
+            .mockResolvedValueOnce([[], null, { schema }])
+            .mockResolvedValueOnce([
+                raw.slice(0, 500),
+                { pageToken: 'second' },
+                { schema },
+            ])
+            .mockResolvedValueOnce([[], { pageToken: 'third' }, { schema }])
+            .mockResolvedValueOnce([
+                raw.slice(500, 1000),
+                { pageToken: 'last' },
+                { schema },
+            ])
+            .mockResolvedValueOnce([raw.slice(1000), null, { schema }]);
+        warehouse.client.createQueryJob = vi.fn(async () => [
+            { id: 'job', getQueryResults },
+        ]) as unknown as BigQuery['createQueryJob'];
+        const batches: unknown[][] = [];
+        await warehouse.streamQuery(
+            'SELECT 1',
+            ({ rows }) => {
+                batches.push(rows);
+            },
+            {},
+        );
+        expect(getQueryResults).toHaveBeenNthCalledWith(2, {
+            autoPaginate: false,
+            maxResults: 5000,
+            skipParsing: true,
+        });
+        expect(getQueryResults).toHaveBeenNthCalledWith(5, {
+            pageToken: 'last',
+            autoPaginate: false,
+            maxResults: 5000,
+            skipParsing: true,
+        });
+        expect(batches.flat()).toEqual(expected);
+        expect(batches.every((batch) => batch.length <= 64)).toBe(true);
+        expect(
+            batches
+                .flat()
+                .map((row) => JSON.stringify(row))
+                .join('\n'),
+        ).toBe(expected.map((row) => JSON.stringify(row)).join('\n'));
     });
 });

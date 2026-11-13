@@ -1,6 +1,8 @@
 import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { type Readable } from 'stream';
 
+export const MAX_ANALYTICS_CACHE_FILE_BYTES = 4 * 1024 * 1024;
+
 /** Small compressed files only; pending downloads count against both limits. */
 export class AnalyticsFileCache {
     private readonly entries = new Map<
@@ -11,6 +13,8 @@ export class AnalyticsFileCache {
     private bytes = 0;
 
     private downloads = 0;
+
+    private readonly queue: Array<() => void> = [];
 
     constructor(private readonly maxBytes = 64 * 1024 * 1024) {}
 
@@ -27,7 +31,7 @@ export class AnalyticsFileCache {
             !size ||
             !Number.isSafeInteger(size) ||
             size < 0 ||
-            size > 1024 * 1024 ||
+            size > MAX_ANALYTICS_CACHE_FILE_BYTES ||
             size > this.maxBytes
         )
             return undefined;
@@ -39,20 +43,20 @@ export class AnalyticsFileCache {
             this.entries.set(identity, hit);
             return hit.value;
         }
-        // Two isolated query sessions can each prepare eight files at once.
-        if (this.downloads >= 16) return undefined;
         for (const [id, entry] of this.entries) {
-            if (this.bytes + size <= this.maxBytes && this.entries.size < 4096)
+            if (
+                this.bytes + size <= this.maxBytes &&
+                this.entries.size < 16_384
+            )
                 break;
             if (entry.ready) {
                 this.entries.delete(id);
                 this.bytes -= entry.size;
             }
         }
-        if (this.bytes + size > this.maxBytes || this.entries.size >= 4096)
+        if (this.bytes + size > this.maxBytes || this.entries.size >= 16_384)
             return undefined;
         this.bytes += size;
-        this.downloads += 1;
         const entry = {
             size,
             ready: false,
@@ -60,6 +64,12 @@ export class AnalyticsFileCache {
         };
         this.entries.set(identity, entry);
         entry.value = (async () => {
+            // Queued downloads reserve bytes and entries before waiting.
+            if (this.downloads >= 16) {
+                await new Promise<void>((resolve) => {
+                    this.queue.push(resolve);
+                });
+            } else this.downloads += 1;
             try {
                 const response = await client.send(
                     new GetObjectCommand({
@@ -98,7 +108,9 @@ export class AnalyticsFileCache {
                 this.bytes -= size;
                 return undefined;
             } finally {
-                this.downloads -= 1;
+                const next = this.queue.shift();
+                if (next) next();
+                else this.downloads -= 1;
             }
         })();
         return entry.value;

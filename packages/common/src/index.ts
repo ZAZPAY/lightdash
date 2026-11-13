@@ -81,16 +81,20 @@ export * from './compiler/queryParameterReferences';
 export * from './compiler/referenceLookup';
 export * from './compiler/translator';
 export * from './compiler/writebackColumn';
+export * from './composer/composerChart';
+export * from './composer/composerResultChart';
+export * from './parameters/contentParameters';
+export * from './parameters/dashboardParameterControls';
 export * from './parameters/dashboardTileParameters';
 export * from './parameters/parameterDefaults';
 export * from './parameters/parameterOptions';
 export * from './parameters/reservedParameters';
+export * from './constants/mobileApp';
 export * from './constants/screenshot';
 export * from './constants/sessionStorageKeys';
 export * from './constants/spaces';
 export * from './constants/sqlRunner';
 export { default as DbtSchemaEditor } from './dbt/DbtSchemaEditor/DbtSchemaEditor';
-export * from './dbt/findDbtNodeCycle';
 export * from './dbt/manifest';
 export * from './dbt/metricFlow';
 export * from './dbt/projectMergedManifest';
@@ -140,6 +144,7 @@ export * from './types/api/spotlight';
 export * from './types/api/success';
 export * from './types/api/uuid';
 export * from './types/apiSourceExplore';
+export * from './types/liveSourceErrors';
 export * from './types/auth';
 export * from './types/bigQuerySSO';
 export * from './types/catalog';
@@ -168,6 +173,7 @@ export * from './types/dataRetention';
 export * from './types/featureFlags';
 export * from './types/impersonationOrganizationSettings';
 export * from './types/previewExpirationProjectSettings';
+export * from './types/provisioning';
 export * from './types/resultsCacheProjectSettings';
 export * from './types/upstreamDiff';
 export * from './types/field';
@@ -189,6 +195,8 @@ export * from './types/managedSignIn';
 export * from './types/mergeQuery';
 export * from './types/metricQuery';
 export * from './types/metricsExplorer';
+export * from './types/mobileAppLink';
+export * from './types/mobileSignIn';
 export * from './types/notifications';
 export * from './types/oauth';
 export * from './types/openIdIdentity';
@@ -372,6 +380,7 @@ export * from './types/roadmap';
 export * from './types/roles';
 export * from './types/savedCharts';
 export * from './types/scheduler';
+export * from './types/semanticStudio';
 export * from './types/schedulerLog';
 export * from './types/schedulerTaskList';
 export * from './types/scopes';
@@ -411,6 +420,7 @@ export * from './utils/accessors';
 export * from './utils/additionalMetrics';
 export * from './utils/api';
 export * from './utils/apiSourceQuery';
+export * from './utils/liveSourceIntegrations';
 export { default as assertUnreachable } from './utils/assertUnreachable';
 export * from './utils/bigNumber';
 export * from './utils/awsWebIdentity';
@@ -427,6 +437,7 @@ export * from './utils/convertCustomDimensionsToYaml';
 export * from './utils/convertCustomMetricsToYaml';
 export * from './utils/customDimensions';
 export * from './utils/dashboard';
+export * from './utils/dashboardControls';
 export * from './utils/dbt';
 export * from './utils/dependencyGraph';
 export * from './utils/egressIps';
@@ -442,6 +453,7 @@ export * from './utils/i18n/dashboardAsCode';
 export * from './utils/i18n/merge';
 export * from './utils/i18n/types';
 export * from './utils/i18n/uiStrings';
+export * from './utils/isoDateTime';
 export * from './utils/item';
 export * from './utils/mergeQueryItems';
 export * from './utils/mergeTotals';
@@ -456,6 +468,7 @@ export * from './utils/metricsExplorer';
 export * from './utils/normalizeCellRawForFilter';
 export * from './utils/oauth';
 export * from './utils/organization';
+export * from './utils/portableSlugs';
 export * from './utils/projectMemberRole';
 export * from './utils/promises';
 export * from './utils/sanitizeHtml';
@@ -732,6 +745,8 @@ export const hasSpecialCharacters = (text: string) => /[^a-zA-Z ]/g.test(text);
 
 export const CompleteUserSchema = z.object({
     organizationName: getOrganizationNameSchema().optional(),
+    firstName: getUserNameSchema().optional(),
+    lastName: getUserNameSchema().optional(),
     jobTitle: z.string().min(0),
     // Only collected from the person creating the organization; invited
     // members skip it (their onboarding omits this field from the schema).
@@ -1288,6 +1303,8 @@ export const SPACE_TREE_2: TreeCreateSpace[] = [
 export * from './compiler/compileLightdashModels';
 
 export * from './lightdash/LightdashModelEditor';
+export * from './lightdash/applyModelFragment';
+export * from './lightdash/diffModelDocuments';
 export * from './lightdash/convertCustomMetricToLightdash';
 export * from './types/analyticsProject';
 export * from './types/recentContent';
@@ -1305,3 +1322,5 @@ export * from './types/releaseHighlights';
 export { getDeferredExploreName } from './dbt/qualifiedName';
 
 export * from './utils/exploreName';
+
+export * from './dbt/validateDbtText';

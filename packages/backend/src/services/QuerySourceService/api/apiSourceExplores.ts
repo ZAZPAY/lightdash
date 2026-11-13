@@ -2,7 +2,7 @@ import {
     ApiConnectorType,
     assertUnreachable,
     DimensionType,
-    generateSlug,
+    getItemId,
     isDimension,
     SupportedDbtAdapter,
     UnexpectedServerError,
@@ -14,55 +14,50 @@ import {
     type SortField,
 } from '@lightdash/common';
 import { warehouseSqlBuilderFromType } from '@lightdash/warehouses';
-import { getIsoDateInTimeZone } from './apiDateRange';
+import { createHash } from 'crypto';
+import { isPlainObject, memoize } from 'es-toolkit/compat';
 import {
+    assertApiSourceQuery,
     buildApiSourceExplore,
     type ApiSourceExploreDefinition,
+    type ApiSourcePeriodFormat,
     type CompiledApiSourceQuery,
 } from './apiSourceExplore';
-import { compileGa4Query } from './google/ga4Compiler';
 import {
-    GA4_REPORT_EXPLORE,
-    GA4_SEMANTIC_LAYER_VERSION,
-    withGa4MetadataFields,
-} from './google/ga4SemanticLayer';
-import { compileSearchConsoleQuery } from './google/searchConsoleCompiler';
-import { SEARCH_CONSOLE_MAX_QUERY_ROWS } from './google/SearchConsoleConnector';
-import {
-    SEARCH_CONSOLE_PERFORMANCE_EXPLORE,
-    SEARCH_CONSOLE_SEMANTIC_LAYER_VERSION,
-} from './google/searchConsoleSemanticLayer';
+    type ApiSourceBaseLayer,
+    type ApiSourceScan,
+} from './ApiSourceIntegration';
+import { getApiSourceIntegration } from './apiSourceIntegrations';
+import { tooManyRowsError } from './apiSourceRows';
 import {
     applyLiveSourceFieldEdits,
     type LiveSourceFieldEdits,
     type ScannedLiveSourceField,
 } from './liveSourceFields';
-import { compilePostHogQuery } from './posthog/posthogCompiler';
-import {
-    isInternalPostHogProperty,
-    POSTHOG_EVENTS_EXPLORE,
-    POSTHOG_SEMANTIC_LAYER_VERSION,
-    withPostHogPropertyFields,
-    type PostHogPropertyKind,
-} from './posthog/posthogSemanticLayer';
 
-/** What an integration reports about its own fields; absent when not scanned. */
-export type ApiSourceScan = {
-    ga4Metadata?: unknown;
-    posthogProperties?: Record<PostHogPropertyKind, unknown>;
-};
+const DEFAULT_SQL_BUILDER = warehouseSqlBuilderFromType(
+    SupportedDbtAdapter.DUCKDB,
+);
 
-// Search Console reports dates in Pacific Time, whatever the property.
-const SEARCH_CONSOLE_TIME_ZONE = 'America/Los_Angeles';
-
-const getSqlBuilder = (connector: ApiConnectorType) =>
-    warehouseSqlBuilderFromType(
-        connector === ApiConnectorType.POSTHOG
-            ? SupportedDbtAdapter.CLICKHOUSE
-            : SupportedDbtAdapter.DUCKDB,
-    );
-
-/** Stable per source: saved charts reference its field ids forever. */
+/**
+ * The naming contract of live data source explores and fields. Saved charts,
+ * dashboard filters, scheduled deliveries and field edits store these ids, so
+ * they must never change once a customer has content on them:
+ *
+ * - explore = `<prefix>_<model>`, e.g. `google_analytics_report`
+ * - field id = `<explore>_<field>`, e.g. `google_analytics_report_sessions`
+ * - the prefix is set once, when a source is created or reattached, and
+ *   stored (`liveSourceName`). A deleted source's prefix stays held until a
+ *   source reattaches to it, so its charts can't read another target
+ * - display names change no id: renaming a source or relabelling a field
+ *   keeps every chart working
+ * - models are only ever added: today's model of each integration stays
+ *   as its permanent wide model, and planned models reserve their names
+ *   up front (`plannedModelNames`) so a dbt explore can't take them first
+ *
+ * `apiSourceNames.test.ts` snapshots every integration's explore names and
+ * field ids; a failing snapshot means saved content would break.
+ */
 export const getApiSourceExploreName = (
     sourceName: string,
     definitionName: string,
@@ -74,82 +69,48 @@ export const getLegacyLiveSourceName = (
     connectionUuid: string,
 ) => `${connector}_${connectionUuid.replace(/-/g, '').slice(0, 8)}`;
 
-/** A new source's name before any clash suffix: `PostHog` → `posthog`. */
-export const getLiveSourceNameBase = (
-    connector: ApiConnectorType,
-    name: string,
-) => {
-    const base = generateSlug(name).replace(/-/g, '_');
-    return /^[a-z][a-z0-9_]*$/.test(base) ? base : connector;
-};
-
-/** The hand-written explore of an integration, before any scan. */
 export const getApiSourceBaseLayer = (
     connector: ApiConnectorType,
-): { baseVersion: number; definition: ApiSourceExploreDefinition } => {
-    switch (connector) {
-        case ApiConnectorType.GA4:
-            return {
-                baseVersion: GA4_SEMANTIC_LAYER_VERSION,
-                definition: GA4_REPORT_EXPLORE,
-            };
-        case ApiConnectorType.SEARCH_CONSOLE:
-            return {
-                baseVersion: SEARCH_CONSOLE_SEMANTIC_LAYER_VERSION,
-                definition: SEARCH_CONSOLE_PERFORMANCE_EXPLORE,
-            };
-        case ApiConnectorType.POSTHOG:
-            return {
-                baseVersion: POSTHOG_SEMANTIC_LAYER_VERSION,
-                definition: POSTHOG_EVENTS_EXPLORE,
-            };
-        default:
-            return assertUnreachable(connector, 'Unknown api connector');
-    }
-};
+): ApiSourceBaseLayer => getApiSourceIntegration(connector).baseLayer;
 
-/** The explore names a source with this name would get. */
+/** The wide model of an integration, which scans and field edits apply to. */
+export const getApiSourceWideDefinition = (
+    connector: ApiConnectorType,
+): ApiSourceExploreDefinition =>
+    getApiSourceBaseLayer(connector).definitions[0];
+
+/** The explore names a source with this name gets today. */
 export const getApiSourceExploreNames = (
     connector: ApiConnectorType,
     sourceName: string,
-): string[] => [
-    getApiSourceExploreName(
-        sourceName,
-        getApiSourceBaseLayer(connector).definition.name,
-    ),
-];
+): string[] =>
+    getApiSourceBaseLayer(connector).definitions.map(({ name }) =>
+        getApiSourceExploreName(sourceName, name),
+    );
+
+/** The explore names kept free for the integration's planned models. */
+export const getApiSourceReservedExploreNames = (
+    connector: ApiConnectorType,
+    sourceName: string,
+): string[] =>
+    getApiSourceBaseLayer(connector).plannedModelNames.map((modelName) =>
+        getApiSourceExploreName(sourceName, modelName),
+    );
 
 /** The fields a scan found beyond the integration's built-in ones. */
 export const toScannedLiveSourceFields = (
     connector: ApiConnectorType,
     scan: ApiSourceScan,
 ): ScannedLiveSourceField[] => {
-    const { definition } = getApiSourceBaseLayer(connector);
-    const getScannedDefinition = (): ApiSourceExploreDefinition => {
-        switch (connector) {
-            case ApiConnectorType.GA4:
-                return withGa4MetadataFields(definition, scan.ga4Metadata);
-            case ApiConnectorType.SEARCH_CONSOLE:
-                return definition;
-            case ApiConnectorType.POSTHOG:
-                return scan.posthogProperties
-                    ? withPostHogPropertyFields(
-                          definition,
-                          scan.posthogProperties,
-                      )
-                    : definition;
-            default:
-                return assertUnreachable(connector, 'Unknown api connector');
-        }
-    };
-    const scanned = getScannedDefinition();
+    const definition = getApiSourceWideDefinition(connector);
+    const { withScannedFields, isInternalField } =
+        getApiSourceIntegration(connector);
+    const scanned = withScannedFields?.(definition, scan) ?? definition;
     const builtInNames = new Set([
         ...definition.dimensions.map(({ name }) => name),
         ...definition.metrics.map(({ name }) => name),
     ]);
-    const isInternal = (apiName: string) =>
-        connector === ApiConnectorType.POSTHOG &&
-        isInternalPostHogProperty(apiName);
+    const isInternal = (apiName: string) => isInternalField?.(apiName) ?? false;
     return [
         ...scanned.dimensions
             .filter(({ name }) => !builtInNames.has(name))
@@ -172,14 +133,122 @@ export const toScannedLiveSourceFields = (
     ];
 };
 
+const buildDefinitionExplore = (
+    connector: ApiConnectorType,
+    args: Pick<
+        Parameters<typeof buildApiSourceExplore>[0],
+        | 'definition'
+        | 'exploreName'
+        | 'label'
+        | 'connectionUuid'
+        | 'definitionHash'
+        | 'aiHint'
+    >,
+) => {
+    const { baseVersion, capabilities } = getApiSourceBaseLayer(connector);
+    return buildApiSourceExplore({
+        ...args,
+        integration: connector,
+        baseVersion,
+        capabilities,
+        warehouseSqlBuilder:
+            getApiSourceIntegration(connector).warehouseSqlBuilder ??
+            DEFAULT_SQL_BUILDER,
+    });
+};
+
+/** JSON with object keys sorted, so a hash can't depend on key order. */
+const toStableJson = (value: unknown): string =>
+    JSON.stringify(value, (_key, nested: unknown) =>
+        isPlainObject(nested)
+            ? Object.fromEntries(
+                  Object.entries(nested as object).sort(([left], [right]) =>
+                      left < right ? -1 : 1,
+                  ),
+              )
+            : nested,
+    );
+
+/**
+ * What the integration's code currently builds, by model name. Each hash
+ * comes from the explore built with placeholders for everything specific to
+ * one source (prefix, label, connection, scanned fields, field edits), so it
+ * changes when the code's output does, and nobody has to bump a version.
+ */
+export const getApiSourceDefinitionHashes = memoize(
+    (connector: ApiConnectorType): Record<string, string> =>
+        Object.fromEntries(
+            getApiSourceBaseLayer(connector).definitions.map((definition) => [
+                definition.name,
+                createHash('sha256')
+                    .update(
+                        toStableJson(
+                            buildDefinitionExplore(connector, {
+                                definition,
+                                exploreName: getApiSourceExploreName(
+                                    'source',
+                                    definition.name,
+                                ),
+                                label: 'source',
+                                connectionUuid: 'connection',
+                                // A placeholder, so a change to how hints
+                                // are built still changes the hash
+                                aiHint: ['hint'],
+                            }),
+                        ),
+                    )
+                    .digest('hex'),
+            ]),
+        ),
+);
+
+/**
+ * Field ids stored today that a rebuild would lose, which would break the
+ * charts on them. A field an admin took out of use isn't lost.
+ */
+export const getLostApiSourceFieldIds = ({
+    storedFieldIds,
+    rebuilt,
+    edits,
+}: {
+    storedFieldIds: string[];
+    rebuilt: Explore[];
+    edits: LiveSourceFieldEdits;
+}): string[] => {
+    const kept = new Set([
+        ...rebuilt.flatMap(({ apiSource }) =>
+            Object.keys(apiSource?.fields ?? {}),
+        ),
+        ...Object.entries(edits).flatMap(([name, edit]) =>
+            edit.inUse === false
+                ? [getItemId({ table: rebuilt[0].name, name })]
+                : [],
+        ),
+    ]);
+    return storedFieldIds.filter((fieldId) => !kept.has(fieldId));
+};
+
+/** What the source reads, for the AI agent. Admins can't remove this. */
+export const describeApiSourceTarget = (
+    apiSource: ExternalConnectionApiSource,
+    origin: string,
+    targetLabel: string | null,
+): string =>
+    getApiSourceIntegration(apiSource.connector).describeTarget({
+        apiSource,
+        origin,
+        targetLabel,
+    });
+
 /** The explores a live data source answers metric queries with. */
 export const buildApiSourceExplores = ({
     connectionUuid,
     sourceName,
-    name,
+    name: label,
     apiSource,
     scannedFields,
     edits,
+    aiHint,
 }: {
     connectionUuid: string;
     sourceName: string;
@@ -187,24 +256,29 @@ export const buildApiSourceExplores = ({
     apiSource: ExternalConnectionApiSource;
     scannedFields: ScannedLiveSourceField[];
     edits: LiveSourceFieldEdits;
+    /** The target first, then the admin's text. */
+    aiHint?: string[];
 }): Explore[] => {
-    const { baseVersion, definition } = getApiSourceBaseLayer(
-        apiSource.connector,
-    );
-    return [
-        buildApiSourceExplore({
-            definition: applyLiveSourceFieldEdits({
-                base: definition,
-                scannedFields,
-                edits,
-            }),
+    const {
+        definitions: [wide, ...others],
+    } = getApiSourceBaseLayer(apiSource.connector);
+    const definitionHashes = getApiSourceDefinitionHashes(apiSource.connector);
+    const build = (definition: ApiSourceExploreDefinition, isWide: boolean) =>
+        buildDefinitionExplore(apiSource.connector, {
+            definition,
             exploreName: getApiSourceExploreName(sourceName, definition.name),
-            label: name,
+            // The wide model keeps the source's name; the others add theirs
+            label: isWide ? label : `${label} ${definition.label}`,
             connectionUuid,
-            integration: apiSource.connector,
-            baseVersion,
-            warehouseSqlBuilder: getSqlBuilder(apiSource.connector),
-        }),
+            definitionHash: definitionHashes[definition.name],
+            aiHint,
+        });
+    return [
+        build(
+            applyLiveSourceFieldEdits({ base: wide, scannedFields, edits }),
+            true,
+        ),
+        ...others.map((definition) => build(definition, false)),
     ];
 };
 
@@ -221,34 +295,18 @@ export const compileApiSourceMetricQuery = ({
     now: Date;
 }): CompiledApiSourceQuery => {
     const integration = explore.apiSource?.integration;
-    switch (integration) {
-        case ApiConnectorType.GA4:
-            return compileGa4Query({
-                explore,
-                metricQuery,
-                today: getIsoDateInTimeZone(now, timezone),
-            });
-        case ApiConnectorType.SEARCH_CONSOLE:
-            return compileSearchConsoleQuery({
-                explore,
-                metricQuery,
-                today: getIsoDateInTimeZone(now, SEARCH_CONSOLE_TIME_ZONE),
-                maxRows: SEARCH_CONSOLE_MAX_QUERY_ROWS,
-            });
-        case ApiConnectorType.POSTHOG:
-            return compilePostHogQuery({
-                explore,
-                metricQuery,
-                warehouseSqlBuilder: getSqlBuilder(integration),
-                timezone,
-            });
-        case undefined:
-            throw new UnexpectedServerError(
-                `"${explore.name}" isn't a live data source explore`,
-            );
-        default:
-            return assertUnreachable(integration, 'Unknown api connector');
+    if (integration === undefined) {
+        throw new UnexpectedServerError(
+            `"${explore.name}" isn't a live data source explore`,
+        );
     }
+    assertApiSourceQuery(explore, metricQuery);
+    return getApiSourceIntegration(integration).compile({
+        explore,
+        metricQuery,
+        timezone,
+        now,
+    });
 };
 
 const compareValues = (left: unknown, right: unknown): number => {
@@ -288,6 +346,63 @@ const sortRows = (rows: Record<string, unknown>[], sorts: SortField[]) =>
               return order ?? 0;
           });
 
+const DAY_MS = 86_400_000;
+
+/** The first day of a compact period such as 202644 (ISO week), 202610 or 2026. */
+export const toPeriodStart = (
+    value: unknown,
+    format: ApiSourcePeriodFormat,
+): unknown => {
+    const text = String(value);
+    const pad = (number: number) => String(number).padStart(2, '0');
+    switch (format) {
+        case 'year':
+            return /^\d{4}$/.test(text) ? `${text}-01-01` : value;
+        case 'year_month':
+            return /^\d{6}$/.test(text)
+                ? `${text.slice(0, 4)}-${text.slice(4)}-01`
+                : value;
+        case 'iso_week': {
+            if (!/^\d{6}$/.test(text)) {
+                return value;
+            }
+            // ISO week 1 holds January 4th; weeks start on Monday
+            const year = Number(text.slice(0, 4));
+            const week = Number(text.slice(4));
+            const january4 = Date.UTC(year, 0, 4);
+            const weekOneMonday =
+                january4 - ((new Date(january4).getUTCDay() + 6) % 7) * DAY_MS;
+            const monday = new Date(weekOneMonday + (week - 1) * 7 * DAY_MS);
+            return `${monday.getUTCFullYear()}-${pad(
+                monday.getUTCMonth() + 1,
+            )}-${pad(monday.getUTCDate())}`;
+        }
+        default:
+            return assertUnreachable(format, 'Unknown period format');
+    }
+};
+
+/**
+ * Refuses a result sorted on our side when the API kept rows back: the sort
+ * would rank only the rows read, so the top rows shown could be the wrong
+ * ones. A result in the API's own order only loses rows past its limit.
+ */
+export const assertApiResultComplete = ({
+    compiled,
+    hasMoreRows,
+    label,
+    maxRows,
+}: {
+    compiled: Pick<CompiledApiSourceQuery, 'localSorts'>;
+    hasMoreRows: boolean;
+    label: string;
+    maxRows: number;
+}): void => {
+    if (hasMoreRows && compiled.localSorts.length > 0) {
+        throw tooManyRowsError({ label, maxRows });
+    }
+};
+
 /** The connector's rows as result rows keyed by field id, sorted and limited. */
 export const toApiSourceResult = ({
     compiled,
@@ -299,12 +414,19 @@ export const toApiSourceResult = ({
     fields: ItemsMap;
 }): { rows: Record<string, unknown>[]; columns: ResultColumns } => {
     const columnEntries = Object.entries(compiled.fieldIdsByColumn);
+    const periodColumns = compiled.periodColumns ?? {};
     const resultRows = rows.map((row) =>
         Object.fromEntries(
-            columnEntries.map(([column, fieldId]) => [
-                fieldId,
-                row[column] ?? null,
-            ]),
+            columnEntries.map(([column, fieldId]) => {
+                const value = row[column] ?? null;
+                const format = periodColumns[column];
+                return [
+                    fieldId,
+                    format && value !== null
+                        ? toPeriodStart(value, format)
+                        : value,
+                ];
+            }),
         ),
     );
     const columns: ResultColumns = Object.fromEntries(

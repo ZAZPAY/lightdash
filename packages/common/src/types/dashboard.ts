@@ -5,8 +5,14 @@ import { type ContentVerificationInfo } from './contentVerification';
 import { type FilterableDimension, type Metric } from './field';
 import { type DashboardFieldTarget, type DashboardFilters } from './filter';
 import { type KnexPaginatedData } from './knex-paginate';
+import { type LightdashProjectParameter } from './lightdashProjectConfig';
 import { type AdditionalMetric } from './metricQuery';
-import { type DashboardParameters } from './parameters';
+import {
+    type DashboardParameters,
+    type ParameterDefinitions,
+    type ParametersValuesMap,
+    type ParameterValue,
+} from './parameters';
 import { type ProjectType } from './projects';
 import {
     type ChartKind,
@@ -27,6 +33,7 @@ export enum DashboardTileTypes {
     LOOM = 'loom',
     HEADING = 'heading',
     DATA_APP = 'data_app',
+    COMPOSER_CHART = 'composer_chart',
 }
 
 export type DashboardTilePosition = {
@@ -115,6 +122,18 @@ export type DashboardDataAppTileProperties = {
     };
 };
 
+export type DashboardComposerChartTileProperties = {
+    type: DashboardTileTypes.COMPOSER_CHART;
+    properties: {
+        title?: string;
+        hideTitle?: boolean;
+        // Null only when a tile lost its chart link, e.g. a preview copy.
+        composerChartUuid: string | null;
+        // Set by the backend on read.
+        chartName: string | null;
+    };
+};
+
 export type CreateDashboardMarkdownTile = CreateDashboardTileBase &
     DashboardMarkdownTileProperties;
 export type DashboardMarkdownTile = DashboardTileBase &
@@ -144,6 +163,11 @@ export type CreateDashboardDataAppTile = CreateDashboardTileBase &
 export type DashboardDataAppTile = DashboardTileBase &
     DashboardDataAppTileProperties;
 
+export type CreateDashboardComposerChartTile = CreateDashboardTileBase &
+    DashboardComposerChartTileProperties;
+export type DashboardComposerChartTile = DashboardTileBase &
+    DashboardComposerChartTileProperties;
+
 export type CreateDashboard = {
     name: string;
     description?: string;
@@ -154,6 +178,7 @@ export type CreateDashboard = {
         | CreateDashboardSqlChartTile
         | CreateDashboardHeadingTile
         | CreateDashboardDataAppTile
+        | CreateDashboardComposerChartTile
     >;
     filters?: DashboardFilters;
     parameters?: DashboardParameters;
@@ -163,7 +188,7 @@ export type CreateDashboard = {
     tabs: DashboardTab[];
     config?: DashboardConfig;
     colorPaletteUuid?: string | null;
-    /** Set to a user uuid to assign an owner, null or omitted for no owner */
+    /** Set to a user uuid to assign an owner, null for no owner. Omitted defaults to the creator */
     ownerUserUuid?: string | null;
 };
 
@@ -173,7 +198,8 @@ export type DashboardTile =
     | DashboardLoomTile
     | DashboardSqlChartTile
     | DashboardHeadingTile
-    | DashboardDataAppTile;
+    | DashboardDataAppTile
+    | DashboardComposerChartTile;
 
 export const isDashboardChartTileType = (
     tile: DashboardTile,
@@ -198,6 +224,11 @@ export const isDashboardHeadingTileType = (
 export const isDashboardDataAppTileType = (
     tile: DashboardTile,
 ): tile is DashboardDataAppTile => tile.type === DashboardTileTypes.DATA_APP;
+
+export const isDashboardComposerChartTile = (
+    tile: DashboardTileBase,
+): tile is DashboardComposerChartTile =>
+    tile.type === DashboardTileTypes.COMPOSER_CHART;
 
 export type DashboardTab = {
     uuid: string;
@@ -243,18 +274,56 @@ export type DateZoomControl = {
 };
 
 export type DashboardControlSection = {
+    /** Ignored: content as code derives slugs on every download. */
+    slug?: string;
     /** uuid, stable across dashboard versions */
     id: string;
     name: string;
-    /** Starts folded in the rail and on the bar; absent, the bar folds only a dense section */
+    /** Starts folded in the editor and on the bar; absent, the bar folds only a dense section */
     collapsed?: boolean;
-    /** Sits on the bar line of the section before it; absent, starts a line of its own */
-    inline?: boolean;
 };
 
 export type DateZoomConfig = {
     controls: DateZoomControl[];
     tileTargets: Record<string, DateZoomTileTarget>;
+};
+
+export type DashboardParameterTarget<TileRef extends string = string> =
+    | 'all'
+    | { only: TileRef[] }
+    | { except: TileRef[] };
+
+export type DashboardParameterControl = {
+    id: string;
+    /** Ignored: content as code derives slugs on every download. */
+    slug?: string;
+    label: string | null;
+    value: ParameterValue | null;
+    valueType: Required<Pick<LightdashProjectParameter, 'type' | 'multiple'>>;
+    sectionId?: string;
+    parameters: Record<string, DashboardParameterTarget>;
+    hidden?: boolean;
+};
+
+/**
+ * Kinds of control a `DashboardControlRef` can point at. Open-ended: new kinds
+ * may be added, so consumers must ignore a kind they don't know. Request
+ * validation rejects unknown values, so a new kind ships in a release before
+ * anything writes it.
+ */
+export enum DashboardControlRefKind {
+    FILTER = 'filter',
+    PARAMETER = 'parameter',
+    DATE_ZOOM = 'dateZoom',
+    SECTION = 'section',
+}
+
+export type DashboardControlRef = {
+    kind: DashboardControlRefKind;
+    /** The control's id: filter rule id, parameter control id, date zoom control uuid or section id */
+    id: string;
+    /** Starts a new bar line; absent, it shares the line of the control before it. On a section member it passes to the next loose entry in the list */
+    newLine?: boolean;
 };
 
 export type DashboardConfig = {
@@ -273,8 +342,11 @@ export type DashboardConfig = {
     /** Named sets of controls, in display order. Controls point at a section
      *  by id; controls with no section render first, unsectioned. */
     controlSections?: DashboardControlSection[];
-    /** Parameter name to section id. Parameters have no saved object of their own. */
-    parameterSections?: { [parameterName: string]: string };
+    /** Absent: filled from the parameters tiles use. Present (even empty): exactly these. */
+    parameterControls?: DashboardParameterControl[];
+    /** The order of controls of every kind on the bar. A hint: readers drop refs
+     *  that match no control and append unlisted ones. Absent: the default order. */
+    controlOrder?: DashboardControlRef[];
 };
 
 export type DashboardOwner = {
@@ -424,7 +496,14 @@ export type DashboardTileParameterReferencesRequest = {
 };
 
 export type DashboardTileParameterReferences =
-    | { tileUuid: string; parameterReferences: string[]; error: null }
+    | {
+          tileUuid: string;
+          parameterReferences: string[];
+          parameterDefinitions?: ParameterDefinitions;
+          chartSavedValues: ParametersValuesMap;
+          virtualViewSavedValues: ParametersValuesMap;
+          error: null;
+      }
     | { tileUuid: string; parameterReferences: null; error: string };
 
 export type ApiDashboardTileParameterReferencesResponse = {

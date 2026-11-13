@@ -1,5 +1,6 @@
 import {
     DashboardTileTypes,
+    type DashboardTab,
     DimensionType,
     FilterOperator,
     type DashboardFilterRule,
@@ -20,7 +21,7 @@ import {
     dashboardFiltersActions,
     selectDashboardFilters,
 } from '../dashboard/store';
-import { ControlsSidebarProvider } from './ControlsSidebarProvider';
+import { ControlsEditorProvider } from './ControlsEditorProvider';
 import { FilterPills } from './FilterPills';
 
 // The provider and the pills as they are: only the dashboard context is mocked
@@ -65,6 +66,7 @@ describe('moving a pill on the bar', () => {
         const store = createDashboardTestStore({ dashboardFilters: filters });
         const fields = [field('status'), field('region')];
         mockDashboardContext.current = {
+            setDateZoomGranularity: vi.fn(),
             dashboard: { uuid: 'dashboard-1', filters, tiles: [] },
             dashboardTiles: [
                 {
@@ -100,9 +102,9 @@ describe('moving a pill on the bar', () => {
         );
         renderWithProviders(
             <DashboardStoreTestProvider store={store}>
-                <ControlsSidebarProvider>
+                <ControlsEditorProvider>
                     <FilterPills activeTabUuid={undefined} />
-                </ControlsSidebarProvider>
+                </ControlsEditorProvider>
             </DashboardStoreTestProvider>,
         );
         const pills = () =>
@@ -126,6 +128,93 @@ describe('moving a pill on the bar', () => {
         expect(
             screen.getByText('Status moved after Region'),
         ).toBeInTheDocument();
+        vi.useRealTimers();
+    });
+    it('skips a neighbour hidden on the tab in view, and says where it went', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        const tabbed: DashboardFilters = {
+            dimensions: [
+                rule('status', 'Status'),
+                rule('region', 'Region'),
+                rule('city', 'City'),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const store = createDashboardTestStore({ dashboardFilters: tabbed });
+        const fields = [field('status'), field('region'), field('city')];
+        const tabs = [
+            { uuid: 'tab-1', name: 'One', order: 0 },
+            { uuid: 'tab-2', name: 'Two', order: 1 },
+        ] as DashboardTab[];
+        const onTab = (uuid: string, tabUuid: string) =>
+            ({
+                uuid,
+                tabUuid,
+                type: DashboardTileTypes.SAVED_CHART,
+                properties: {},
+            }) as DashboardTile;
+        mockDashboardContext.current = {
+            setDateZoomGranularity: vi.fn(),
+            dashboard: { uuid: 'dashboard-1', filters: tabbed, tiles: [] },
+            dashboardTiles: [
+                onTab('tile-1', 'tab-1'),
+                onTab('tile-2', 'tab-2'),
+            ],
+            dashboardTabs: tabs,
+            activeTab: tabs[0],
+            // Region is only on the other tab's tile
+            filterableFieldsByTileUuid: {
+                'tile-1': [fields[0], fields[2]],
+                'tile-2': [fields[1]],
+            },
+            allFilterableFields: fields,
+            allFilterableFieldsMap: {
+                orders_status: fields[0],
+                orders_region: fields[1],
+                orders_city: fields[2],
+            },
+            allFilterableMetricsMap: {},
+            isLoadingDashboardFilters: false,
+            isFetchingDashboardFilters: false,
+            setDashboardFilters: (value: SetStateAction<DashboardFilters>) =>
+                store.dispatch(
+                    dashboardFiltersActions.setDashboardFilters(
+                        typeof value === 'function'
+                            ? value(selectDashboardFilters(store.getState()))
+                            : value,
+                    ),
+                ),
+            setHaveFiltersChanged: vi.fn(),
+            setDashboardTemporaryFilters: vi.fn(),
+        };
+        seedDashboardEditState(
+            store,
+            mockDashboardContext.current as DashboardEditTestValues,
+        );
+        renderWithProviders(
+            <DashboardStoreTestProvider store={store}>
+                <ControlsEditorProvider>
+                    <FilterPills activeTabUuid="tab-1" />
+                </ControlsEditorProvider>
+            </DashboardStoreTestProvider>,
+        );
+        const status = () =>
+            document.querySelector<HTMLElement>(
+                '[data-controls-pill="status"]',
+            )!;
+
+        act(() => status().focus());
+        fireEvent.keyDown(status(), { key: 'ArrowRight', altKey: true });
+        await act(() => vi.runAllTimersAsync());
+
+        expect(
+            selectDashboardFilters(store.getState()).dimensions.map(
+                ({ id }) => id,
+            ),
+        ).toEqual(['region', 'city', 'status']);
+        expect(status()).toHaveFocus();
+        expect(screen.getByText('Status moved after City')).toBeInTheDocument();
         vi.useRealTimers();
     });
 });

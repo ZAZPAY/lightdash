@@ -9,21 +9,36 @@ import {
     assertUnreachable,
     canAddDashboardFiltersInEmbed,
     getDefaultChartTileSize,
+    isFilterInteractivityEnabled,
+    isParameterInteractivityVisible,
     isTileInEmbedExport,
+    translateDashboardControlNames,
     type DashboardFilters,
     type DashboardTile,
     type EmbedDashboard as EmbedDashboardType,
     type ParametersValuesMap,
     type SavedChart,
     getEmbedWriteSpaceUuids,
+    type DashboardVersionedFields,
 } from '@lightdash/common';
 import { Box, Button, Group, Tabs, TextInput } from '@mantine/core';
 import { useSessionStorage } from '@mantine/hooks';
 import { IconCheck, IconPencil, IconUnlink, IconX } from '@tabler/icons-react';
-import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
+import { isEqual } from 'es-toolkit/compat';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+    type ReactNode,
+} from 'react';
 import { type Layout } from 'react-grid-layout';
 import { useLocation } from 'react-router';
 import { v4 as uuid4 } from 'uuid';
+import headerClasses from '../../../../../components/common/Dashboard/DashboardHeader.module.css';
+import { DocumentTitle } from '../../../../../components/common/DocumentTitle';
 import MantineIcon from '../../../../../components/common/MantineIcon';
 import ScreenshotReadyIndicator from '../../../../../components/common/ScreenshotReadyIndicator';
 import SuboptimalState from '../../../../../components/common/SuboptimalState/SuboptimalState';
@@ -33,28 +48,41 @@ import LoomTile from '../../../../../components/DashboardTiles/DashboardLoomTile
 import SqlChartTile from '../../../../../components/DashboardTiles/DashboardSqlChartTile';
 import TileBase from '../../../../../components/DashboardTiles/TileBase';
 import UnmetRequirementsPlaceholder from '../../../../../components/DashboardTiles/UnmetRequirementsPlaceholder';
+import DashboardComposerChartTile from '../../../../../features/composerCharts/components/DashboardComposerChartTile';
 import {
     selectActiveTab,
     selectDashboardFilters,
+    selectDashboardParameters,
     selectDashboardTabs,
     selectDashboardTiles,
     selectHaveFiltersChanged,
     selectHaveTabsChanged,
     selectHaveTilesChanged,
     selectIsAddFilterDisabled,
+    selectIsDateZoomDisabled,
+    dashboardDateZoomActions,
+    dashboardParametersActions,
+    useDashboardDispatch,
     useDashboardSelector,
+    combineDashboardFilters,
     useDashboardTemporaryFilters,
     useDashboardUnmetFilterRequirements,
 } from '../../../../../features/dashboard/store';
-import { ControlsSidebarProvider } from '../../../../../features/dashboardControls/ControlsSidebarProvider';
+import { type ControlContractClassNames } from '../../../../../features/dashboardControls/controlContractClasses';
+import { ControlsEditorProvider } from '../../../../../features/dashboardControls/ControlsEditorProvider';
+import { DateZoomTileOverlays } from '../../../../../features/dashboardControls/DateZoomTileOverlay';
+import { DateZoomTilesBar } from '../../../../../features/dashboardControls/DateZoomTilesBar';
 import { FieldTilesBar } from '../../../../../features/dashboardControls/FieldTilesBar';
-import { type RailContractClassNames } from '../../../../../features/dashboardControls/railContractClasses';
+import pillClasses from '../../../../../features/dashboardControls/FilterPills.module.css';
+import { ParameterTileOverlays } from '../../../../../features/dashboardControls/ParameterTileOverlay';
+import { ParameterTilesBar } from '../../../../../features/dashboardControls/ParameterTilesBar';
 import { TabCounts } from '../../../../../features/dashboardControls/TabCounts';
 import { TileOverlays } from '../../../../../features/dashboardControls/TileOverlay';
+import { useControlDraftResets } from '../../../../../features/dashboardControls/useControlDraftResets';
+import { useIsControlEdited } from '../../../../../features/dashboardControls/useIsControlEdited';
 import GuidedFilterSetupOverlay from '../../../../../features/dashboardFilters/FilterRequirements/GuidedFilterSetupOverlay';
 import {
     convertLayoutToBaseCoordinates,
-    GRID_CONTAINER_PADDING,
     getDashboardLayouts,
     type DashboardLayouts,
     getResponsiveGridLayoutProps,
@@ -73,32 +101,44 @@ import useDashboardTileStatusContext from '../../../../../providers/Dashboard/us
 import { type EmbedExploreOptions } from '../../../../providers/Embed/types';
 import useEmbed from '../../../../providers/Embed/useEmbed';
 import { LightdashEventType } from '../../events/types';
+import { useEmbedContentHeightEvent } from '../../hooks/useEmbedContentHeightEvent';
 import { useEmbedDashboardTabChange } from '../../hooks/useEmbedDashboardTabChange';
 import { embedContractClass } from '../../styles/embedClassContract';
+import { applyFilterLabelOverrides } from '../filterLabelOverrides';
 import {
-    applyFilterLabelOverrides,
-    restoreFilterLabelOverrides,
-} from '../filterLabelOverrides';
-import { useEmbedDashboard, useEmbedSavedParameters } from '../hooks';
+    useEmbedDashboard,
+    useEmbedDashboardRefreshKey,
+    useEmbedSavedParameters,
+} from '../hooks';
 import {
     type ChartSaveDestination,
     type EmbedChartSaveDashboard,
 } from '../types';
 import { canUseEmbeddedChartBuilder } from '../utils';
 import classes from './EmbedDashboard.module.css';
+import { EmbedDashboardAiAgentContextPublisher } from './EmbedDashboardAiAgentContextPublisher';
 import EmbedDashboardChartEditorModal from './EmbedDashboardChartEditorModal';
 import EmbedDashboardChartTile from './EmbedDashboardChartTile';
+import EmbedDashboardContentStateEvent from './EmbedDashboardContentStateEvent';
 import EmbedDashboardHeader from './EmbedDashboardHeader';
+import {
+    buildEmbedDashboardUpdate,
+    getEmbedControlDrafts,
+    haveEmbedControlsChanged,
+} from './embedDashboardSave';
 import EmbedDataAppTile from './EmbedDataAppTile';
 import { EmbedHeadingTile } from './EmbedHeadingTile';
 import { EmbedMarkdownTile } from './EmbedMarkdownTile';
-import { isEmbedFilterRailEnabled } from './isEmbedFilterRailEnabled';
 import '../../../../../styles/react-grid.css';
 
-const RAIL_CONTRACT_CLASSES: RailContractClassNames = {
-    rail: embedContractClass('ld-dashboard-filter-rail'),
+const CONTROL_CONTRACT_CLASSES: ControlContractClassNames = {
+    editor: embedContractClass('ld-dashboard-control-editor'),
     addFilterDropdown: embedContractClass('ld-dashboard-add-filter-dropdown'),
     filterDropdown: embedContractClass('ld-dashboard-filter-dropdown'),
+    parameter: embedContractClass('ld-dashboard-parameter'),
+    parameterDropdown: embedContractClass('ld-dashboard-parameter-dropdown'),
+    dateZoom: embedContractClass('ld-dashboard-date-zoom'),
+    dateZoomDropdown: embedContractClass('ld-dashboard-date-zoom-dropdown'),
 };
 
 const EMBED_EDIT_TILE_TYPES = [
@@ -106,6 +146,24 @@ const EMBED_EDIT_TILE_TYPES = [
     DashboardTileTypes.MARKDOWN,
     DashboardTileTypes.HEADING,
 ];
+
+// While a control is edited the toolbar is inert, Save and Cancel included:
+// Apply or Cancel in the editor ends the control first, as the app's header,
+// whose guard attribute it shares so Save draws as an outline meanwhile
+const EmbedToolbarGuard: FC<{ children: ReactNode }> = ({ children }) => {
+    const isLocked = useIsControlEdited(true);
+    return (
+        <Box
+            display="contents"
+            className={pillClasses.inert}
+            data-embed-toolbar-guard
+            data-dashboard-header-guard
+            inert={isLocked || undefined}
+        >
+            {children}
+        </Box>
+    );
+};
 
 const EmbedTileLoadTracker: FC<{
     tile: DashboardTile;
@@ -168,7 +226,6 @@ const EmbedDashboardGrid: FC<{
     gridProps: ResponsiveGridLayoutProps;
     isEditMode: boolean;
     onLayoutChange: (layout: Layout[]) => void;
-    onBreakpointChange: (cols: number) => void;
     onDeleteTile: (tile: DashboardTile) => void;
     onEditTile: (tile: DashboardTile) => void;
     onEditChart?: (chart: SavedChart) => void;
@@ -187,7 +244,6 @@ const EmbedDashboardGrid: FC<{
     gridProps,
     isEditMode,
     onLayoutChange,
-    onBreakpointChange,
     onDeleteTile,
     onEditTile,
     onEditChart,
@@ -215,10 +271,8 @@ const EmbedDashboardGrid: FC<{
                 <ResponsiveGridLayout
                     {...gridProps}
                     layouts={layouts}
-                    containerPadding={GRID_CONTAINER_PADDING}
                     onDragStop={onLayoutChange}
                     onResizeStop={onLayoutChange}
-                    onBreakpointChange={(_, cols) => onBreakpointChange(cols)}
                     className="react-grid-layout-dashboard"
                 >
                     {filteredTiles.map((tile, index) => (
@@ -350,6 +404,16 @@ const EmbedDashboardGrid: FC<{
                                     tile={tile}
                                     projectUuid={projectUuid}
                                 />
+                            ) : tile.type ===
+                              DashboardTileTypes.COMPOSER_CHART ? (
+                                <DashboardComposerChartTile
+                                    key={tile.uuid}
+                                    minimal
+                                    tile={tile}
+                                    isEditMode={isEditMode}
+                                    onDelete={() => onDeleteTile(tile)}
+                                    onEdit={onEditTile}
+                                />
                             ) : (
                                 assertUnreachable(
                                     tile,
@@ -370,12 +434,16 @@ const EmbedDashboard: FC<{
     isEditMode?: boolean;
     onEditModeChange?: (isEditMode: boolean) => void;
     chartSaveDestinations?: ChartSaveDestination[];
+    sharesViewWithAiAgent?: boolean;
+    refreshKey?: number;
 }> = ({
     containerStyles,
     initialDashboard,
     isEditMode: controlledIsEditMode,
     onEditModeChange,
     chartSaveDestinations,
+    sharesViewWithAiAgent = true,
+    refreshKey,
 }) => {
     const projectUuid = useDashboardContext((c) => c.projectUuid);
     const activeTab = useDashboardSelector(selectActiveTab);
@@ -396,10 +464,20 @@ const EmbedDashboard: FC<{
         (c) => c.resetDashboardFilters,
     );
     const isAddFilterDisabled = useDashboardSelector(selectIsAddFilterDisabled);
+    const dashboardParameters = useDashboardSelector(selectDashboardParameters);
     const dashboardTabs = useDashboardSelector(selectDashboardTabs);
     const setDashboardTabs = useDashboardContext((c) => c.setDashboardTabs);
     const setHaveTabsChanged = useDashboardContext((c) => c.setHaveTabsChanged);
     const haveTabsChanged = useDashboardSelector(selectHaveTabsChanged);
+    const dashboardDispatch = useDashboardDispatch();
+    const setDateZoomGranularity = useDashboardContext(
+        (c) => c.setDateZoomGranularity,
+    );
+    const isDateZoomDisabled = useDashboardSelector(selectIsDateZoomDisabled);
+    const setIsDateZoomDisabled = useDashboardContext(
+        (c) => c.setIsDateZoomDisabled,
+    );
+    const { resetControlDrafts, settleControlDrafts } = useControlDraftResets();
 
     const {
         dashboardUuid: embedDashboardUuid,
@@ -413,6 +491,10 @@ const EmbedDashboard: FC<{
         writeActions,
     } = useEmbed();
     const { pathname, search } = useLocation();
+    const [contentElement, setContentElement] = useState<HTMLDivElement | null>(
+        null,
+    );
+    useEmbedContentHeightEvent(contentElement);
     // Server-side PDF export render: tiles only, seeded with the viewer's state.
     const [isMinimal] = useState(
         () =>
@@ -448,6 +530,7 @@ const EmbedDashboard: FC<{
     const { data: dashboardControlsFlag } = useServerFeatureFlag(
         FeatureFlags.DashboardControls,
     );
+    const isControlsEnabled = dashboardControlsFlag?.enabled === true;
     const setIsEditMode = useCallback(
         (nextIsEditMode: boolean) => {
             if (!isEditModeControlled) {
@@ -460,9 +543,6 @@ const EmbedDashboard: FC<{
     const [draftDashboardName, setDraftDashboardName] = useState(
         initialDashboard?.name ?? '',
     );
-    const [currentCols, setCurrentCols] = useState(
-        getResponsiveGridLayoutProps().cols.lg,
-    );
 
     if (!embedToken) {
         throw new Error('Embed token is required');
@@ -474,6 +554,7 @@ const EmbedDashboard: FC<{
         !initialDashboard,
         embedDashboardUuid,
     );
+    useEmbedDashboardRefreshKey(refreshKey, isEditMode);
     useEffect(() => {
         if (initialDashboard) {
             setLocalDashboard(initialDashboard);
@@ -514,6 +595,7 @@ const EmbedDashboard: FC<{
             setHaveTilesChanged(false);
             setHaveTabsChanged(false);
             setHaveFiltersChanged(false);
+            if (isControlsEnabled) settleControlDrafts(updatedDashboard.config);
             setIsEditMode(false);
             dispatchEmbedEvent(LightdashEventType.DashboardSaved, {
                 dashboardUuid: updatedDashboard.uuid,
@@ -522,6 +604,8 @@ const EmbedDashboard: FC<{
         },
         [
             dispatchEmbedEvent,
+            isControlsEnabled,
+            settleControlDrafts,
             setDashboardTabs,
             setDashboardTiles,
             setHaveFiltersChanged,
@@ -544,7 +628,11 @@ const EmbedDashboard: FC<{
         }
     }, [dashboard, setDashboardTiles]);
 
-    useEmbedSavedParameters(dashboard);
+    useEmbedSavedParameters(
+        dashboard,
+        isEditMode,
+        isMinimal ? exportParameters : undefined,
+    );
 
     useEffect(() => {
         if (!dashboard || isEditMode) return;
@@ -559,19 +647,57 @@ const EmbedDashboard: FC<{
     );
     const filterLabelOverrides = dashboardContentOverrides?.filters;
 
+    const writeSpaceUuids = useMemo(
+        () => getEmbedWriteSpaceUuids(writeActions),
+        [writeActions],
+    );
+    const canWriteDashboard =
+        !!dashboard &&
+        writeSpaceUuids.includes(dashboard.spaceUuid) &&
+        embedWriteContext?.canUpdateDashboard === true;
+    const isEditorInEditMode = canWriteDashboard && isEditMode;
+
     // Translated filter labels are applied before the dashboard seeds the
     // provider so every viewer surface (pills, guided setup, popovers) sees
     // them; handleSaveDashboard restores the untranslated labels.
-    const translatedDashboard = useMemo(() => {
-        if (!dashboard || !filterLabelOverrides) return dashboard;
-        return {
-            ...dashboard,
-            filters: applyFilterLabelOverrides(
-                dashboard.filters,
-                filterLabelOverrides,
-            ),
-        };
-    }, [dashboard, filterLabelOverrides]);
+    const translatedFilters = useMemo(
+        () =>
+            dashboard && filterLabelOverrides
+                ? applyFilterLabelOverrides(
+                      dashboard.filters,
+                      filterLabelOverrides,
+                  )
+                : dashboard?.filters,
+        [dashboard, filterLabelOverrides],
+    );
+    // Section, parameter control and date zoom names are translated for
+    // viewing only: an editor in edit mode works on, and saves, the source names
+    const translatedConfig = useMemo(
+        () =>
+            dashboard?.config &&
+            dashboardContentOverrides &&
+            !isEditorInEditMode
+                ? translateDashboardControlNames(
+                      dashboard.config,
+                      dashboardContentOverrides,
+                  )
+                : dashboard?.config,
+        [dashboard, dashboardContentOverrides, isEditorInEditMode],
+    );
+    const translatedDashboard = useMemo(
+        () =>
+            dashboard &&
+            translatedFilters &&
+            (translatedFilters !== dashboard.filters ||
+                translatedConfig !== dashboard.config)
+                ? {
+                      ...dashboard,
+                      filters: translatedFilters,
+                      config: translatedConfig,
+                  }
+                : dashboard,
+        [dashboard, translatedFilters, translatedConfig],
+    );
 
     const setEmbedDashboard = useDashboardContext((c) => c.setEmbedDashboard);
     useEffect(() => {
@@ -681,22 +807,71 @@ const EmbedDashboard: FC<{
         isEditMode,
     });
     const layouts = useMemo(
-        () => getDashboardLayouts(filteredTiles, isEditMode, gridProps.cols),
-        [filteredTiles, gridProps.cols, isEditMode],
+        () => getDashboardLayouts(filteredTiles, isEditMode),
+        [filteredTiles, isEditMode],
     );
 
-    const writeSpaceUuids = useMemo(
-        () => getEmbedWriteSpaceUuids(writeActions),
-        [writeActions],
+    // With the controls, the stores know an editor is editing, as in the app:
+    // a viewer's parameter picks and zoom pick are dropped, never saved
+    const isControlsEditor = isControlsEnabled && isEditorInEditMode;
+    // The provider's date zoom sync follows the store's mode: no saved
+    // default while editing, and it applies again on the way out
+    useEffect(() => {
+        dashboardDispatch(
+            dashboardParametersActions.setIsEditMode(isControlsEditor),
+        );
+        if (!isControlsEditor) return;
+        setDateZoomGranularity(undefined);
+        // A viewer's named zoom picks go for good, as the app's Edit drops them
+        dashboardDispatch(dashboardDateZoomActions.clearControlGranularities());
+    }, [dashboardDispatch, isControlsEditor, setDateZoomGranularity]);
+    // "Hide date zoom for viewers" starts from the saved value, only while an
+    // editor edits where the token allows date zoom: an embed viewer's date
+    // zoom follows the token
+    const savedIsDateZoomDisabled =
+        dashboard?.config?.isDateZoomDisabled ?? false;
+    const ownsDateZoomVisibility =
+        isControlsEditor && dashboard?.canDateZoom === true;
+    useEffect(() => {
+        if (!ownsDateZoomVisibility) return undefined;
+        setIsDateZoomDisabled(savedIsDateZoomDisabled);
+        return () => setIsDateZoomDisabled(false);
+    }, [
+        ownsDateZoomVisibility,
+        savedIsDateZoomDisabled,
+        setIsDateZoomDisabled,
+    ]);
+    const hasDateZoomVisibilityChanged =
+        ownsDateZoomVisibility &&
+        isDateZoomDisabled !== savedIsDateZoomDisabled;
+    // As the bar decides which kinds it shows
+    const canDateZoom = dashboard?.canDateZoom === true;
+    const areParametersAllowed = isParameterInteractivityVisible(
+        dashboard?.parameterInteractivity,
     );
-    const canWriteDashboard =
-        !!dashboard &&
-        writeSpaceUuids.includes(dashboard.spaceUuid) &&
-        embedWriteContext?.canUpdateDashboard === true;
-    const isControlsEnabled = isEmbedFilterRailEnabled({
-        isFlagEnabled: dashboardControlsFlag?.enabled === true,
-        isEditorInEditMode: canWriteDashboard && isEditMode,
-    });
+    const filtersInteractivity = dashboard?.dashboardFiltersInteractivity;
+    const areFiltersShown = Boolean(
+        filtersInteractivity &&
+        isFilterInteractivityEnabled(filtersInteractivity) &&
+        !filtersInteractivity.hidden,
+    );
+    const tokenAllows = useMemo(
+        () => ({
+            dateZoom: canDateZoom,
+            parameters: areParametersAllowed,
+            filters: areFiltersShown,
+        }),
+        [canDateZoom, areParametersAllowed, areFiltersShown],
+    );
+    const haveControlsChanged = useDashboardSelector(
+        (state) =>
+            isControlsEnabled &&
+            !!dashboard &&
+            haveEmbedControlsChanged(
+                dashboard,
+                getEmbedControlDrafts(state, dashboard.config, tokenAllows),
+            ),
+    );
     const canUseChartBuilder = canUseEmbeddedChartBuilder({
         canWriteDashboard,
         canCreateSavedChart: embedWriteContext?.canCreateSavedChart === true,
@@ -756,14 +931,13 @@ const EmbedDashboard: FC<{
         haveTilesChanged ||
         haveFiltersChanged ||
         haveTabsChanged ||
-        hasAddFilterDisabledChanged;
+        hasAddFilterDisabledChanged ||
+        hasDateZoomVisibilityChanged ||
+        haveControlsChanged;
 
     const handleLayoutChange = useCallback(
         (layout: Layout[]) => {
-            const unscaledLayout = convertLayoutToBaseCoordinates(
-                layout,
-                currentCols,
-            );
+            const unscaledLayout = convertLayoutToBaseCoordinates(layout);
 
             const nextTiles = currentDashboardTiles.map((tile) => {
                 const layoutTile = unscaledLayout.find(
@@ -783,12 +957,7 @@ const EmbedDashboard: FC<{
             setDashboardTiles(nextTiles);
             setHaveTilesChanged(true);
         },
-        [
-            currentCols,
-            currentDashboardTiles,
-            setDashboardTiles,
-            setHaveTilesChanged,
-        ],
+        [currentDashboardTiles, setDashboardTiles, setHaveTilesChanged],
     );
 
     const handleAddTiles = useCallback(
@@ -893,64 +1062,107 @@ const EmbedDashboard: FC<{
         }
     }, [isEditMode, resetDashboardDraft]);
 
+    // Leaving edit mode drops the control drafts too, a host's switch without
+    // Cancel and what an open editor applied on the way out included. After a
+    // save `dashboard` is the saved one, so its state is kept
+    const wasEditModeRef = useRef(isEditMode);
+    useEffect(() => {
+        const wasEditMode = wasEditModeRef.current;
+        wasEditModeRef.current = isEditMode;
+        // The config as the store is seeded on the way out: translated
+        if (isControlsEnabled && wasEditMode && !isEditMode) {
+            resetControlDrafts(translatedConfig);
+        }
+    }, [translatedConfig, isControlsEnabled, isEditMode, resetControlDrafts]);
+
     // Filters are not part of resetDashboardDraft: it also runs on mount, where
     // it would clobber the SDK/URL filter overrides the provider applies.
     const handleCancel = useCallback(() => {
         resetDashboardDraft();
         resetDashboardFilters();
         setHaveFiltersChanged(false);
+        if (isControlsEnabled) resetControlDrafts(dashboard?.config);
+        if (ownsDateZoomVisibility) {
+            setIsDateZoomDisabled(savedIsDateZoomDisabled);
+        }
         setIsEditMode(false);
     }, [
+        dashboard,
+        isControlsEnabled,
+        ownsDateZoomVisibility,
+        savedIsDateZoomDisabled,
+        setIsDateZoomDisabled,
+        resetControlDrafts,
         resetDashboardDraft,
         resetDashboardFilters,
         setHaveFiltersChanged,
         setIsEditMode,
     ]);
 
-    const handleSaveDashboard = useCallback(() => {
-        if (!dashboard) return;
+    const controlDrafts = useDashboardSelector(
+        (state) =>
+            isControlsEnabled && dashboard
+                ? getEmbedControlDrafts(state, dashboard.config, tokenAllows)
+                : null,
+        isEqual,
+    );
 
-        updateDashboard({
-            tiles: currentDashboardTiles,
-            filters: restoreFilterLabelOverrides(
-                {
-                    dimensions: [
-                        ...dashboardFilters.dimensions,
-                        ...dashboardTemporaryFilters.dimensions,
-                    ],
-                    metrics: [
-                        ...dashboardFilters.metrics,
-                        ...dashboardTemporaryFilters.metrics,
-                    ],
-                    tableCalculations: [
-                        ...dashboardFilters.tableCalculations,
-                        ...dashboardTemporaryFilters.tableCalculations,
-                    ],
-                },
-                dashboard.filters,
-                filterLabelOverrides,
-            ),
-            name: draftDashboardName.trim() || dashboard.name,
-            tabs: dashboardTabs,
-            config: {
-                ...dashboard.config,
-                isDateZoomDisabled:
-                    dashboard.config?.isDateZoomDisabled ?? false,
-                isAddFilterDisabled,
+    // What Save writes
+    const dashboardUpdate = useMemo(
+        () =>
+            dashboard
+                ? buildEmbedDashboardUpdate({
+                      dashboard,
+                      name: draftDashboardName.trim() || dashboard.name,
+                      tiles: currentDashboardTiles,
+                      tabs: dashboardTabs,
+                      filters: combineDashboardFilters(
+                          dashboardFilters,
+                          dashboardTemporaryFilters,
+                      ),
+                      filterLabelOverrides,
+                      filtersInteractivity:
+                          dashboard.dashboardFiltersInteractivity ?? null,
+                      isAddFilterDisabled,
+                      isDateZoomDisabled: ownsDateZoomVisibility
+                          ? isDateZoomDisabled
+                          : null,
+                      controlDrafts,
+                  })
+                : undefined,
+        [
+            controlDrafts,
+            currentDashboardTiles,
+            dashboard,
+            dashboardFilters,
+            dashboardTabs,
+            dashboardTemporaryFilters,
+            draftDashboardName,
+            filterLabelOverrides,
+            isAddFilterDisabled,
+            isDateZoomDisabled,
+            ownsDateZoomVisibility,
+        ],
+    );
+
+    // The dashboard as it is now, for the content state event: Save's
+    // version with the parameters the viewer applied
+    const dashboardVersion = useMemo<DashboardVersionedFields | undefined>(
+        () =>
+            dashboardUpdate && {
+                tiles: dashboardUpdate.tiles,
+                tabs: dashboardUpdate.tabs,
+                filters: dashboardUpdate.filters,
+                config: dashboardUpdate.config,
+                parameters: dashboardParameters,
             },
-            parameters: dashboard.parameters,
-        });
-    }, [
-        dashboard,
-        dashboardFilters,
-        dashboardTabs,
-        dashboardTemporaryFilters,
-        isAddFilterDisabled,
-        draftDashboardName,
-        currentDashboardTiles,
-        filterLabelOverrides,
-        updateDashboard,
-    ]);
+        [dashboardParameters, dashboardUpdate],
+    );
+
+    const handleSaveDashboard = useCallback(() => {
+        if (!dashboardUpdate) return;
+        updateDashboard(dashboardUpdate);
+    }, [dashboardUpdate, updateDashboard]);
 
     // Readiness resets when tiles or the active tab change, so render after both settle.
     const isMinimalLayoutSettled =
@@ -988,19 +1200,9 @@ const EmbedDashboard: FC<{
             .filter((group) => group.tiles.length > 0)
             .map((group) => ({
                 ...group,
-                layouts: getDashboardLayouts(
-                    group.tiles,
-                    false,
-                    gridProps.cols,
-                ),
+                layouts: getDashboardLayouts(group.tiles, false),
             }));
-    }, [
-        currentDashboardTiles,
-        exportSelectedTabs,
-        gridProps.cols,
-        isMinimal,
-        visibleTabs,
-    ]);
+    }, [currentDashboardTiles, exportSelectedTabs, isMinimal, visibleTabs]);
     // Locked chart tiles render a placeholder and never report readiness.
     const exportAwaitedTileUuids = useMemo(
         () =>
@@ -1009,6 +1211,7 @@ const EmbedDashboard: FC<{
                 .filter(
                     (tile) =>
                         tile.type === DashboardTileTypes.DATA_APP ||
+                        tile.type === DashboardTileTypes.COMPOSER_CHART ||
                         (!hasUnmetFilterRequirements &&
                             (tile.type === DashboardTileTypes.SAVED_CHART ||
                                 tile.type === DashboardTileTypes.SQL_CHART)),
@@ -1100,6 +1303,9 @@ const EmbedDashboard: FC<{
                     onClick={handleSaveDashboard}
                     loading={isSaving}
                     disabled={!hasDashboardChanged}
+                    className={
+                        isControlsEnabled ? headerClasses.save : undefined
+                    }
                 >
                     Save
                 </Button>
@@ -1112,7 +1318,7 @@ const EmbedDashboard: FC<{
 
         if (!editControls && !(canWriteDashboard && isEditMode)) return null;
 
-        return (
+        const toolbar = (
             <Group
                 justify={
                     canWriteDashboard && isEditMode
@@ -1136,6 +1342,11 @@ const EmbedDashboard: FC<{
                 {editControls}
             </Group>
         );
+        return isControlsEnabled ? (
+            <EmbedToolbarGuard>{toolbar}</EmbedToolbarGuard>
+        ) : (
+            toolbar
+        );
     };
 
     const renderGridWithGuidedSetup = (options?: { isTabEmpty?: boolean }) => (
@@ -1158,7 +1369,6 @@ const EmbedDashboard: FC<{
                 gridProps={gridProps}
                 isEditMode={isEditMode}
                 onLayoutChange={handleLayoutChange}
-                onBreakpointChange={setCurrentCols}
                 onDeleteTile={handleDeleteTile}
                 onEditTile={handleEditTile}
                 onEditChart={canUseChartBuilder ? setChartToEdit : undefined}
@@ -1173,6 +1383,7 @@ const EmbedDashboard: FC<{
         if (!isMinimalLayoutSettled) return null;
         return (
             <Box className={DASHBOARD_GRID_CLASS}>
+                <DocumentTitle title={dashboard.name} />
                 {exportTabGroups.length === 0 ? (
                     <SuboptimalState
                         title="Empty dashboard"
@@ -1197,7 +1408,6 @@ const EmbedDashboard: FC<{
                             gridProps={gridProps}
                             isEditMode={false}
                             onLayoutChange={handleLayoutChange}
-                            onBreakpointChange={setCurrentCols}
                             onDeleteTile={handleDeleteTile}
                             onEditTile={handleEditTile}
                             useDashboardEditorTileQueries={false}
@@ -1219,100 +1429,125 @@ const EmbedDashboard: FC<{
             // oxlint-disable-next-line lightdash-ui/no-inline-style-prop
             style={containerStyles}
         >
-            <ControlsSidebarProvider
-                // No route says the mode in an embed
-                isEditMode={canWriteDashboard && isEditMode}
-                canAddFilters={canAddDashboardFiltersInEmbed(
-                    dashboard.dashboardFiltersInteractivity,
-                )}
-                contractClasses={RAIL_CONTRACT_CLASSES}
-            >
-                {currentDashboardTiles.length === 0 ? (
-                    <>
-                        <EmbedDashboardHeader
-                            dashboard={dashboard}
-                            projectUuid={projectUuid}
-                            activeTiles={filteredTiles}
-                            isEditMode={canWriteDashboard && isEditMode}
-                            // No grid, so no rail: the shipped filters
-                            isControlsEnabled={false}
-                        />
-                        {renderDashboardEditToolbar()}
-                        <Box mt="lg">
-                            <SuboptimalState
-                                title="Empty dashboard"
-                                description="This dashboard has no tiles"
-                            />
-                        </Box>
-                    </>
-                ) : tabsEnabled ? (
-                    <Tabs
-                        value={activeTab?.uuid}
-                        onChange={handleTabChange}
-                        classNames={{
-                            list: tabStyles.list,
-                            tab: tabStyles.tab,
-                        }}
-                    >
-                        <EmbedDashboardHeader
-                            dashboard={dashboard}
-                            projectUuid={projectUuid}
-                            activeTiles={filteredTiles}
-                            isEditMode={canWriteDashboard && isEditMode}
-                            isControlsEnabled={isControlsEnabled}
-                            tabs={
-                                <Tabs.List px="lg">
-                                    {visibleTabs.map((tab) => (
-                                        <Tabs.Tab
-                                            key={tab.uuid}
-                                            value={tab.uuid}
-                                            // A stylesheet may lift the cap; unset, it is a share of the viewport
-                                            maw={`var(--dashboard-tab-max-width, ${
-                                                100 / (visibleTabs.length || 1)
-                                            }vw)`}
-                                        >
-                                            {translatedTabNames.get(tab.uuid)}
-                                        </Tabs.Tab>
-                                    ))}
-                                </Tabs.List>
-                            }
-                        />
-                        {renderDashboardEditToolbar()}
-                        {renderGridWithGuidedSetup({ isTabEmpty })}
-                    </Tabs>
-                ) : (
-                    <>
-                        <EmbedDashboardHeader
-                            dashboard={dashboard}
-                            projectUuid={projectUuid}
-                            activeTiles={filteredTiles}
-                            isEditMode={canWriteDashboard && isEditMode}
-                            isControlsEnabled={isControlsEnabled}
-                        />
-                        {renderDashboardEditToolbar()}
-                        {renderGridWithGuidedSetup()}
-                    </>
-                )}
-                {canUseChartBuilder && chartSaveDashboard && (
-                    <EmbedDashboardChartEditorModal
-                        opened={isNewChartOpen || chartToEdit !== undefined}
-                        onClose={() => {
-                            setIsNewChartOpen(false);
-                            setChartToEdit(undefined);
-                        }}
-                        onChartSaved={handleChartEditorSaved}
-                        chartSaveDashboard={chartSaveDashboard}
-                        editChart={chartToEdit}
+            <div ref={setContentElement} className={classes.content}>
+                <DocumentTitle title={dashboard.name} />
+                {dashboardVersion && (
+                    <EmbedDashboardContentStateEvent
+                        dashboardUuid={dashboard.uuid}
+                        dashboardVersion={dashboardVersion}
                     />
                 )}
-                {isControlsEnabled && (
-                    <>
-                        <TileOverlays />
-                        <TabCounts />
-                        <FieldTilesBar />
-                    </>
+                {sharesViewWithAiAgent && (
+                    <EmbedDashboardAiAgentContextPublisher />
                 )}
-            </ControlsSidebarProvider>
+                <ControlsEditorProvider
+                    // No route says the mode in an embed
+                    isEditMode={canWriteDashboard && isEditMode}
+                    // An editor always authors saved filters
+                    canAddFilters={
+                        isEditorInEditMode ||
+                        canAddDashboardFiltersInEmbed(
+                            dashboard.dashboardFiltersInteractivity,
+                        )
+                    }
+                    contractClasses={CONTROL_CONTRACT_CLASSES}
+                >
+                    {currentDashboardTiles.length === 0 ? (
+                        <>
+                            <EmbedDashboardHeader
+                                dashboard={dashboard}
+                                projectUuid={projectUuid}
+                                activeTiles={filteredTiles}
+                                isEditMode={canWriteDashboard && isEditMode}
+                                // No grid, so no controls bar for viewers: the
+                                // shipped filters. An editor keeps the bar, as
+                                // in the app, so an open edit outlives the last tile
+                                isControlsEnabled={isControlsEditor}
+                            />
+                            {renderDashboardEditToolbar()}
+                            <Box mt="lg">
+                                <SuboptimalState
+                                    title="Empty dashboard"
+                                    description="This dashboard has no tiles"
+                                />
+                            </Box>
+                        </>
+                    ) : tabsEnabled ? (
+                        <Tabs
+                            value={activeTab?.uuid}
+                            onChange={handleTabChange}
+                            classNames={{
+                                list: tabStyles.list,
+                                tab: tabStyles.tab,
+                            }}
+                        >
+                            <EmbedDashboardHeader
+                                dashboard={dashboard}
+                                projectUuid={projectUuid}
+                                activeTiles={filteredTiles}
+                                isEditMode={canWriteDashboard && isEditMode}
+                                isControlsEnabled={isControlsEnabled}
+                                tabs={
+                                    <Tabs.List px="lg">
+                                        {visibleTabs.map((tab) => (
+                                            <Tabs.Tab
+                                                key={tab.uuid}
+                                                value={tab.uuid}
+                                                // A stylesheet may lift the cap; unset, it is a share of the viewport
+                                                maw={`var(--dashboard-tab-max-width, ${
+                                                    100 /
+                                                    (visibleTabs.length || 1)
+                                                }vw)`}
+                                            >
+                                                {translatedTabNames.get(
+                                                    tab.uuid,
+                                                )}
+                                            </Tabs.Tab>
+                                        ))}
+                                    </Tabs.List>
+                                }
+                            />
+                            {renderDashboardEditToolbar()}
+                            {renderGridWithGuidedSetup({ isTabEmpty })}
+                        </Tabs>
+                    ) : (
+                        <>
+                            <EmbedDashboardHeader
+                                dashboard={dashboard}
+                                projectUuid={projectUuid}
+                                activeTiles={filteredTiles}
+                                isEditMode={canWriteDashboard && isEditMode}
+                                isControlsEnabled={isControlsEnabled}
+                            />
+                            {renderDashboardEditToolbar()}
+                            {renderGridWithGuidedSetup()}
+                        </>
+                    )}
+                    {canUseChartBuilder && chartSaveDashboard && (
+                        <EmbedDashboardChartEditorModal
+                            opened={isNewChartOpen || chartToEdit !== undefined}
+                            onClose={() => {
+                                setIsNewChartOpen(false);
+                                setChartToEdit(undefined);
+                            }}
+                            onChartSaved={handleChartEditorSaved}
+                            chartSaveDashboard={chartSaveDashboard}
+                            editChart={chartToEdit}
+                        />
+                    )}
+                    {isControlsEnabled && (
+                        <>
+                            <TileOverlays />
+                            <TabCounts />
+                            <FieldTilesBar />
+                            <ParameterTileOverlays />
+                            <ParameterTilesBar />
+                            <DateZoomTileOverlays />
+                            <DateZoomTilesBar />
+                        </>
+                    )}
+                </ControlsEditorProvider>
+            </div>
         </div>
     );
 };

@@ -9,9 +9,9 @@ import {
 } from '@lightdash/common';
 import { createHash } from 'node:crypto';
 import { buildAccount } from '../../../auth/account/account.mock';
+import { GOOGLE_TOKEN_URL } from '../../../services/QuerySourceService/api/google/googleSignIn';
 import * as secureFetchModule from '../../../utils/secureFetch/secureFetch';
 import { ExternalConnectionService } from './ExternalConnectionService';
-import { GOOGLE_TOKEN_URL } from './googleOAuth';
 import { OAuthAuthorizationCodeTokenClient } from './OAuthAuthorizationCodeTokenClient';
 
 vi.mock('../../../utils/secureFetch/secureFetch', async (importOriginal) => {
@@ -104,6 +104,11 @@ const buildService = ({
     let storedSecret: string | null = secret;
     const connection = searchConsoleConnection();
     const externalConnectionModel = {
+        listHeldLiveSourceNames: vi.fn(async () => new Set<string>()),
+        claimLiveSourceName: vi.fn(
+            async (_project: string, _uuid: string, names: string[]) =>
+                names[0],
+        ),
         findByUuid: vi.fn().mockResolvedValue(connection),
         getProjectOrganizationUuid: vi.fn().mockResolvedValue('org-1'),
         getDecryptedSecret: vi.fn(async () => storedSecret),
@@ -135,6 +140,7 @@ const buildService = ({
         projectModel: {
             replaceApiSourceExplores: vi.fn(),
             deleteApiSourceExplores: vi.fn(),
+            findExploreNamesTakenByOthers: vi.fn(async () => []),
         },
         allowedPrivateHostCidrs: {},
         externalConnectionModel,
@@ -154,6 +160,10 @@ const buildService = ({
             siteUrl: SITE_URL,
             liveSources: {
                 posthog: {
+                    oauthClientId: undefined,
+                    oauthClientSecret: undefined,
+                },
+                linkedinAds: {
                     oauthClientId: undefined,
                     oauthClientSecret: undefined,
                 },
@@ -292,6 +302,52 @@ describe('Google sign-in for live sources', () => {
             accessToken: 'google-access-fresh',
             refreshToken: '1//refresh',
         });
+    });
+
+    it('keeps the explore prefix the admin typed when one site is readable', async () => {
+        const { service, externalConnectionModel } = buildService();
+        mockSecureFetch.mockResolvedValueOnce(
+            sitesResponse(['sc-domain:lightdash.com', 'siteOwner']),
+        );
+
+        await service.completeGoogleOAuth(
+            account,
+            { ...session(), explorePrefix: 'web_events' },
+            'code-1',
+        );
+
+        expect(
+            externalConnectionModel.claimLiveSourceName.mock.calls[0][2],
+        ).toEqual(['web_events']);
+    });
+
+    it('keeps the explore prefix the admin typed through the site picker', async () => {
+        const { service, externalConnectionModel } = buildService();
+        mockSecureFetch.mockResolvedValueOnce(
+            sitesResponse(
+                ['sc-domain:lightdash.com', 'siteOwner'],
+                ['https://docs.lightdash.com/', 'siteOwner'],
+            ),
+        );
+        const result = await service.completeGoogleOAuth(
+            account,
+            { ...session(), explorePrefix: 'web_events' },
+            'code-1',
+        );
+        if (!('pending' in result)) {
+            throw new Error('Expected a pending choice');
+        }
+
+        await service.finishGoogleOAuth(
+            account,
+            'proj-1',
+            result.pending,
+            'sc-domain:lightdash.com',
+        );
+
+        expect(
+            externalConnectionModel.claimLiveSourceName.mock.calls[0][2],
+        ).toEqual(['web_events']);
     });
 
     it('holds a sign-in that can read several sites until the admin picks one', async () => {

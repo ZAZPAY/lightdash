@@ -21,6 +21,7 @@ export default function mockHealthResponse(
         localDbtEnabled: true,
         isAuthenticated: true,
         requiresOrgRegistration: false,
+        instanceBrand: null,
         latest: {
             version: '0.0.0',
         },
@@ -119,6 +120,7 @@ export default function mockHealthResponse(
         hasJira: false,
         hasLinear: false,
         hasPostHogOAuth: false,
+        hasLinkedInAdsOAuth: false,
         hasGoogleLiveSources: false,
         hasCacheAutocompleResults: false,
         hasMicrosoftTeams: false,
@@ -131,7 +133,6 @@ export default function mockHealthResponse(
         isSaveCredentialsFormEnabled: false,
         isCustomRolesEnabled: false,
         embedding: {
-            enabled: false,
             events: undefined,
         },
         ai: {
@@ -155,6 +156,9 @@ export default function mockHealthResponse(
             enabled: false,
         },
         dashboardComments: {
+            enabled: true,
+        },
+        mergeQueryAuthoring: {
             enabled: true,
         },
         preAggregates: {

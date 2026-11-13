@@ -24,7 +24,10 @@ import {
     unauthorisedInDemo,
 } from '../../controllers/authentication';
 import { BaseController } from '../../controllers/baseController';
-import { ExternalConnectionService } from '../services/ExternalConnectionService/ExternalConnectionService';
+import {
+    ExternalConnectionService,
+    parseLiveSourceReturnTo,
+} from '../services/ExternalConnectionService/ExternalConnectionService';
 
 @Route('/api/v1/ee/projects/{projectUuid}/live-sources/google/oauth')
 @Hidden()
@@ -44,15 +47,22 @@ export class GoogleLiveSourceOAuthController extends BaseController {
         @Query() connector: string,
         @Query() name: string,
         @Query() connectionUuid?: string,
+        @Query() returnTo?: string,
+        @Query() explorePrefix?: string,
     ): Promise<void> {
         assertRegisteredAccount(req.account);
         const { authorizeUrl, state, session } =
             await this.getService().startGoogleOAuth(req.account, projectUuid, {
                 connector,
                 name,
+                explorePrefix,
                 connectionUuid: connectionUuid ?? null,
             });
-        req.session.oauth = { state, googleLiveSource: session };
+        req.session.oauth = {
+            state,
+            googleLiveSource: session,
+            liveSourceReturnTo: parseLiveSourceReturnTo(returnTo),
+        };
         this.setStatus(302);
         this.setHeader('Location', authorizeUrl);
     }

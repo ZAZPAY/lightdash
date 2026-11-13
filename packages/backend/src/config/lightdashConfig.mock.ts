@@ -63,6 +63,7 @@ export const lightdashConfigMock: LightdashConfig = {
             iosClientId: undefined,
             androidClientId: undefined,
         },
+        trustedProvisioner: null,
         oidc: {
             authMethod: undefined,
             authSigningAlg: undefined,
@@ -100,6 +101,10 @@ export const lightdashConfigMock: LightdashConfig = {
         },
     },
     lightdashCloudInstance: 'test-instance',
+    mobileAppStores: {
+        appStoreUrl: 'https://apps.apple.com/app/id0',
+        googlePlayUrl: 'https://play.google.com/store/apps/details?id=test',
+    },
     mobileAppAssociation: {
         appleTeamId: 'TEAMID',
         appleBundleId: 'com.lightdash.mobile',
@@ -127,12 +132,8 @@ export const lightdashConfigMock: LightdashConfig = {
     dbt: {
         environmentVariableAllowlist: [],
         sourceFetchConcurrency: undefined,
-        crossSourceMaxPasses: 3,
         sourceFetchDiskBudgetBytes: undefined,
         sourceFetchDiskPerSourceBytes: 256 * 1024 ** 2,
-        crossSourcePrepareTimeoutMs: 180000,
-        crossSourceLsTimeoutMs: 300000,
-        crossSourceResolutionTimeoutMs: 1200000,
     },
     dashboard: {
         maxTilesPerTab: 50,
@@ -193,7 +194,7 @@ export const lightdashConfigMock: LightdashConfig = {
     },
     results: {
         cacheStateTimeSeconds: 0,
-        cacheEnabled: false,
+        cacheEnabled: null,
         autocompleteEnabled: false,
         s3: {
             endpoint: 'mock_endpoint',
@@ -219,6 +220,7 @@ export const lightdashConfigMock: LightdashConfig = {
         enabled: false,
         pollInterval: 1000,
         jobTimeout: 0,
+        queryPollingTimeout: 5 * 60 * 1000,
         shutdownTimeout: 60_000,
         tasks: ALL_TASK_NAMES,
         quiesce: {
@@ -303,9 +305,6 @@ export const lightdashConfigMock: LightdashConfig = {
     roadmap: {
         baseUrl: 'https://roadmap.lightdash.com',
     },
-    groups: {
-        enabled: false,
-    },
     extendedUsageAnalytics: {
         enabled: false,
     },
@@ -371,7 +370,6 @@ export const lightdashConfigMock: LightdashConfig = {
         },
     },
     embedding: {
-        enabled: false,
         allowAll: {
             dashboards: false,
             charts: false,
@@ -401,6 +399,10 @@ export const lightdashConfigMock: LightdashConfig = {
     },
     liveSources: {
         posthog: {
+            oauthClientId: undefined,
+            oauthClientSecret: undefined,
+        },
+        linkedinAds: {
             oauthClientId: undefined,
             oauthClientSecret: undefined,
         },
@@ -471,12 +473,17 @@ export const lightdashConfigMock: LightdashConfig = {
     dashboardComments: {
         enabled: true,
     },
+    mergeQueryAuthoring: {
+        enabled: true,
+    },
     externalSources: {
         maxFileSizeBytes: 100 * 1024 * 1024,
         maxRows: 1_000_000,
         maxOrganizationBytes: 5 * 1024 * 1024 * 1024,
         maxConcurrentIngestsPerOrganization: 2,
         maxConcurrentDuckdbQueriesPerOrganization: 2,
+        duckdbQuerySlotWaitTimeoutMs: 15_000,
+        maxConcurrentDuckdbQueries: 4,
         googleSheetsBatchRows: 5_000,
         stagedUploadTtlHours: 24,
         ingestLeaseMs: 35 * 60 * 1000,
@@ -541,7 +548,6 @@ export const lightdashConfigMock: LightdashConfig = {
         sandboxPythonDockerImage: 'lightdash-python-runner:local',
         e2bPythonTemplateName: 'lightdash-python-runner',
         e2bPythonTemplateTag: '',
-        sandboxAgentOnboardingDockerImage: 'lightdash-agent-onboarding:local',
         sandboxIdleTimeoutMs: 30 * 60 * 1000,
         sandboxSnapshotRetentionMs: 7 * 24 * 60 * 60 * 1000,
         lambdaMicroVm: {
@@ -578,8 +584,6 @@ export const lightdashConfigMock: LightdashConfig = {
             sandboxUrl: null,
             sandboxSecret: null,
         },
-        e2bAgentOnboardingTemplateName: 'lightdash-agent-onboarding',
-        e2bAgentOnboardingTemplateTag: 'test',
         otel: {
             enabled: false,
             endpoint: '',
