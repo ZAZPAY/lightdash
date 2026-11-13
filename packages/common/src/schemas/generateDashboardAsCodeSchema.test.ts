@@ -6,6 +6,112 @@ import {
 import dashboardAsCodeSchema from './json/dashboard-as-code-1.0.json';
 
 describe('generateDashboardAsCodeSchema', () => {
+    test('section uploads accept portable and name-derived slugs with complete object schemas', () => {
+        const ajv = new Ajv({ strict: false, validateFormats: false });
+        const validate = ajv.compile(dashboardAsCodeSchema);
+        const dashboard = {
+            name: 'Dashboard',
+            slug: 'dashboard',
+            spaceSlug: 'space',
+            version: 1,
+            tiles: [],
+            tabs: [],
+        };
+        for (const section of [
+            { name: 'Section' },
+            { slug: 'section', name: 'Section' },
+        ]) {
+            expect(
+                validate({
+                    ...dashboard,
+                    config: {
+                        isDateZoomDisabled: false,
+                        controlSections: [section],
+                        dateZoomConfig: {
+                            controls: [
+                                {
+                                    uuid: 'date',
+                                    name: 'Date',
+                                    granularity: 'Month',
+                                    sectionSlug: 'section',
+                                },
+                            ],
+                            tileTargets: {},
+                        },
+                    },
+                }),
+            ).toBe(true);
+        }
+        expect(
+            validate({
+                ...dashboard,
+                config: {
+                    isDateZoomDisabled: false,
+                    controlSections: [{ slug: 'section' }],
+                },
+            }),
+        ).toBe(false);
+        expect(
+            validate({
+                ...dashboard,
+                config: {
+                    isDateZoomDisabled: false,
+                    dateZoomConfig: {
+                        controls: [{ sectionSlug: 'section' }],
+                        tileTargets: {},
+                    },
+                },
+            }),
+        ).toBe(false);
+    });
+
+    test('date zooms take optional slugs beside their required uuids', () => {
+        const ajv = new Ajv({ strict: false, validateFormats: false });
+        const validate = ajv.compile(dashboardAsCodeSchema);
+        const withZoom = (dateZoomConfig: unknown) =>
+            validate({
+                name: 'Dashboard',
+                slug: 'dashboard',
+                spaceSlug: 'space',
+                version: 1,
+                tiles: [],
+                tabs: [],
+                config: { isDateZoomDisabled: false, dateZoomConfig },
+            });
+        const target = { fieldId: 'orders_date', tableName: 'orders' };
+        const zoom = { name: 'Week', granularity: 'WEEK' };
+        expect(
+            withZoom({
+                controls: [{ uuid: 'week', slug: 'week', ...zoom }],
+                tileTargets: {
+                    orders: {
+                        controlUuid: 'week',
+                        controlSlug: 'week',
+                        ...target,
+                    },
+                },
+            }),
+        ).toBe(true);
+        expect(
+            withZoom({
+                controls: [{ uuid: 'week', ...zoom }],
+                tileTargets: { orders: { controlUuid: 'week', ...target } },
+            }),
+        ).toBe(true);
+        expect(
+            withZoom({
+                controls: [{ slug: 'week', ...zoom }],
+                tileTargets: {},
+            }),
+        ).toBe(false);
+        expect(
+            withZoom({
+                controls: [{ uuid: 'week', ...zoom }],
+                tileTargets: { orders: { controlSlug: 'week', ...target } },
+            }),
+        ).toBe(false);
+    });
+
     test('generated schema accepts portable tab slugs and legacy tab UUIDs', () => {
         const ajv = new Ajv({ strict: false, validateFormats: false });
         const validate = ajv.compile(dashboardAsCodeSchema);

@@ -5,8 +5,6 @@
  * If the feature flag is no longer in use, remove it from this enum.
  */
 export enum FeatureFlags {
-    /** Organization-scoped, off by default. Retry missing cross-project refs with sibling models injected through a generated dbt plugin. */
-    CrossSourceDbtRefs = 'cross-source-dbt-refs',
     DbtExplicitCredentials = 'dbt-explicit-credentials',
     /**
      * Agent identity gates agent query identity, organisation settings and
@@ -16,34 +14,24 @@ export enum FeatureFlags {
     OAuthScopeEnforcement = 'oauth-scope-enforcement',
 
     MultiConnectionProjects = 'multi-connection-projects',
+    /**
+     * CLI previews inherit the parent's connection settings on a different
+     * Snowflake warehouse.
+     * Off by default; organization scope; no handler.
+     */
+    PreviewInheritsAcrossWarehouses = 'preview-inherits-across-warehouses',
     /** Extra warehouse connections of a different type to the project's original connection. */
     MixedWarehouseConnections = 'mixed-warehouse-connections',
     /** Backend-provisioned usage analytics projects. */
-    AnalyticsProject = 'analytics-project',
-    /* Show user groups */
-    UserGroupsEnabled = 'user-groups-enabled',
-
     /* Gate new timezone features: warehouse session timezone, timezone-aware
        DATE_TRUNC, per-viewer (user-profile) timezone resolution, result
        formatting, etc. Temporary — remove once stable. */
     EnableTimezoneSupport = 'enable-timezone-support',
 
     /**
-     * Enable the dynamic calculation of series color, when not manually set on the chart config.
-     * This aims to make the colors more consistent, depending on the groups, but this could cause the opposite effect.
-     * For more details, see https://github.com/lightdash/lightdash/issues/13831
-     */
-    CalculateSeriesColor = 'calculate-series-color',
-
-    /**
      * Enable the ability to show the warehouse execution time and total time in the chart tile.
      */
     ShowExecutionTime = 'show-execution-time',
-
-    /**
-     * Enable the ability to create custom visualizations with AI
-     */
-    AiCustomViz = 'ai-custom-viz',
 
     /**
      * Enable admin user impersonation. When disabled, impersonation
@@ -68,11 +56,21 @@ export enum FeatureFlags {
     DashboardControls = 'dashboard-controls',
 
     /**
-     * Enable data apps feature. Disabled by default. Self-hosted
-     * deployments can force it on with APPS_RUNTIME_ENABLED=true, which
-     * the config parser translates into the enable allowlist. Does not gate
-     * Chart Studio, which is available with a valid licence and a configured
-     * sandbox provider, but still keeps installed chart types usable.
+     * Dashboard edit ergonomics: editing uses a grid twice as fine (72
+     * columns, half-height rows), so tiles can land on half-steps, saved as
+     * fractional positions. Rolled out per organization. Temporary: remove
+     * once it is the default.
+     */
+    DashboardEditErgonomics = 'dashboard-edit-ergonomics',
+
+    /**
+     * Data apps availability, computed rather than rolled out: on for any org
+     * with AI (the AI copilot flag or an AI trial) on an instance with a
+     * configured sandbox runtime. Overrides and the flag default are ignored
+     * (see CommercialFeatureFlagModel). Self-hosted deployments can still
+     * force it on with APPS_RUNTIME_ENABLED=true, which the config parser
+     * translates into the enable allowlist. Does not gate Chart Studio, which
+     * is available with a valid licence and a configured sandbox provider.
      */
     EnableDataApps = 'enable-data-apps',
 
@@ -83,35 +81,6 @@ export enum FeatureFlags {
     AiAccessSkipResultsCache = 'ai-access-skip-results-cache',
 
     /**
-     * Per-organization gate for declaring custom npm dependencies in data
-     * apps. Disabled by default; self-hosted instances can enable it globally
-     * via LIGHTDASH_ENABLE_FEATURE_FLAGS.
-     */
-    EnableDataAppCustomDependencies = 'enable-data-app-custom-dependencies',
-
-    /**
-     * Per-organization rollout of AI analysis in data apps (detect anomalies,
-     * investigate with an agent). Gates the endpoints and the admin toggle;
-     * the org's `dataAppRuntimeAiEnabled` setting is the separate customer
-     * consent. Disabled by default.
-     */
-    EnableDataAppAnalysis = 'enable-data-app-analysis',
-
-    /**
-     * Per-organization rollout of AI analysis on classic dashboards. Gates the
-     * dashboard analysis endpoints and entry points; shares the org's
-     * `dataAppRuntimeAiEnabled` consent setting and daily analysis budgets
-     * with data-app analysis. Disabled by default.
-     */
-    EnableDashboardAnalysis = 'enable-dashboard-analysis',
-
-    /**
-     * Per-organization gate for automatic (obscured) data app thumbnail
-     * capture and its settings card. Disabled by default.
-     */
-    EnableDataAppAutomaticThumbnails = 'enable-data-app-automatic-thumbnails',
-
-    /**
      * Per-user / per-organization gate for the data app state store
      * (`useAppState` / `useSharedAppState` in the SDK and its endpoints).
      * Resolves user override, then organization, then instance default.
@@ -120,9 +89,12 @@ export enum FeatureFlags {
     EnableDataAppState = 'enable-data-app-state',
 
     /**
-     * Enable Autopilot project health agent.
+     * Per-organization gate for Viewer access to data apps. Viewers open
+     * apps shared with them and run only the queries each app version's
+     * saved data references cover. Disabled by default on Cloud and
+     * self-hosted.
      */
-    AiAutopilot = 'ai-autopilot',
+    DataAppConsumerAccess = 'data-app-consumer-access',
 
     /**
      * Enable the Hexbin (H3 hexagonal binning) layer type for Map charts.
@@ -140,14 +112,6 @@ export enum FeatureFlags {
     SsoOrganizationSettings = 'sso-organization-settings',
 
     /**
-     * Enable query results caching. DB value (user/org override or flag
-     * default) takes precedence; falls back to the RESULTS_CACHE_ENABLED env
-     * var when no DB row is set. Lets shared-instance customers (eu1/app)
-     * opt in per-org without a redeploy.
-     */
-    ResultsCacheEnabled = 'results-cache-enabled',
-
-    /**
      * Show a persistent trial warning banner for an organization on shared
      * instances. This does not block product access.
      */
@@ -159,12 +123,6 @@ export enum FeatureFlags {
      * product action (query execution). Off by default; enable per-org.
      */
     OrganizationTrialBlock = 'organization-trial-block',
-
-    /**
-     * Show the coding-agent project onboarding flow. This gates only the UI;
-     * the CLI, APIs, and installed skills remain available independently.
-     */
-    CodingAgentOnboarding = 'coding-agent-onboarding',
 
     /**
      * Allow storing long-lived GitHub personal access tokens as GitHub MCP
@@ -207,6 +165,12 @@ export enum FeatureFlags {
     AiFilterExpressions = 'ai-filter-expressions',
 
     /**
+     * Offer AI agents the askUser tool in web app threads: the agent ends its
+     * turn with clickable clarifying questions. Off by default; enable per org.
+     */
+    AiAgentAskUser = 'ai-agent-ask-user',
+
+    /**
      * Enable the async compose SQL endpoint
      * (POST /api/v2/projects/{projectUuid}/query/compose-sql), which runs
      * DuckDB SQL over other queries' results, exposed as named tables via
@@ -219,16 +183,17 @@ export enum FeatureFlags {
     /**
      * Enable api query sources: queries sent live to an external API (HogQL
      * to PostHog) through a project connection, and the Live data sources
-     * project settings page. Off by default; enable per org.
+     * project settings page. Off by default; enable per org. Also on wherever
+     * NewOnboarding is on, unless a user or org override turns it off.
      */
     ApiQuerySources = 'api-query-sources',
 
     /**
-     * Enable the "My query history" page
-     * (/projects/{projectUuid}/query-history) and its listing endpoint
-     * (GET /api/v2/projects/{projectUuid}/query/history). Off by default.
+     * Keeps the models of a project that has no dbt connection on the server,
+     * and lets the Semantic Studio agent draft changes to them for a person to
+     * apply. Off by default; organization-scoped.
      */
-    QueryHistory = 'query-history',
+    SemanticStudioEditing = 'semantic-studio-editing',
 
     /**
      * Configurable retention for AI agent threads. Off by default; enabled
@@ -237,36 +202,10 @@ export enum FeatureFlags {
     AiThreadRetention = 'ai-thread-retention',
 
     /**
-     * Per-organization gate for experimental surfaces in Lightdash Desktop.
-     * Desktop reads it once per sign-in. Off by default; enable per org.
-     */
-    DesktopExperiments = 'desktop-experiments',
-
-    /**
-     * External data sources: upload CSV files or connect Google Sheets as
-     * project tables. Tables are ingested to typed parquet in object storage,
-     * generated as explores (ExploreType.EXTERNAL_SOURCE), and queried on the
-     * DuckDB compose engine — so this requires the enterprise pre-aggregates
-     * engine and its S3 configuration. Off by default.
-     */
-    ExternalSources = 'external-sources',
-
-    /**
      * Prevent users from deleting their own AI agent threads. Admins can
      * still delete threads from the agent admin threads view. Off by default.
      */
     AiDisableThreadDeletion = 'ai-disable-thread-deletion',
-
-    /**
-     * Enables the chart type library — browsing and installing official
-     * chart types from the configured chart registry — and, as an either/or
-     * gate with Chart Studio availability and `EnableDataApps`, usage of
-     * installed chart types (picking, configuring, rendering). Authoring,
-     * editing, and forking chart types follow Chart Studio availability
-     * (a valid licence and a configured sandbox provider), not this flag.
-     * Default: off.
-     */
-    ChartTypeRegistry = 'chart-type-registry',
 
     /**
      * Custom metrics created while building a chart inside a dashboard are
@@ -287,6 +226,11 @@ export enum FeatureFlags {
      */
     AiAgentBattleMode = 'ai-agent-battle-mode',
     /**
+     * Slack agent answers send eligible bar/line charts as native charts. Off by default; standard
+     * resolver for the prompt author: ENV enable/disable lists, then user → org override → default.
+     */
+    AiAgentSlackNativeCharts = 'ai-agent-slack-native-charts',
+    /**
      * Organization-scoped: keep dbt's partial_parse.msgpack from a compile on
      * the worker and seed the next compile of the same project and dbt source
      * with it, so `dbt ls` re-parses only changed files. dbt checks file
@@ -301,6 +245,16 @@ export enum FeatureFlags {
      */
     AthenaWebIdentityAuth = 'athena-web-identity-auth',
     /**
+     * Organization-scoped: the Mobile page under Your settings, with links to
+     * install and sign in to the mobile apps. Off by default.
+     */
+    MobileSettings = 'mobile-settings',
+    /**
+     * Organization-scoped: the sign-in step on the Mobile page and its
+     * endpoints. Off by default until an app release supports QR sign-in.
+     */
+    MobileQrSignIn = 'mobile-qr-sign-in',
+    /**
      * Organization-scoped, off by default: BigQuery workload identity federation.
      * Only enable on instances whose pods run as their own Google service account.
      */
@@ -314,11 +268,16 @@ export enum FeatureFlags {
      */
     OrgAiCustomProviders = 'org-ai-custom-providers',
     /**
-     * Organization-scoped, off by default: when a Redshift dashboard or chart
-     * query has no first row after 30s and Redshift has no record of it,
-     * cancel it and retry on a new connection.
+     * Experiment, off by default: dashboards always fit the screen in view
+     * mode, and the fit to screen toggle is removed. Enabled for internal
+     * instances only while we gather feedback.
      */
-    RedshiftStalledQueryRecovery = 'redshift-stalled-query-recovery',
+    DashboardFitToScreenDefault = 'dashboard-fit-to-screen-default',
+    /**
+     * Org-scoped, off: composer charts as dashboard tiles. Not for orgs embedding with
+     * @lightdash/sdk < TBD (first with PR #32548): older SDKs crash the whole embed.
+     */
+    ComposerCharts = 'composer-charts',
 }
 
 export type FeatureFlag = {

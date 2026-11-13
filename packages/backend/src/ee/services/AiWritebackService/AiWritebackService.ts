@@ -120,6 +120,11 @@ import {
     STDERR_TAIL_BYTES,
     SYSTEM_PROMPT_PATH,
     TMP_PROFILES_DIR,
+    TRY_OUT_HAND_OVER_TIMEOUT_MS,
+    TRY_OUT_MAX_FILE_BYTES,
+    TRY_OUT_MAX_MANIFEST_BYTES,
+    TRY_OUT_PARSE_TIMEOUT_MS,
+    TRY_OUT_TARGET_DIR,
     WAREHOUSE_SKILL_PATH,
 } from './constants';
 import {
@@ -134,7 +139,7 @@ import {
 import { validateNativeSandbox } from './nativeValidation';
 import { BitbucketProvider } from './providers/BitbucketProvider';
 import { GithubProvider } from './providers/GithubProvider';
-import { GitlabProvider } from './providers/GitlabProvider';
+import { assertSameHost, GitlabProvider } from './providers/GitlabProvider';
 import type { GitProvider } from './providers/GitProvider';
 import { readStagedChanges } from './providers/sandboxGit';
 import { buildGatherRepoContextScript } from './scripts';
@@ -150,6 +155,7 @@ import type {
     CodingAgentConfig,
     GitConnection,
     GitInstallation,
+    ParsedDbtProject,
     RepoContext,
     SetStage,
     TurnContext,
@@ -1017,6 +1023,7 @@ export class AiWritebackService extends BaseService {
                 );
             }
             const connection = parseGitlabConnection(dbtConnection);
+            assertSameHost(connection, installation);
             // parseGitlabConnection omits the branch; read it from the typed
             // connection (GitLab dbt config always carries a branch).
             return {
@@ -1198,13 +1205,16 @@ export class AiWritebackService extends BaseService {
             );
         }
         const { token } = installation;
-        const { hostDomain } = parseGitlabConnection(project.dbtConnection);
+        const connection = parseGitlabConnection(project.dbtConnection);
+        // The org app-install token only authenticates against the GitLab
+        // instance it was issued by — never a dbt-connection host, which
+        // project developers control (same guard as the writeback clone path).
+        assertSameHost(connection, installation);
+        const { hostDomain } = connection;
         // The GitLab client is split on host format: makeGitlabRequest-based
         // reads (createGitlabRepoSource) take a BARE domain and prepend https,
-        // while getGitlabProjects takes a FULL instance URL. Derive both from
-        // the connection's host_domain so gitlab.com and self-hosted both work.
-        const bareHost = hostDomain.replace(/^https?:\/\//, '');
-        const instanceUrl = `https://${bareHost}`;
+        // while getGitlabProjects takes a FULL instance URL.
+        const instanceUrl = `https://${hostDomain}`;
         const projectRepoKeys = await this.getConfiguredRepositoryKeys(
             projectUuid,
             project,
@@ -1259,7 +1269,7 @@ export class AiWritebackService extends BaseService {
 
         return {
             token,
-            hostDomain: bareHost,
+            hostDomain,
             listRepos: async () => [...(await loadRepoMap()).values()],
             resolveRepoAccess: async (owner, repo) => {
                 const entry = (await loadRepoMap()).get(`${owner}/${repo}`);
@@ -2660,6 +2670,26 @@ export class AiWritebackService extends BaseService {
                 assertPublishAllowed,
             });
             pauseOnExit = applied.pauseOnExit;
+
+            if (
+                args.onDbtProject &&
+                hasChanges &&
+                config.mode === 'dbt-writeback' &&
+                !(
+                    (turn.gitConnection.provider ===
+                        PullRequestProvider.GITHUB ||
+                        turn.gitConnection.provider ===
+                            PullRequestProvider.BITBUCKET) &&
+                    turn.gitConnection.semanticLayer === 'lightdash'
+                )
+            ) {
+                await this.handOverDbtProject(
+                    sandbox,
+                    turn,
+                    applied.prUrl ?? null,
+                    args.onDbtProject,
+                );
+            }
 
             tracker.completed({
                 exitCode: agent.exitCode,
@@ -4143,6 +4173,70 @@ export class AiWritebackService extends BaseService {
         }
 
         await this.prepareWarehouseSkills(sandbox, turn);
+    }
+
+    /**
+     * Parses the edited project into a manifest and hands it over. Best-effort: a
+     * change that cannot be tried here still has its pull request and preview.
+     */
+    private async handOverDbtProject(
+        sandbox: SandboxHandle,
+        turn: TurnContext,
+        prUrl: string | null,
+        onDbtProject: (project: ParsedDbtProject) => Promise<void>,
+    ): Promise<void> {
+        const projectDir = `${CWD}/${turn.gitConnection.projectSubPath}`;
+        const unsetFlags = COMPILE_STRIPPED_ENV_VARS.map(
+            (name) => `-u ${name}`,
+        ).join(' ');
+        const dbtBin = dbtSandboxVenvBin(turn.dbtVersion);
+        try {
+            // Same secret-stripped env as the compile wrapper: dbt renders the repo's Jinja.
+            await sandbox.commands.run(
+                `env ${unsetFlags} PATH="${dbtBin}:$PATH" dbt parse --project-dir ${quoteShellArgument(
+                    projectDir,
+                )} --profiles-dir ${TMP_PROFILES_DIR} --target-path ${TRY_OUT_TARGET_DIR}`,
+                { cwd: CWD, timeoutMs: TRY_OUT_PARSE_TIMEOUT_MS },
+            );
+            const manifestJson = await sandbox.files.read(
+                `${TRY_OUT_TARGET_DIR}/manifest.json`,
+                { maxBytes: TRY_OUT_MAX_MANIFEST_BYTES },
+            );
+            const lightdashConfigYaml = await sandbox.files
+                .read(`${projectDir}/lightdash.config.yml`, {
+                    maxBytes: TRY_OUT_MAX_FILE_BYTES,
+                })
+                .catch(() => null);
+            const diff = await sandbox.commands.run(
+                'git -c core.quotepath=off diff --name-only -z --relative HEAD~1 HEAD',
+                { cwd: projectDir, maxOutputBytes: TRY_OUT_MAX_FILE_BYTES },
+            );
+            let timer: NodeJS.Timeout | undefined;
+            try {
+                await Promise.race([
+                    onDbtProject({
+                        manifestJson,
+                        lightdashConfigYaml,
+                        changedFiles: diff.stdout.split('\0').filter(Boolean),
+                        prUrl,
+                    }),
+                    new Promise<never>((_, reject) => {
+                        timer = setTimeout(
+                            () => reject(new Error('timed out')),
+                            TRY_OUT_HAND_OVER_TIMEOUT_MS,
+                        );
+                    }),
+                ]);
+            } finally {
+                clearTimeout(timer);
+            }
+        } catch (error) {
+            this.logger.warn(
+                `AiWriteback: could not prepare the change to be tried before its preview: ${getErrorMessage(
+                    error,
+                )} (sandboxId=${sandbox.sandboxId})`,
+            );
+        }
     }
 
     private async prepareWarehouseSkills(

@@ -85,9 +85,11 @@ import {
     ListWarehouseTablesFn,
     ListWorkstreamsFn,
     LoadAgentSkillFn,
+    ProposeSemanticLayerChangeFn,
     ReadAttachmentsFn,
     ReadContentFn,
     ReadPinnedThreadFn,
+    ReadSemanticModelFn,
     RecordMcpToolCallFn,
     RecordPromptDecisionFn,
     RecordSqlApprovalFn,
@@ -125,6 +127,12 @@ export type AgentLiveSource = {
     connectionUuid: string;
     name: string;
     connector: ApiConnectorType;
+    /** The explores this source answers with, as the agent queries them. */
+    exploreNames: string[];
+    /** What the source reads, such as its site or property. */
+    target: string;
+    /** What an admin says this source is for. */
+    hint: string | null;
 };
 
 export type AiAgentMcpServer = AiMcpServer & {
@@ -285,7 +293,9 @@ export type AiAgentArgs = AnyAiModel & {
     enableSelfImprovement: boolean;
     // Content setting on; read tools enforce view access per item, so authoring isn't required.
     enableContentReads: boolean;
+    // Content setting on + user may save a chart or dashboard.
     enableContentTools: boolean;
+    // Content setting on + user may save a Document in a Space; independent of charts.
     enableDocuments: boolean;
     // Data apps enabled + user may create them + content tools (trusted identity).
     enableGenerateDataApp: boolean;
@@ -293,6 +303,10 @@ export type AiAgentArgs = AnyAiModel & {
     // Only on inside review-remediation work threads: lets the agent open/update
     // the project_context.yml PR via the deterministic editProjectContext tool.
     enableEditProjectContext: boolean;
+    // A thread started in Semantic Studio: it drafts model changes and builds no content.
+    isSemanticStudioThread: boolean;
+    // Whether that thread proposes into a draft; false on a dbt project, where it edits the repository.
+    semanticStudioDrafts: boolean;
     // Which GitHub identity a writeback PR would be attributed to (advisory,
     // resolved at prompt-assembly time). null when not applicable/unresolved.
     writebackAttribution: AiWritebackAttribution | null;
@@ -300,6 +314,8 @@ export type AiAgentArgs = AnyAiModel & {
     // The thread owns at least one attached document, so readAttachments is
     // registered.
     enableReadAttachments: boolean;
+    // A web app thread whose UI renders askUser questions, so the tool is offered.
+    enableAskUser: boolean;
     enableFilterExpressions: boolean;
     // dbt project root within the repo (from project_sub_path); '.' = repo root,
     // null when repo discovery is off or the project is not git-backed.
@@ -457,6 +473,8 @@ export type AiAgentDependencies = {
     listDataAppConnections: ListDataAppConnectionsFn;
     editDbtProject: EditDbtProjectFn;
     editProjectContext: EditProjectContextFn;
+    proposeSemanticLayerChange: ProposeSemanticLayerChangeFn;
+    readSemanticModel: ReadSemanticModelFn;
     syncDbtProject: SyncDbtProjectFn;
     exploreRepo: ExploreRepoFn;
     discoverRepos: DiscoverReposFn;

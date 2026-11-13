@@ -24,7 +24,8 @@ export type AddOnName =
     | 'projectContext'
     | 'memories'
     | 'customChartTypes'
-    | 'userIdentity';
+    | 'userIdentity'
+    | 'askUser';
 
 /** Agent tools built by `getAgentTools`; MCP server tools are dynamic and not listed. */
 export const AGENT_TOOL_NAMES = [
@@ -40,6 +41,7 @@ export const AGENT_TOOL_NAMES = [
     'readPinnedThread',
     'resolveUrl',
     'updateUserName',
+    'askUser',
     'readContent',
     'editContent',
     'listContent',
@@ -60,6 +62,8 @@ export const AGENT_TOOL_NAMES = [
     'listDataAppConnections',
     'editDbtProject',
     'editProjectContext',
+    'proposeSemanticLayerChange',
+    'readSemanticModel',
     'syncDbtProject',
     'exploreRepo',
     'readAttachments',
@@ -107,7 +111,9 @@ export type PromptSection =
     | 'projectContext'
     | 'memories'
     | 'availableCustomChartTypes'
-    | 'requestingUser';
+    | 'requestingUser'
+    // Replaces the whole prompt: a Semantic Studio thread edits models and answers no questions.
+    | 'semanticStudio';
 
 /** Sections the intent gate may withhold until the agent loads their tools. */
 export const DEFERRED_PROMPT_SECTIONS = [
@@ -136,7 +142,10 @@ export type LoadoutInput = Pick<
     | 'enableAiWriteback'
     | 'enableRepoDiscovery'
     | 'enableEditProjectContext'
+    | 'isSemanticStudioThread'
+    | 'semanticStudioDrafts'
     | 'enableReadAttachments'
+    | 'enableAskUser'
     | 'customSkills'
     | 'projectContextEnabled'
     | 'aiAgentMemoryEnabled'

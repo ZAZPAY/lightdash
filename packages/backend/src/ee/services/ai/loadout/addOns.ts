@@ -13,6 +13,9 @@ const hasContentReads = (input: LoadoutInput): boolean =>
 const hasContentTools = (input: LoadoutInput): boolean =>
     input.enableDataAccess && input.enableContentTools;
 
+const hasDocumentTools = (input: LoadoutInput): boolean =>
+    input.enableDataAccess && input.enableDocuments;
+
 const hasProjectContextTool = (input: LoadoutInput): boolean =>
     input.projectContextEnabled || input.aiAgentMemoryEnabled;
 
@@ -29,8 +32,9 @@ export const ADD_ONS: Record<AddOnName, AddOnDefinition> = {
         skills: [],
     },
     contentTools: {
-        description: 'Edit and create saved charts and dashboards',
-        when: hasContentTools,
+        description:
+            'Edit and create saved charts and dashboards, or Documents alone',
+        when: (input) => hasContentTools(input) || hasDocumentTools(input),
         tools: ['editContent', 'createContent'],
         section: {
             id: 'contentTools',
@@ -66,7 +70,7 @@ export const ADD_ONS: Record<AddOnName, AddOnDefinition> = {
     },
     documents: {
         description: 'Document authoring guidance inside the content section',
-        when: (input) => hasContentTools(input) && input.enableDocuments,
+        when: hasDocumentTools,
         tools: [],
         section: { id: 'documents', documents: [] },
         skills: [],
@@ -201,6 +205,13 @@ export const ADD_ONS: Record<AddOnName, AddOnDefinition> = {
             !!input.requestingUser && !input.requestingUser.isServiceAccount,
         tools: ['updateUserName'],
         section: { id: 'requestingUser', documents: ['updateUserName'] },
+        skills: [],
+    },
+    askUser: {
+        description: 'Ask the user clarifying questions with clickable options',
+        when: (input) => input.enableAskUser,
+        tools: ['askUser'],
+        section: null,
         skills: [],
     },
 };

@@ -232,7 +232,7 @@ If the prompt lists external connections (files under `/tmp/external-data/`), re
 
 ## Saved app state
 
-If the prompt says saved app state is available, read `/app/references/app-state.md` before building anything that should survive a reload: a person's inputs are remembered with `useAppState` by default, without being asked; shared values (comments, targets, annotations, "everyone", "the team", "who changed") use `useSharedAppState`. Without that line in the prompt, do not use these hooks.
+If the prompt says saved app state is available, read `/app/references/app-state.md` before building anything that should survive a reload: a person's inputs are remembered with `useAppState` (the default `user` scope) without being asked; shared values (comments, targets, annotations, "everyone", "the team", "who changed") use `useAppState(key, default, { scope: 'shared' })`. Without that line in the prompt, do not use the `user` or `shared` scopes — only `{ scope: 'url' }` (see "App state — one hook, pick a scope").
 
 ## Attached images
 
@@ -522,7 +522,9 @@ When the user asks for "Open in Google Sheets" (or any Sheets destination), read
 
 A PDF or printable report app always includes a visible **Download PDF** button — the export action is part of the report shape, not an optional extra, and `window.print()` is only ever a secondary Print action. This applies whenever the app is report-shaped, whatever the request's wording: the PDF Report starter template, a "printable" / "document" / "report to share" ask, or an app that already renders `.pdf-page` sections. On edit turns, keep the existing Download PDF button working — an edit that removes it is a regression.
 
-Before wiring the button, read `/app/references/pdf-downloads.md` — it has the required `html-to-image` + `jspdf` pattern and page-capture rules.
+Every app with a Download PDF button also registers the same builder for scheduled deliveries via `registerPdfExport` from `@/lib/pdfExport` (builder resolves to `pdf.output('blob')`). The button and the registration always ship together — an app with one but not the other is incomplete, on first generation and after every edit.
+
+Before wiring the button, read `/app/references/pdf-downloads.md` — it has the required `html-to-image` + `jspdf` pattern, page-capture rules, and the `registerPdfExport` wiring.
 
 ### Underlying data
 
@@ -606,6 +608,8 @@ function RevenueTable() {
 
 ### Formatting
 
+**Trust Lightdash's values for date/time display — never re-convert them.** Date and timestamp values arrive as the correct wall-clock reading with a `Z` suffix (e.g. a March 1st date is `'2025-03-01T00:00:00Z'`). Rendering them through anything timezone-aware — `new Date(value).toLocaleDateString()`, `Intl.DateTimeFormat`, `date-fns-tz`, or manual offset math — shifts them into the viewer's local timezone, so a viewer behind UTC sees Feb 28 where Lightdash shows Mar 1. Always display dates via `format(row, fieldName)` or the `@/lib/format` helpers below (they render the server's wall-clock components as-is); when formatting manually, format the date's own Y/M/D components, never a locale/timezone conversion of them.
+
 Every Lightdash row carries two views of each value:
 
 - `row[fieldName]` — the **raw** value. Numbers are real numbers; **dates and timestamps are full ISO strings** (e.g. `'2025-03-01T00:00:00Z'`) regardless of the truncation grain. Pass these to charts as data, not as axis labels.
@@ -634,16 +638,14 @@ import { formatField, formatDate, formatNumber, getColumn } from '@/lib/format';
 - number — server-formatted (currency / % / suffix preserved via the SDK `format()` you pass in)
 - timestamp without grain — `Jun 16, 2025 14:00`
 
-**Override** by passing `opts.pattern` to `formatDate`, or by formatting yourself with `date-fns`/`Intl.NumberFormat`:
+**Override** by passing `opts.pattern` to `formatDate` — this keeps the server's wall-clock reading while changing the pattern:
 
 ```tsx
-import { format as formatDateFns, parseISO } from 'date-fns';
-
 formatDate(row.order_date_month, getColumn(columns, 'order_date_month'), 'axis', { pattern: 'MMM yyyy' });
-
-// Or fully manual:
-formatDateFns(parseISO(row.order_date as string), 'EEEE, MMM d');
+formatDate(row.order_date, undefined, 'cell', { pattern: 'EEEE, MMM d' });
 ```
+
+Avoid `parseISO`/`new Date` + `format` from `date-fns` for display: the `Z` suffix makes them shift the value into the viewer's timezone, moving midnight dates to the previous day for viewers behind UTC.
 
 #### Chart axes
 
@@ -745,35 +747,50 @@ const client = useLightdashClient();
 const user = await client.auth.getUser();
 ```
 
-### Shareable URL state
+### App state — one hook, pick a scope
 
-The host page keeps a `?state=` query param in sync with the app's view state, so the
-browser's address bar is always a shareable link — a colleague who opens the link lands
-on the same view. **Use `useUrlState` instead of `useState` for every user-facing view
-control**: period/date-range selectors, active tab, segment pickers, sort toggles.
+Any state the app keeps beyond a plain `useState` goes through one hook,
+`useAppState(key, default, { scope })`. Pick the scope from what the value *is*:
+
+| The value is… | Scope |
+| --- | --- |
+| Part of the link you'd share — it defines *which view* this is: period/date-range selectors, active tab, segment pickers, sort toggles | `'url'` (always available) |
+| A person's own pick, remembered across visits and devices | `'user'` — only when the prompt says saved app state is available |
+| The team's value — one thing every viewer reads, versioned | `'shared'` — only when the prompt says saved app state is available |
+
+**Use `useAppState(key, default, { scope: 'url' })` instead of `useState` for every
+user-facing view control.** The host page keeps a `?state=` query param in sync with
+`url`-scoped values, so the browser's address bar is always a shareable link — a
+colleague who opens the link lands on the same view.
 
 ```tsx
-import { useUrlState } from '@lightdash/query-sdk';
+import { useAppState } from '@lightdash/query-sdk';
 
-const [period, setPeriod] = useUrlState('period', 'last_month');
+const [period, setPeriod] = useAppState('period', 'last_month', { scope: 'url' });
 ```
 
 - Drop-in `useState` shape (functional updates work). Values must be JSON-serializable.
-- Each control owns a stable string key; all keys share one map, so keep the total
-  small (≤ 4 KB serialized — oversized state stays in memory but stops persisting).
+  The scope is fixed per call site — never switch it at runtime.
+- Each `url` control owns a stable string key; all `url` keys share one map, so keep
+  the total small (≤ 4 KB serialized — oversized state stays in memory but stops
+  persisting).
 - **Global filters are persisted automatically** — `useGlobalFilters()` already stores
-  its filters in URL state. Never wire filter state through `useUrlState` yourself.
-- **Treat the seeded value as untrusted.** It comes from a user-editable URL: validate
-  it before use and fall back to the default when it's not what you expect
+  its filters in URL state. Never wire filter state through `useAppState` yourself.
+- **Treat a `url`-seeded value as untrusted.** It comes from a user-editable URL:
+  validate it before use and fall back to the default when it's not what you expect
   (e.g. `PERIODS.includes(period) ? period : 'last_month'`).
 - Do NOT build "copy link" / "share" buttons — the host page owns the URL; sharing is
   just copying the address bar.
 - Ephemeral UI state (open dropdowns, hover, modal visibility, in-progress form input)
   stays in plain `useState` — only state that defines *which view* the user is looking
   at belongs in the URL.
-- When the prompt says saved app state is available, view controls use
-  `useAppState(key, default, { url: true })` instead, which keeps the URL in sync and
-  also remembers the value for the person. See `/app/references/app-state.md`.
+- The `user` and `shared` scopes exist only when the build prompt says saved app state
+  is available — read `/app/references/app-state.md` before using them (it also covers
+  mirroring a remembered view control into the link). Without that prompt line,
+  `{ scope: 'url' }` is the only option to pass — no other scope, no `url: true`:
+  anything else would only live in memory for the session.
+- Always write the unified `useAppState(key, default, { scope })` form; older apps may
+  still carry alias hooks, but never introduce them in new code.
 
 ### External APIs
 
@@ -851,7 +868,7 @@ Use `useDeliveryRender()` from `@lightdash/query-sdk` to mount every tab's data 
 import { useDeliveryRender } from '@lightdash/query-sdk';
 
 function AppTabs() {
-    const [activeTab, setActiveTab] = useUrlState('tab', 'overview');
+    const [activeTab, setActiveTab] = useAppState('tab', 'overview', { scope: 'url' });
     const deliveryRender = useDeliveryRender();
 
     return (
@@ -1377,6 +1394,7 @@ The action-menu example above shows typical `drillDown()` usage. For the full AP
 | Skipping `tickFormatter` on a year axis because "year is just a number" | Year dimensions (`*_year`) are still full ISO timestamps at the data layer, so the axis renders `2025-01-01T00:00:00Z` | Apply the same `formatDate(...)` `tickFormatter` to year axes — `formatDate` will collapse to `2025` for year-grain columns |
 | Using `format(row, 'order_date')` for a date column in a table cell | Renders `2025-03-17` (zero-padded tabular) — readable but ugly in dashboards | `formatField(row, col, format, 'cell')` from `@/lib/format` — renders `Mar 17, 2025` while still routing currency/% metrics through the server format |
 | Treating `row.order_date_month` as a `Date` or short string | It's a full ISO timestamp string (`2025-03-01T00:00:00Z`) for every grain | Pass through `formatDate` / `formatField`, or `parseISO` it before doing date math |
+| Displaying dates via `toLocaleDateString()`, `Intl.DateTimeFormat`, or `parseISO` + `format` | The `Z` suffix makes these convert to the viewer's timezone — viewers behind UTC see the previous day (e.g. Feb 28 instead of Mar 1) | Render through `format(row, field)` or `@/lib/format` helpers; they display the server's wall-clock value as-is |
 | Wrong `.parameters()` key scope | Value silently ignored — query returns the default | Project-level → bare name (`{ region }`); model-level → `model.param` (`{ 'orders.region' }`), matching the `${lightdash.parameters.…}` reference |
 | Inventing a parameter not declared in the YAML | Backend ignores unknown params; nothing changes | Only pass parameters that exist in a model's `meta.parameters` or `lightdash.config.yml`. Use `.filters()` for row restriction instead |
 | Applying `.parameters()` at module scope for a UI-driven value | Value never updates when the control changes | Apply `.parameters()` in a `useMemo` keyed on the state value; keep the base query at module scope |

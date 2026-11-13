@@ -29,4 +29,7 @@ Rules:
 
 Backend `dashboard.created` / `dashboard.updated` /
 `dashboard_version.created` carry section counts from
-`DashboardService.getSectionEventProperties`.
+`DashboardService.getSectionEventProperties`, and parameter control and filter
+tile target counts from `DashboardService.getParameterControlEventProperties`. Date zoom
+counts (`dateZoomControlsCount`, `hiddenDateZoomControlsCount`,
+`dateZoomTileTargetsCount`) are in `getCreateEventProperties`.

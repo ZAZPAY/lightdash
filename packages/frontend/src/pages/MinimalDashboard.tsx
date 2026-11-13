@@ -39,6 +39,7 @@ import LoomTile from '../components/DashboardTiles/DashboardLoomTile';
 import MarkdownTile from '../components/DashboardTiles/DashboardMarkdownTile';
 import SqlChartTile from '../components/DashboardTiles/DashboardSqlChartTile';
 import MinimalDashboardTabs from '../components/MinimalDashboardTabs';
+import DashboardComposerChartTile from '../features/composerCharts/components/DashboardComposerChartTile';
 import {
     selectDashboardTiles,
     useDashboardSelector,
@@ -47,6 +48,7 @@ import {
 import {
     getReactGridLayoutConfig,
     getResponsiveGridLayoutProps,
+    GRID_MARGIN,
 } from '../features/dashboardTabs/gridUtils';
 import { ResponsiveGridLayout } from '../features/dashboardTabs/ResponsiveGridLayout';
 import { useScheduler } from '../features/scheduler/hooks/useScheduler';
@@ -150,6 +152,17 @@ const renderDashboardTile = (tile: Dashboard['tiles'][number]) => {
             return (
                 <DataAppTile
                     key={tile.uuid}
+                    tile={tile}
+                    isEditMode={false}
+                    onDelete={() => {}}
+                    onEdit={() => {}}
+                />
+            );
+        case DashboardTileTypes.COMPOSER_CHART:
+            return (
+                <DashboardComposerChartTile
+                    key={tile.uuid}
+                    minimal
                     tile={tile}
                     isEditMode={false}
                     onDelete={() => {}}
@@ -434,6 +447,8 @@ const MinimalDashboard: FC = () => {
 
     const gridProps = getResponsiveGridLayoutProps({
         stackVerticallyOnSmallestBreakpoint: true,
+        // This page has always used the grid library default: the margin
+        containerPadding: GRID_MARGIN,
     });
 
     const filteredAndSortedDashboardTiles = useMemo(() => {
@@ -477,13 +492,13 @@ const MinimalDashboard: FC = () => {
     const layouts = useMemo(() => {
         return {
             lg: filteredAndSortedDashboardTiles.map<Layout>((tile) =>
-                getReactGridLayoutConfig(tile, false, gridProps.cols.lg),
+                getReactGridLayoutConfig(tile, false),
             ),
             md: filteredAndSortedDashboardTiles.map<Layout>((tile) =>
-                getReactGridLayoutConfig(tile, false, gridProps.cols.md),
+                getReactGridLayoutConfig(tile, false),
             ),
         };
-    }, [filteredAndSortedDashboardTiles, gridProps.cols]);
+    }, [filteredAndSortedDashboardTiles]);
 
     // Multi-tab export: group tiles per tab so each tab renders in its own
     // <ResponsiveGridLayout>. Tabs share the same y=0 origin, so a single grid
@@ -513,12 +528,8 @@ const MinimalDashboard: FC = () => {
         }
 
         const buildLayouts = (tiles: Dashboard['tiles']) => ({
-            lg: tiles.map((tile) =>
-                getReactGridLayoutConfig(tile, false, gridProps.cols.lg),
-            ),
-            md: tiles.map((tile) =>
-                getReactGridLayoutConfig(tile, false, gridProps.cols.md),
-            ),
+            lg: tiles.map((tile) => getReactGridLayoutConfig(tile, false)),
+            md: tiles.map((tile) => getReactGridLayoutConfig(tile, false)),
         });
 
         const selectedTabUuids = (
@@ -574,7 +585,6 @@ const MinimalDashboard: FC = () => {
         exportPagedTabs,
         filteredAndSortedDashboardTiles,
         sortedTabs,
-        gridProps.cols,
     ]);
 
     if (isDashboardError || isSchedulerError) {

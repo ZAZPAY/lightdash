@@ -4,16 +4,24 @@ import { IconFolderPlus } from '@tabler/icons-react';
 import { useState, type FC } from 'react';
 import MantineIcon from '../../components/common/MantineIcon';
 import { useUiStrings } from '../../ee/providers/Embed/useUiStrings';
+import { formatPickedCount } from './barSelection';
+import editorClasses from './FilterEditor.module.css';
+import { MENU_TRANSITION } from './menuTransition';
 
 export type SelectionActionsProps = {
-    count: number;
-    /** Each section with how many filters it holds. */
+    /** Picked filter pills */
+    filterCount: number;
+    /** Picked parameter pills */
+    parameterCount: number;
+    /** Picked date zoom pills */
+    dateZoomCount: number;
+    /** Each section with how many pills it holds. */
     sections: (DashboardControlSection & { count: number })[];
-    /** The section every selected filter is in, else null: "Move to" leaves it out. */
+    /** The section every selected pill is in, else null: "Move to" leaves it out. */
     sharedSectionId: string | null;
-    /** Some selected filter is in a section: only then is "No section" a move. */
+    /** Some selected pill is in a section: only then is "No section" a move. */
     isAnyInSection: boolean;
-    /** Null takes the selected filters out of their sections. */
+    /** Null takes the selected pills out of their sections. */
     onMove: (sectionId: string | null) => void;
     /** Names a new section, then moves the selection into it. */
     onMoveToNewSection: (source: 'selection_bar' | 'move_to_menu') => void;
@@ -23,7 +31,9 @@ export type SelectionActionsProps = {
 // "Move to new section", "Move to" and the two-click "Remove" over selected
 // filters, on the bar's selection bar
 export const SelectionActions: FC<SelectionActionsProps> = ({
-    count,
+    filterCount,
+    parameterCount,
+    dateZoomCount,
     sections,
     sharedSectionId,
     isAnyInSection,
@@ -32,6 +42,7 @@ export const SelectionActions: FC<SelectionActionsProps> = ({
     onRemove,
 }) => {
     const getUiString = useUiStrings();
+    const count = filterCount + parameterCount + dateZoomCount;
     // The first click arms "Remove", the second removes; Escape or leaving disarms
     const [isRemoveArmed, setIsRemoveArmed] = useState(false);
     const targets = sections.filter(
@@ -50,7 +61,13 @@ export const SelectionActions: FC<SelectionActionsProps> = ({
                 Move to new section
             </Button>
             {/* Focus must stay on the name input New section opens */}
-            <Menu position="top" returnFocus={false}>
+            <Menu
+                position="top"
+                withArrow
+                offset={1}
+                returnFocus={false}
+                transitionProps={MENU_TRANSITION}
+            >
                 <Menu.Target>
                     <Button
                         variant="subtle"
@@ -62,7 +79,7 @@ export const SelectionActions: FC<SelectionActionsProps> = ({
                         Move to
                     </Button>
                 </Menu.Target>
-                <Menu.Dropdown>
+                <Menu.Dropdown className={editorClasses.menu}>
                     <Menu.Item
                         leftSection={
                             <MantineIcon icon={IconFolderPlus} size={14} />
@@ -78,7 +95,7 @@ export const SelectionActions: FC<SelectionActionsProps> = ({
                             onClick={() => onMove(section.id)}
                         >
                             {section.name ||
-                                getUiString('filters.rail.untitledSection')}
+                                getUiString('controls.untitledSection')}
                             <Text span inherit c="dimmed">
                                 {` · ${section.count}`}
                             </Text>
@@ -113,7 +130,7 @@ export const SelectionActions: FC<SelectionActionsProps> = ({
                 }}
             >
                 {isRemoveArmed
-                    ? `Remove ${count} ${count === 1 ? 'filter' : 'filters'}`
+                    ? `Remove ${formatPickedCount(filterCount, parameterCount, dateZoomCount)}`
                     : 'Remove'}
             </Button>
         </>

@@ -6,6 +6,7 @@ import {
     DbtVersionOption,
     ParameterError,
     resolveDbtVersion,
+    type DbtJoinAvailability,
     type WarehouseClient,
 } from '@lightdash/common';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
@@ -26,7 +27,10 @@ import {
     ManifestInput,
 } from './dbtManifestProjectAdapter';
 import { DbtNoneCredentialsProjectAdapter } from './dbtNoneCredentialsProjectAdapter';
-import { getGithubToken } from './githubAuthorization';
+import {
+    getGithubCloneHostDomain,
+    getGithubToken,
+} from './githubAuthorization';
 import { NativeGitProjectAdapter } from './nativeGitProjectAdapter';
 
 export const projectAdapterFromConfig = async (
@@ -45,7 +49,11 @@ export const projectAdapterFromConfig = async (
     analytics?: LightdashAnalytics,
     // MANIFEST-only: project dir for Lightdash config and selected model ids.
     // Ignored by every other adapter type.
-    manifestOptions?: { projectDir?: string; selectedModelIds?: string[] },
+    manifestOptions?: {
+        projectDir?: string;
+        selectedModelIds?: string[];
+        joinAvailability?: DbtJoinAvailability;
+    },
 ): Promise<ProjectAdapter> => {
     const configType = config.type;
     Logger.debug(`Initialize project adaptor of type ${configType}`);
@@ -94,6 +102,7 @@ export const projectAdapterFromConfig = async (
                     : { manifest: config.manifest }),
                 dbtProjectDir: manifestOptions?.projectDir,
                 selectedModelIds: manifestOptions?.selectedModelIds,
+                joinAvailability: manifestOptions?.joinAvailability,
             });
 
         case DbtProjectType.DBT_CLOUD_IDE:
@@ -130,7 +139,7 @@ export const projectAdapterFromConfig = async (
                     repository: config.repository,
                     branch: config.branch,
                     projectSubPath: config.project_sub_path,
-                    hostDomain: config.host_domain,
+                    hostDomain: getGithubCloneHostDomain(config),
                 });
             }
             return new DbtGithubProjectAdapter({
@@ -145,7 +154,7 @@ export const projectAdapterFromConfig = async (
                 githubRepository: config.repository,
                 githubBranch: config.branch,
                 projectDirectorySubPath: config.project_sub_path,
-                hostDomain: config.host_domain,
+                hostDomain: getGithubCloneHostDomain(config),
                 ...resolveTarget(),
                 targetName: config.target,
                 environment: config.environment,

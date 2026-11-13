@@ -1,13 +1,18 @@
 import {
     assertRegisteredAccount,
     ForbiddenError,
+    type ApiConnectorType,
     type ApiErrorPayload,
+    type ApiExplorePrefixCheckResponse,
     type ApiExternalConnectionApiUsageResponse,
+    type ApiExternalConnectionSchemaResponse,
     type ApiListExternalConnectionLinkedAppsResponse,
     type ApiListExternalConnectionSamplesResponse,
     type ApiLiveSourceFieldsResponse,
     type ApiProposeExternalConnectionConfigRequest,
     type ApiProposeExternalConnectionConfigResponse,
+    type ApiReattachableLiveSourcesResponse,
+    type ApiReattachLiveSourceRequest,
     type ApiSaveExternalConnectionSampleRequest,
     type ApiSaveExternalConnectionSampleResponse,
     type ApiTestExternalConnectionConfigRequest,
@@ -31,6 +36,7 @@ import {
     Patch,
     Path,
     Post,
+    Query,
     Request,
     Response,
     Route,
@@ -138,6 +144,31 @@ export class ExternalConnectionController extends BaseController {
             results: await this.getService().getApiSourceUsage(
                 req.account,
                 projectUuid,
+            ),
+        };
+    }
+
+    /**
+     * What the live source's last schema scan found, such as PostHog event names; null when it was never scanned
+     * @summary Get live source schema
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('external-connections/{connectionUuid}/schema')
+    @OperationId('getExternalConnectionSchema')
+    async getExternalConnectionSchema(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() connectionUuid: string,
+    ): Promise<ApiExternalConnectionSchemaResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getService().getApiSourceSchema(
+                req.account,
+                projectUuid,
+                connectionUuid,
             ),
         };
     }
@@ -674,6 +705,89 @@ export class ExternalConnectionController extends BaseController {
         );
         this.setStatus(200);
         return { status: 'ok', results: undefined };
+    }
+
+    /**
+     * Whether a new live data source can use an explore prefix.
+     * @summary Check live data source explore prefix
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('live-sources/explore-prefix')
+    @OperationId('checkLiveSourceExplorePrefix')
+    async checkLiveSourceExplorePrefix(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() connector: ApiConnectorType,
+        @Query() prefix: string,
+    ): Promise<ApiExplorePrefixCheckResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getService().checkExplorePrefix(
+                req.account,
+                projectUuid,
+                connector,
+                prefix,
+            ),
+        };
+    }
+
+    /**
+     * Deleted live data sources this one can take the explore prefix of.
+     * @summary List deleted live data sources to reattach
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('external-connections/{connectionUuid}/reattach-candidates')
+    @OperationId('listLiveSourceReattachCandidates')
+    async listLiveSourceReattachCandidates(
+        @Path() projectUuid: string,
+        @Path() connectionUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiReattachableLiveSourcesResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getService().listReattachableLiveSources(
+                req.account,
+                projectUuid,
+                connectionUuid,
+            ),
+        };
+    }
+
+    /**
+     * Gives this source a deleted source's explore prefix and field edits.
+     * @summary Reattach a deleted live data source
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('external-connections/{connectionUuid}/reattach')
+    @OperationId('reattachLiveSource')
+    async reattachLiveSource(
+        @Path() projectUuid: string,
+        @Path() connectionUuid: string,
+        @Request() req: express.Request,
+        @Body() body: ApiReattachLiveSourceRequest,
+    ): Promise<ApiExternalConnectionResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getService().reattachLiveSource(
+                req.account,
+                projectUuid,
+                connectionUuid,
+                body.deletedConnectionUuid,
+            ),
+        };
     }
 
     private getService(): ExternalConnectionService {

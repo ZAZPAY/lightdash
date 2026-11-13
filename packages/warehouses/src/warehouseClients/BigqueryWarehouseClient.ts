@@ -30,6 +30,7 @@ import {
     getWarehouseTableType,
     Metric,
     MetricType,
+    ParameterError,
     PartitionColumn,
     PartitionGranularity,
     PartitionType,
@@ -53,7 +54,6 @@ import {
     type WarehouseNestedColumnShape,
     type WarehouseQueryEstimate,
 } from '@lightdash/common';
-import { pipeline, Transform } from 'stream';
 import {
     WarehouseCatalog,
     WarehouseExecuteAsyncQuery,
@@ -66,8 +66,12 @@ import {
     processPromisesInBatches,
 } from '../utils/processPromisesInBatches';
 import { normalizeUnicode } from '../utils/sql';
+import { createRowBatchProcessor } from '../utils/streamRows';
 import WarehouseBaseClient from './WarehouseBaseClient';
 import WarehouseBaseSqlBuilder from './WarehouseBaseSqlBuilder';
+
+export const BIGQUERY_RESULTS_PAGE_SIZE = 5000;
+const BIGQUERY_CONVERSION_BATCH_SIZE = 64;
 
 const MAX_RECOMMENDATION_PROJECTS = 8;
 const MAX_RECOMMENDATION_REGIONS_PER_PROJECT = 3;
@@ -490,6 +494,11 @@ const getTablePartitioningFromMetadata = (
     return null;
 };
 
+// Lets service identities query Drive-backed external tables (e.g. Google Sheets) shared with them.
+const BIGQUERY_SERVICE_IDENTITY_SCOPES = [
+    'https://www.googleapis.com/auth/drive.readonly',
+];
+
 export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryCredentials> {
     private static readonly MAX_LABELS = 64;
 
@@ -545,27 +554,36 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
     private static getAuthenticationOptions(
         credentials: CreateBigqueryCredentials,
         options: BigqueryWarehouseClientOptions | undefined,
-    ): Pick<BigQueryOptions, 'credentials'> {
+    ): Pick<BigQueryOptions, 'credentials' | 'scopes'> {
         switch (credentials.authenticationType) {
             case BigqueryAuthenticationType.ADC:
                 // Support ADC via workforce identity federation / external_account configuration.
                 // In this case we should rely on ADC at runtime and not pass explicit credentials.
-                return {};
+                return { scopes: BIGQUERY_SERVICE_IDENTITY_SCOPES };
             case BigqueryAuthenticationType.WORKLOAD_IDENTITY_FEDERATION:
                 if (!options?.bigqueryExternalAccount) {
                     throw new WarehouseConnectionError(
                         'BigQuery workload identity federation credentials are unavailable.',
                     );
                 }
-                return { credentials: options.bigqueryExternalAccount };
+                return {
+                    credentials: options.bigqueryExternalAccount,
+                    scopes: BIGQUERY_SERVICE_IDENTITY_SCOPES,
+                };
             case BigqueryAuthenticationType.PRIVATE_KEY:
             case BigqueryAuthenticationType.SSO:
-            case undefined:
-                return {
-                    credentials: getBigqueryKeyfileCredentials(
-                        credentials.keyfileContents,
-                    ),
-                };
+            case undefined: {
+                const keyfileCredentials = getBigqueryKeyfileCredentials(
+                    credentials.keyfileContents,
+                );
+                // User refresh tokens keep the scopes granted at consent.
+                return keyfileCredentials.type === 'authorized_user'
+                    ? { credentials: keyfileCredentials }
+                    : {
+                          credentials: keyfileCredentials,
+                          scopes: BIGQUERY_SERVICE_IDENTITY_SCOPES,
+                      };
+            }
             default:
                 return assertUnreachable(
                     credentials.authenticationType,
@@ -803,37 +821,50 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
     private async streamResults(
         job: Job,
         streamCallback: (
-            data: WarehouseResults['rows'][number],
+            data: WarehouseResults['rows'],
         ) => void | Promise<void>,
         options: QueryResultsOptions = {},
     ) {
-        return new Promise<void>((resolve, reject) => {
-            pipeline(
-                job.getQueryResultsStream(options),
-                new Transform({
-                    objectMode: true,
-                    async transform(chunk, _encoding, callback) {
-                        try {
-                            const chunkParsed = parseRow(chunk);
-                            await streamCallback(chunkParsed);
-                            callback();
-                        } catch (err) {
-                            if (err instanceof Error) {
-                                callback(err);
-                            } else {
-                                callback(new Error(String(err)));
-                            }
-                        }
-                    },
-                }),
-                (err: NodeJS.ErrnoException | null) => {
-                    if (err) {
-                        reject(err);
-                    }
-                    resolve();
-                },
-            );
-        });
+        const processRows = createRowBatchProcessor(parseRow, streamCallback);
+        let nextQuery: QueryResultsOptions | null = options;
+        while (nextQuery) {
+            const [rows, query, response]: QueryRowsResponse =
+                // eslint-disable-next-line no-await-in-loop
+                await job.getQueryResults({
+                    ...nextQuery,
+                    autoPaginate: false,
+                    maxResults: BIGQUERY_RESULTS_PAGE_SIZE,
+                    skipParsing: true,
+                });
+            if (rows.length > 0) {
+                if (!response?.schema) {
+                    throw new WarehouseQueryError(
+                        'Query response has no schema',
+                    );
+                }
+                for (
+                    let offset = 0;
+                    offset < rows.length;
+                    offset += BIGQUERY_CONVERSION_BATCH_SIZE
+                ) {
+                    // eslint-disable-next-line no-underscore-dangle
+                    const converted = BigQuery.mergeSchemaWithRows_(
+                        response.schema,
+                        rows.slice(
+                            offset,
+                            offset + BIGQUERY_CONVERSION_BATCH_SIZE,
+                        ),
+                        {
+                            wrapIntegers: options.wrapIntegers ?? false,
+                            parseJSON: options.parseJSON ?? false,
+                        },
+                    );
+                    // eslint-disable-next-line no-await-in-loop
+                    await processRows(converted);
+                }
+            }
+            nextQuery = query ?? null;
+        }
     }
 
     async streamQuery(
@@ -855,7 +886,7 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 BigqueryWarehouseClient.getFieldsFromResponse(resultsMetadata);
 
             await this.streamResults(job, (chunk) =>
-                streamCallback({ fields, rows: [chunk] }),
+                streamCallback({ fields, rows: chunk }),
             );
         } catch (e: unknown) {
             this.throwIfGoogleOauthTokenError(e);
@@ -1118,6 +1149,15 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
         }
         switch (error?.reason) {
             case 'accessDenied':
+                if (error.message?.includes('Drive credentials')) {
+                    return new WarehouseQueryError(
+                        `${error.message} ${
+                            this.usesUserRefreshToken()
+                                ? 'Tables backed by Google Drive files need a service account connection that the file is shared with.'
+                                : 'Share the Google Drive file with the account used by this connection.'
+                        }`,
+                    );
+                }
                 return new WarehouseQueryError(
                     error?.message || 'Bigquery warehouse error: access denied',
                 );
@@ -1318,7 +1358,7 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
             if (resultsStreamCallback) {
                 const fetchPhaseStart = performance.now();
                 await this.streamResults(job, (row) =>
-                    resultsStreamCallback([row], fields),
+                    resultsStreamCallback(row, fields),
                 );
                 fetchMs = performance.now() - fetchPhaseStart;
             }
@@ -1359,6 +1399,27 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 reject(error);
             });
         });
+    }
+
+    /** Lists datasets with a service account key; a metadata call, no queries run */
+    static async getDatasetsWithKeyfile(
+        keyfileContents: Record<string, unknown>,
+    ): Promise<BigqueryDataset[]> {
+        const credentials = getBigqueryKeyfileCredentials(keyfileContents);
+        const projectId = keyfileContents.project_id;
+        if (typeof projectId !== 'string') {
+            throw new ParameterError('The key file has no project_id');
+        }
+        const [datasets] = await new BigQuery({
+            projectId,
+            credentials,
+        }).getDatasets({ autoPaginate: false, maxResults: 1000 });
+        return datasets.map((dataset) => ({
+            projectId: dataset.projectId ?? projectId,
+            location: dataset.location,
+            datasetId: dataset.id!,
+            sizeBytes: null,
+        }));
     }
 
     static async getDatabases(

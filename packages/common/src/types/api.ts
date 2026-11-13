@@ -4,8 +4,6 @@ import { type ExploreWarningReport } from '../compiler/compilationReport';
 import type {
     ApiAgentAsCodeListResponse,
     ApiAgentAsCodeUpsertResponse,
-    ApiAgentOnboardingFileResponse,
-    ApiAgentOnboardingRunResponse,
     ApiAgentSkillsListingResponse,
     ApiAgentSuggestionsResponse,
     ApiAiAgentAdminConversationsResponse,
@@ -21,6 +19,7 @@ import type {
     ApiAiAgentEvaluationRunSummaryListResponse,
     ApiAiAgentEvaluationSummaryListResponse,
     ApiAiAgentMemoryResponse,
+    ApiAiAgentNodeCitationPipelineResponse,
     ApiAiAgentProjectThreadSummaryListResponse,
     ApiAiAgentReviewItemActivityResponse,
     ApiAiAgentReviewItemPrDiffResponse,
@@ -62,6 +61,7 @@ import type {
     ApiAiRouterRouteResponse,
     ApiAiSuggestChartTypeExploreResponse,
     ApiAiSuggestChartTypeFieldsResponse,
+    ApiAiWritebackRunStatusResponse,
     ApiAnnouncementResponse,
     ApiAnnouncementsResponse,
     ApiAppendInstructionResponse,
@@ -79,6 +79,7 @@ import type {
     ApiDataAppVizPreviewTokenResponse,
     ApiDataAppVizRenderMetadataResponse,
     ApiDataAppVizUpgradeImpactResponse,
+    ApiExplorePrefixCheckResponse,
     ApiExternalConnectionAsCodeListResponse,
     ApiExternalConnectionAsCodeUpsertResponse,
     ApiGenerateAppResponse,
@@ -110,6 +111,8 @@ import type {
     ApiPromoteAiAgentMemoryResponse,
     ApiPromoteAppDiffResponse,
     ApiPromoteAppResponse,
+    ApiReattachableLiveSourcesResponse,
+    ApiReplaceProjectContextResults,
     ApiResolvedHomepageResponse,
     ApiSkillsAsCodeListResponse,
     ApiSkillsAsCodeUpsertResponse,
@@ -125,6 +128,10 @@ import type {
     ManagedAgentRuntimeInfo,
 } from '../ee';
 import type { ApiAiThreadFileResponse } from '../ee/AiAgent/threadFileTypes';
+import type {
+    ApiAppStateAdminOverviewResponse,
+    ApiAppStateHistoryResponse,
+} from '../ee/apps/appState';
 import type { DashboardPreAggregateAudit } from '../ee/preAggregates/audit';
 import type { ApiScimRequestLogListResponse } from '../ee/scim/requestLogs';
 import type { ApiQueryCostEstimateResponse } from '../utils/queryCostEstimate';
@@ -313,7 +320,12 @@ import {
     type ApiLearnWorkspaceFileResponse,
     type ApiLearnWorkspaceFilesResponse,
 } from './learnSandbox';
-import type { LinearInstallation, LinearProject, LinearTeam } from './linear';
+import type {
+    LinearInstallation,
+    LinearInstallUrl,
+    LinearProject,
+    LinearTeam,
+} from './linear';
 import {
     type ApiCompiledMergeQueryResults,
     type MergeFieldOrigins,
@@ -325,6 +337,15 @@ import type {
     ApiMetricsExplorerQueryResults,
     ApiMetricsExplorerTotalResults,
 } from './metricsExplorer';
+import {
+    type ApiMobileAppLinkResponse,
+    type ApiMobileAppLinkStatusResponse,
+} from './mobileAppLink';
+import {
+    type ApiMobileSignInCodeResponse,
+    type ApiMobileSignInCodeStateResponse,
+    type ApiMobileSignInDecisionResponse,
+} from './mobileSignIn';
 import {
     type CreateOAuthClientResponse,
     type OAuthClientSummary,
@@ -343,7 +364,10 @@ import {
     type UpdateAllowedEmailDomains,
 } from './organization';
 import { type OrganizationAccess } from './organizationAccess';
-import { type ApiOrganizationBrandResponse } from './organizationBrand';
+import {
+    type ApiOrganizationBrandResponse,
+    type InstanceBrand,
+} from './organizationBrand';
 import {
     type DomainVerificationStatus,
     type VerifiedDomain,
@@ -415,6 +439,9 @@ import { type ResultColumns, type ResultRow } from './results';
 import {
     type ApiResultsCacheInvalidationResponse,
     type ApiResultsCacheProjectSettingsResponse,
+    type ApiResultsCacheStatsResponse,
+    type ApiResultsCacheStatusResponse,
+    type ApiResultsCacheTtlProjectionsResponse,
 } from './resultsCacheProjectSettings';
 import {
     type ApiRoadmapFollowProjectResponse,
@@ -448,6 +475,16 @@ import {
 } from './scheduler';
 import { type SchedulerWithLogs } from './schedulerLog';
 import { type SearchResults } from './search';
+import {
+    type ApiSemanticLayerDraftApplyResponse,
+    type ApiSemanticLayerDraftedModelsResponse,
+    type ApiSemanticLayerDraftImpactResponse,
+    type ApiSemanticLayerDraftResponse,
+    type ApiSemanticLayerDraftStateResponse,
+    type ApiSemanticLayerDraftUsageResponse,
+    type ApiSemanticStudioWorkspaceResponse,
+    type ApiSemanticStudioWorkspacesResponse,
+} from './semanticStudio';
 import { type ShareUrl } from './share';
 import { type SharedSignInStatus } from './sharedSignIn';
 import { type ApiSlackChannelsResponse } from './slack';
@@ -718,6 +755,7 @@ export type HealthState = {
     defaultProject?: DbtProjectConfig;
     isAuthenticated: boolean;
     requiresOrgRegistration: boolean;
+    instanceBrand: InstanceBrand | null;
     hasEmailClient: boolean;
     /**
      * Instance can provision the sample-data playground project (enterprise
@@ -841,8 +879,10 @@ export type HealthState = {
     hasJira: boolean;
     hasLinear: boolean;
     hasPostHogOAuth: boolean;
+    hasLinkedInAdsOAuth: boolean;
     hasGoogleLiveSources: boolean;
     hasHeadlessBrowser: boolean;
+    hasManagedAnalytics?: boolean;
     hasExtendedUsageAnalytics: boolean;
     hasCacheAutocompleResults: boolean;
     appearance: {
@@ -852,7 +892,6 @@ export type HealthState = {
     hasBrandfetch: boolean;
     isCustomRolesEnabled: boolean;
     embedding: {
-        enabled: boolean;
         events:
             | {
                   enabled: boolean;
@@ -886,6 +925,9 @@ export type HealthState = {
         enabled: boolean;
     };
     dashboardComments: {
+        enabled: boolean;
+    };
+    mergeQueryAuthoring: {
         enabled: boolean;
     };
     preAggregates: {
@@ -1420,6 +1462,8 @@ export type ApiFlashResults = Record<string, string[]>;
 
 type ApiResults =
     | ApiQueryCostEstimateResponse['results']
+    | ApiAppStateAdminOverviewResponse['results']
+    | ApiAppStateHistoryResponse['results']
     | ReleaseHighlightsResult
     | AgentConnectionApprovalReviewResponse['results']
     | AgentConnectionApprovalDecisionResponse['results']
@@ -1457,6 +1501,11 @@ type ApiResults =
     | CreateTrainingPreviewResults
     | ApiWarehouseConnectCodeResponse['results']
     | ApiWarehouseConnectCodeClaimResponse['results']
+    | ApiMobileAppLinkResponse['results']
+    | ApiMobileAppLinkStatusResponse['results']
+    | ApiMobileSignInCodeResponse['results']
+    | ApiMobileSignInCodeStateResponse['results']
+    | ApiMobileSignInDecisionResponse['results']
     | ApiQueryResults
     | ApiSqlQueryResults
     | ApiCompiledQueryResults
@@ -1467,6 +1516,7 @@ type ApiResults =
     | ApiExploreResults
     | ApiStatusResults
     | ApiRefreshResults
+    | ApiReplaceProjectContextResults
     | ApiCreatePreviewResults
     | ApiDataTimezonePreviewResults
     | WarehouseConnectionTestResults
@@ -1556,9 +1606,11 @@ type ApiResults =
     | Array<JiraProject>
     | Array<JiraIssueType>
     | LinearInstallation
+    | LinearInstallUrl
     | Array<LinearTeam>
     | Array<LinearProject>
     | CiChecks
+    | ApiAiWritebackRunStatusResponse['results']
     | MergePullRequestResult
     | ClosePullRequestResult
     | { diff: string }
@@ -1658,6 +1710,8 @@ type ApiResults =
     | ApiExternalConnectionAsCodeListResponse['results']
     | ApiExternalConnectionAsCodeUpsertResponse['results']
     | ApiLiveSourceFieldsResponse['results']
+    | ApiExplorePrefixCheckResponse['results']
+    | ApiReattachableLiveSourcesResponse['results']
     | ApiSpaceAsCodeListResponse['results']
     | ApiSpaceAsCodeUpsertResponse['results']
     | ApiChartAsCodeUpsertResponse['results']
@@ -1709,6 +1763,7 @@ type ApiResults =
     | ApiAiAgentThreadMessageVizResponse['results']
     | ApiAiAgentThreadMessageVizQueryResponse['results']
     | ApiAiAgentArtifactVizQueryResponse['results']
+    | ApiAiAgentNodeCitationPipelineResponse['results']
     | ApiUpdateUserAgentPreferencesResponse['results']
     | ApiGetUserAgentPreferencesResponse[`results`]
     | ApiGetProjectParametersResults
@@ -1777,7 +1832,10 @@ type ApiResults =
     | ApiImpersonationOrganizationSettingsResponse['results']
     | ApiPreviewExpirationProjectSettingsResponse['results']
     | ApiResultsCacheProjectSettingsResponse['results']
+    | ApiResultsCacheStatusResponse['results']
     | ApiResultsCacheInvalidationResponse['results']
+    | ApiResultsCacheStatsResponse['results']
+    | ApiResultsCacheTtlProjectionsResponse['results']
     | ApiPreviewExpiresAtResponse['results']
     | ApiContentVerificationResponse['results']
     | ApiContentVerificationDeleteResponse['results']
@@ -1817,8 +1875,6 @@ type ApiResults =
     | ApiHomepageLinkMetadataResponse['results']
     | ApiProjectColorPaletteResponse['results']
     | ApiOrganizationBrandResponse['results']
-    | ApiAgentOnboardingFileResponse['results']
-    | ApiAgentOnboardingRunResponse['results']
     | ManagedAgentRuntimeInfo
     | ApiManagedAgentRunResponse['results']
     | ApiManagedAgentRunsListResponse['results']
@@ -1842,7 +1898,15 @@ type ApiResults =
     | ApiLearnCommandOutputResponse['results']
     | ApiAiProviderCredentialsResponse['results']
     | ApiAiProviderCredentialCreatedResponse['results']
-    | ApiProjectAiCredentialResponse['results'];
+    | ApiProjectAiCredentialResponse['results']
+    | ApiSemanticLayerDraftResponse['results']
+    | ApiSemanticLayerDraftedModelsResponse['results']
+    | ApiSemanticLayerDraftStateResponse['results']
+    | ApiSemanticStudioWorkspacesResponse['results']
+    | ApiSemanticStudioWorkspaceResponse['results']
+    | ApiSemanticLayerDraftApplyResponse['results']
+    | ApiSemanticLayerDraftImpactResponse['results']
+    | ApiSemanticLayerDraftUsageResponse['results'];
 // Note: EE API types removed from ApiResults to avoid circular imports
 // They can still be used with ApiResponse<T> by importing from '@lightdash/common'
 

@@ -93,12 +93,19 @@ const makeAgentTools = (enableFilterExpressions = false) => {
         // Historical contract retained so persisted discoverFields calls still
         // parse and render, although the agent no longer executes this tool.
         discoverFields: agentToolDefinitionsByName.discoverFields.for('agent'),
-        createContent: getCreateContent({ createContent: noop }),
+        createContent: getCreateContent({
+            siteUrl: 'https://app.lightdash.cloud',
+            createContent: noop,
+        }),
         createScheduledDelivery: getCreateScheduledDelivery({
+            siteUrl: 'https://app.lightdash.cloud',
             createScheduledDelivery: noop,
         }),
         updateUserName: getUpdateUserName({ updateUserName: noopAsync }),
-        editContent: getEditContent({ editContent: noop }),
+        editContent: getEditContent({
+            siteUrl: 'https://app.lightdash.cloud',
+            editContent: noop,
+        }),
         findContent: getFindContent({
             findContent: noop,
             siteUrl: 'https://lightdash.example',
@@ -126,7 +133,10 @@ const makeAgentTools = (enableFilterExpressions = false) => {
             getKnowledgeDocumentContent: noop,
         }),
         getProjectInfo: getGetProjectInfo({ getProjectInfo: noop }),
-        listContent: getListContent({ listContent: noop }),
+        listContent: getListContent({
+            siteUrl: 'https://app.lightdash.cloud',
+            listContent: noop,
+        }),
         listKnowledgeDocuments: getListKnowledgeDocuments({
             listKnowledgeDocuments: noop,
         }),
@@ -148,14 +158,17 @@ const makeAgentTools = (enableFilterExpressions = false) => {
         editProjectContext: getEditProjectContext({
             editProjectContext: noop,
         }),
-        exploreRepo: getExploreRepo({ exploreRepo: noop }),
+        exploreRepo: getExploreRepo({ exploreRepo: noop, question: '' }),
         discoverRepos: getDiscoverRepos({ discoverRepos: noop }),
         listWorkstreams: getListWorkstreams({ listWorkstreams: noop }),
         closePullRequest: getClosePullRequest({ closePullRequest: noopAsync }),
         getPullRequestDiff: getGetPullRequestDiff({
             getPullRequestDiff: noop,
         }),
-        readContent: getReadContent({ readContent: noop }),
+        readContent: getReadContent({
+            siteUrl: 'https://app.lightdash.cloud',
+            readContent: noop,
+        }),
         runContentQuery: getRunContentQuery({
             enableDataAccess: true,
             getSavedChart: noop,

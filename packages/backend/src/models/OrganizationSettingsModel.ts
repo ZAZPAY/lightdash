@@ -61,9 +61,9 @@ export class OrganizationSettingsModel {
             queryLimit: row?.query_limit ?? null,
             csvCellsLimit: row?.csv_cells_limit ?? null,
             corsAllowedDomains: row?.cors_allowed_domains ?? null,
-            dataAppAutomaticThumbnailsEnabled:
-                row?.data_app_automatic_thumbnails_enabled ?? null,
             dataAppCapturesEnabled: row?.data_app_captures_enabled ?? null,
+            dataAppCustomDependenciesEnabled:
+                row?.data_app_custom_dependencies_enabled ?? false,
         };
     }
 
@@ -103,9 +103,9 @@ export class OrganizationSettingsModel {
             query_limit: patch.queryLimit,
             csv_cells_limit: patch.csvCellsLimit,
             cors_allowed_domains: patch.corsAllowedDomains,
-            data_app_automatic_thumbnails_enabled:
-                patch.dataAppAutomaticThumbnailsEnabled,
             data_app_captures_enabled: patch.dataAppCapturesEnabled,
+            data_app_custom_dependencies_enabled:
+                patch.dataAppCustomDependenciesEnabled,
         };
         const toWrite = omitBy(
             columns,

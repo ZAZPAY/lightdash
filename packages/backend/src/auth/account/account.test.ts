@@ -161,6 +161,57 @@ describe('account', () => {
             },
         );
 
+        it.each([true, false])(
+            'keeps the token parameter rules in roles mode when the actor can view parameters: %s',
+            (canViewParameters) => {
+                const actorBuilder = new AbilityBuilder<MemberAbility>(Ability);
+                if (canViewParameters) {
+                    actorBuilder.can('view', 'EmbedDashboardParameters', {
+                        projectUuid: mockEmbed.projectUuid,
+                    });
+                }
+                const result = fromJwt({
+                    decodedToken: {
+                        content: {
+                            type: 'dashboard',
+                            dashboardUuid: 'test-dashboard-uuid',
+                            parameterInteractivity: {
+                                enabled: !canViewParameters,
+                                allowedParameters: ['region'],
+                                hidden: true,
+                                values: { tenant: 'acme' },
+                            },
+                        },
+                        writeActions: {
+                            userUuid: defaultSessionUser.userUuid,
+                            spaceUuid: 'space',
+                            permissionsMode: 'roles',
+                        },
+                    },
+                    embed: mockEmbed,
+                    source: 'test-jwt-token',
+                    content: {
+                        type: 'dashboard',
+                        dashboardUuid: 'test-dashboard-uuid',
+                        chartUuids: [],
+                        explores: [],
+                    },
+                    userAttributes: mockUserAttributes,
+                    embedWriteUser: {
+                        ...defaultSessionUser,
+                        ability: actorBuilder.build(),
+                    },
+                });
+
+                expect(result.access.parameters).toEqual({
+                    enabled: canViewParameters,
+                    allowedParameters: ['region'],
+                    hidden: true,
+                    values: { tenant: 'acme' },
+                });
+            },
+        );
+
         describe.each([undefined, 'default', 'roles'] as const)(
             'dashboard permission mode %s',
             (permissionsMode) => {
@@ -706,6 +757,24 @@ describe('account', () => {
 
                 expect(getEmbedActorChartSpaceUuids(account)).toEqual([
                     'write-space-uuid',
+                    'source-space-uuid',
+                ]);
+            });
+
+            it('returns the source spaces of a read-only AI agent token', () => {
+                const account = buildJwtAccount({
+                    content: {
+                        type: 'aiAgent',
+                        agentUuid: 'agent-uuid',
+                    },
+                    writeActions: {
+                        serviceAccountUserUuid: 'service-account-user-uuid',
+                        sourceSpaceUuids: ['source-space-uuid'],
+                    },
+                    embedWriteUser: mockSessionUser,
+                });
+
+                expect(getEmbedActorChartSpaceUuids(account)).toEqual([
                     'source-space-uuid',
                 ]);
             });

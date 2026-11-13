@@ -71,7 +71,7 @@ describe.each([
     });
 
     it('keeps the pipeline card when the run failed', () => {
-        renderRow({ status: 'error', toolResults: [result('error')] });
+        renderRow({ status: 'done', toolResults: [result('error')] });
         expect(screen.getByRole('button', { expanded: false })).toBeVisible();
     });
 

@@ -18,6 +18,7 @@ import { Box } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { useEffect, type ComponentProps, type ReactNode } from 'react';
+import { MemoryRouter } from 'react-router';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sharedLightdashApi } from '../../../../../api';
 import type * as QueryResultsHooks from '../../../../../hooks/useQueryResults';
@@ -56,6 +57,9 @@ vi.mock('../../hooks/useProjectAiAgents', () => ({
     useAiAgentArtifactVizQuery: mocks.query,
     useAiAgentDashboardChartVizQuery: mocks.query,
     useUpdateArtifactVersionSavedSql: () => ({ mutateAsync: vi.fn() }),
+    useUpdateArtifactVersionSavedComposerChart: () => ({
+        mutateAsync: vi.fn(),
+    }),
 }));
 vi.mock('../../../../../hooks/user/useCreateInAnySpaceAccess', () => ({
     default: () => false,
@@ -240,6 +244,19 @@ beforeEach(() => {
 });
 
 describe('artifact panel recovery and navigation', () => {
+    it('sketches a chart, not a table, while a chart artifact query loads', () => {
+        mocks.query.mockReturnValue({
+            data: undefined,
+            isLoading: true,
+            error: null,
+            refetch: mocks.retry,
+        });
+        renderWithProviders(<AiArtifactPanel artifact={artifact} />);
+        expect(
+            screen.getByRole('status').closest('[data-shape]'),
+        ).toHaveAttribute('data-shape', 'chart');
+    });
+
     it('keeps a preview choice on rerender but resets it when opening a different version', () => {
         const { rerender } = renderWithProviders(
             <AiArtifactPanel artifact={artifact} />,
@@ -574,11 +591,90 @@ describe('composer artifact', () => {
         });
 
         it('hides it without export permission', async () => {
+            mocks.featureFlag.mockImplementation((flag: FeatureFlags) => ({
+                data: { enabled: flag !== FeatureFlags.ComposerCharts },
+            }));
             renderChart();
             await screen.findByRole('columnheader', { name: 'Status' });
             expect(
                 screen.queryByRole('button', { name: 'Quick actions' }),
             ).not.toBeInTheDocument();
+        });
+
+        it('offers Save, disabled with the reason when a permission is missing', async () => {
+            renderChart();
+            fireEvent.click(
+                await screen.findByRole('button', { name: 'Quick actions' }),
+            );
+            const save = await screen.findByRole('menuitem', {
+                name: /^Save/,
+            });
+            expect(save).toBeDisabled();
+            expect(save).toHaveTextContent(
+                'You do not have permission to save composer charts',
+            );
+        });
+
+        it('shows View on dashboard in place of Save once saved', async () => {
+            mocks.artifact.mockReturnValue({
+                data: {
+                    artifactType: 'chart',
+                    title: 'Orders vs amounts',
+                    chartConfig: barConfig,
+                    savedComposerChartUuid: 'composer-chart-uuid',
+                    savedComposerChartDashboardUuid: 'dashboard-uuid',
+                },
+                isLoading: false,
+                error: null,
+                refetch: mocks.retry,
+            });
+            mocks.query.mockReturnValue(composerRun);
+            mocks.rows.mockReturnValue(statusCounts);
+            renderWithProviders(
+                <MemoryRouter>
+                    <AiArtifactPanel artifact={artifact} />
+                </MemoryRouter>,
+            );
+            fireEvent.click(
+                await screen.findByRole('button', { name: 'Quick actions' }),
+            );
+            expect(
+                await screen.findByRole('menuitem', {
+                    name: 'View on dashboard',
+                }),
+            ).toHaveAttribute(
+                'href',
+                expect.stringContaining('/dashboards/dashboard-uuid'),
+            );
+            expect(
+                screen.queryByRole('menuitem', { name: /^Save/ }),
+            ).not.toBeInTheDocument();
+            expect(
+                screen.queryByRole('menuitem', { name: 'Schedule delivery' }),
+            ).not.toBeInTheDocument();
+        });
+
+        it('shows the chart sketch, not a table, before the run has a query', () => {
+            mocks.artifact.mockReturnValue({
+                data: {
+                    artifactType: 'chart',
+                    title: 'Orders vs amounts',
+                    chartConfig: barConfig,
+                },
+                isLoading: false,
+                error: null,
+                refetch: mocks.retry,
+            });
+            mocks.query.mockReturnValue({
+                ...composerRun,
+                data: { ...composerRun.data, nodeQueryUuids: {} },
+            });
+            mocks.rows.mockReturnValue(statusCounts);
+            renderWithProviders(<AiArtifactPanel artifact={artifact} />);
+            expect(
+                screen.getByText('Loading visualization…'),
+            ).toBeInTheDocument();
+            expect(screen.queryByRole('columnheader')).not.toBeInTheDocument();
         });
 
         it('downloads the displayed node result as run from the same menu', async () => {
@@ -1005,7 +1101,7 @@ describe('sql artifact viz switcher', () => {
                 .find((radio) => radio.getAttribute('value') === kind)!,
         );
 
-    it('opens a date + number answer as a table and can switch to a line chart', () => {
+    it('opens a date + number answer as a table and can switch to a line chart', async () => {
         renderSql(
             resultsOf(
                 {
@@ -1025,7 +1121,9 @@ describe('sql artifact viz switcher', () => {
         ).toBeInTheDocument();
         chooseSqlViz('line');
         expect(checkedViz()).toBe('line');
-        expect(screen.getByTestId('chart-view-line')).toBeInTheDocument();
+        expect(
+            await screen.findByTestId('chart-view-line'),
+        ).toBeInTheDocument();
         expect(screen.getByText('Orders per day')).toBeInTheDocument();
         expect(
             screen.getByRole('button', { name: 'SQL artifact actions' }),

@@ -1,6 +1,17 @@
 import { z } from 'zod';
-import { DimensionType, MetricType } from '../../../../types/field';
+import {
+    CustomFormatType,
+    DimensionType,
+    MetricType,
+    NumberSeparator,
+    type CustomFormat,
+} from '../../../../types/field';
 import { type Filters } from '../../../../types/filter';
+import {
+    MERGE_TABLE_NAME,
+    MergeJoinType,
+    type MergeTableCalculation,
+} from '../../../../types/mergeQuery';
 import {
     type AdditionalMetric,
     type MetricQueryRequest,
@@ -8,21 +19,27 @@ import {
 } from '../../../../types/metricQuery';
 import { type ParametersValuesMap } from '../../../../types/parameters';
 import {
+    MAX_SOURCE_QUERIES_PER_SUBMISSION,
     QuerySourceType,
     type ApiSourceQuery,
     type DuckdbSourceQuery,
     type ExternalSourceQuery,
+    type MergeSourceQuery,
     type PythonSourceQuery,
     type QueryNodeId,
     type SemanticLayerSourceQuery,
     type SqlSourceQuery,
 } from '../../../../types/querySources';
 import assertUnreachable from '../../../../utils/assertUnreachable';
+import { currencies } from '../../../../utils/formatting';
+import { getItemId } from '../../../../utils/item';
+import { getLiveSourceAgentQueryGuide } from '../../../../utils/liveSourceIntegrations';
 import {
     filterExpressionInputSchema,
     filterExpressionsSchema,
 } from '../filterExpressions/expressionSchemas';
 import { structuredToolOutputSchema } from '../outputMetadata';
+import { withLeadingEquals } from '../tableCalcs/tableCalcFormula';
 import { createToolSchema } from '../toolSchemaBuilder';
 import {
     appliedParametersSchema,
@@ -46,6 +63,7 @@ export const DEFAULT_COMPOSER_QUERY_LIMIT = 500;
 export const DEFAULT_COMPOSER_QUERY_MAX_LIMIT = 5000;
 export const COMPOSER_QUERY_PREVIEW_ROW_LIMIT = 50;
 export const COMPOSER_NODE_SAMPLE_ROW_LIMIT = 5;
+export const COMPOSER_QUERY_MAX_UNREAD_NODES = 5;
 
 /** Libraries preinstalled in the python sandbox, pinned in sandboxes/python-runner/e2b.Dockerfile. */
 export const PYTHON_SANDBOX_LIBRARIES = [
@@ -70,10 +88,10 @@ def run(inputs, params):
     df = inputs["orders"]                           # one DataFrame per reference, columns already typed
     cutoff = pd.Timestamp("2026-01-01")             # all datetimes are tz-naive UTC wall clock; never tz_localize/tz_convert
     out = df[df["created_at"] >= cutoff].groupby("customer_id", as_index=False)["revenue"].sum()
-    return out                                      # unique [A-Za-z_][A-Za-z0-9_]* column names, index dropped
+    return out                                      # unique snake_case column names, letter first, max 63 chars (revenue_2024, not "Revenue 2024" or 2024); flatten pivot/unstack columns; index dropped
 
 Imports aside, all code inside run(). Read columns as df["col"], never df.col. Check df.dtypes before sum/astype.
-Rows past "limit" are dropped, so aggregate here. Libraries: ${PYTHON_SANDBOX_LIBRARIES_DESCRIPTION}. No network, no installs.`;
+Libraries: ${PYTHON_SANDBOX_LIBRARIES_DESCRIPTION}. No network, no installs.`;
 
 type ComposerQueriesDescriptionOptions = {
     enablePythonNodes: boolean;
@@ -85,10 +103,20 @@ const DUCKDB_ALIAS_GUIDANCE =
 const getComposerNodeKindsDescription = ({
     enablePythonNodes,
     sqlNote,
-}: ComposerQueriesDescriptionOptions & { sqlNote: string }) => `Node kinds:
+    listMergeKind,
+}: ComposerQueriesDescriptionOptions & {
+    sqlNote: string;
+    // The MCP description has no room for it under the client text limit
+    listMergeKind: boolean;
+}) => `Node kinds:
 - "semanticLayer": a metric query against an explore. Result columns are the requested field ids.
 - "sql": raw SQL against the project warehouse; ${sqlNote}.
-- "external": DuckDB SQL over uploaded or connected tables declared in "tables".
+- "external": DuckDB SQL over uploaded or connected tables declared in "tables".${
+    listMergeKind
+        ? `
+- "merge": joins semanticLayer nodes on dimensions they share at the same grain, without SQL. Its columns keep each governed field's label, format and description, and it refuses a join that would count a metric twice. Prefer it to a duckdb join of semanticLayer nodes.`
+        : ''
+}
 - "duckdb": DuckDB SQL over other results declared in "references".${
     enablePythonNodes
         ? `
@@ -96,35 +124,37 @@ const getComposerNodeKindsDescription = ({
         : ''
 }
 
-A node reads only the rows its references returned, so a referenced result that reached its limit is incomplete: before totalling, averaging or ranking over it, give that node a limit that holds its whole population, or aggregate there.`;
+A node reads only the rows its references returned, so a referenced result that reached its limit is incomplete: aggregate in the referenced node itself.
+
+A duckdb node that only reshapes another duckdb node's result (adds a column, filters, renames, re-sorts) belongs in that node's SQL: write one duckdb node over the original's references, under a new node id if the original is from an earlier call. Each duckdb step waits for the one it reads.`;
 
 export const getToolComposerQueriesDescription = ({
     enablePythonNodes,
-}: ComposerQueriesDescriptionOptions) => `Run a pipeline: one or more nodes submitted together, where ${
+}: ComposerQueriesDescriptionOptions) => `Run a pipeline: up to ${MAX_SOURCE_QUERIES_PER_SUBMISSION} nodes submitted together, where ${
     enablePythonNodes ? 'duckdb and python' : 'duckdb'
-} nodes join or transform other nodes' results. One call returns one node's rows, the terminal node's, so exactly one submitted node may go unread by the others: to get several results, combine them in one duckdb node (UNION ALL or JOIN) or submit them in separate calls. Every other submitted node is listed with its columns and first rows.
+} nodes join or transform other nodes' results. One call returns the terminal node's rows; every other submitted node is listed with its columns and first rows.
 
 ${getComposerNodeKindsDescription({
     enablePythonNodes,
     sqlNote: 'may need user approval',
+    listMergeKind: true,
 })}
 
 Reuse across calls: a node id names one node for the whole thread. To build on a node from an earlier call, read its node id in "references" without resubmitting it; it is copied into this pipeline with everything it reads and served from cache when possible. Resubmitting a node id with a different definition is an error, so give a changed node a new node id.`;
 
-export const MCP_TOOL_QUERY_DESCRIPTION = `Run a pipeline: one or more nodes submitted together, where duckdb and python nodes join or transform other nodes' results. A pipeline of one node runs a single semantic-layer or SQL query.
-
-One call returns one node's rows, so exactly one submitted node may go unread by the others: combine several results in one duckdb node (UNION ALL or JOIN), or submit them in separate calls reusing earlier nodes.
+export const MCP_TOOL_QUERY_DESCRIPTION = `Run a pipeline: up to ${MAX_SOURCE_QUERIES_PER_SUBMISSION} nodes submitted together, where duckdb and python nodes join or transform other nodes' results. A pipeline of one node runs a single semantic-layer or SQL query.
 
 ${getComposerNodeKindsDescription({
     enablePythonNodes: true,
     sqlNote: 'available only when run_sql is',
+    listMergeKind: false,
 })}
 
 A python node's "code" defines \`def run(inputs, params)\`, and semanticLayer "filters" are flat expression strings; each field documents its contract.
 
 Reuse earlier nodes: a result returns a sessionId once a node has finished; finished nodes are saved in it. On a follow-up, pass that sessionId and read saved nodes by node id in "references", submitting only the new nodes. Reused nodes bring everything they read and are served from cache when possible. A saved node id names one node for the whole session, so give a changed node a new node id; a failed or unfinished node is not saved, so resubmit it under the same id. Omit sessionId to start a new session.
 
-Returns the terminal node's first rows, other submitted nodes' columns and first rows, and every node's queryUuid. If the result is running, follow up with get_query_result on the terminal node's queryUuid; it also fetches the first page of any node's result by its queryUuid. query computes data only; it saves and charts nothing.`;
+Returns every row of the terminal node, other submitted nodes' columns and first rows, and every node's queryUuid. If the result is running, follow up with get_query_result on each queryUuid it names; it also fetches every row of any node's result by its queryUuid. query computes data only; it saves and charts nothing.`;
 
 export const TOOL_COMPOSER_QUERIES_DESCRIPTION =
     getToolComposerQueriesDescription({
@@ -176,7 +206,7 @@ const composerCustomMetricSchema = z.object({
             'Custom metric names use lowercase snake_case',
         )
         .describe(
-            'snake_case name. The metric\'s field id is "<table>_<name>": list it in "metrics" to select it, and use it in sorts, metric filters and periodComparisons.',
+            'snake_case name. The metric\'s field id is "<table>_<name>"; defining it selects it, and the id works in sorts, metric filters and periodComparisons.',
         ),
     label: z.string().describe('Column label shown to users.'),
     description: z
@@ -213,7 +243,7 @@ const composerCustomMetricSchema = z.object({
     filter: filterExpressionInputSchema
         .nullish()
         .describe(
-            'Aggregates only the rows this flat AND expression over dimensions matches, in the node filter grammar, e.g. "orders_status equals=completed". Null aggregates every row.',
+            'Aggregates only the rows this flat AND expression over dimensions matches, in the node filter grammar, e.g. `orders_status equals="completed"`. Null aggregates every row.',
         ),
 });
 
@@ -221,7 +251,7 @@ const composerPeriodComparisonSchema = z.object({
     metricFieldId: z
         .string()
         .describe(
-            'Metric to compare: a field id in "metrics", explore or custom.',
+            'Metric to compare: a field id in "metrics" or a custom metric\'s.',
         ),
     timeDimensionFieldId: z
         .string()
@@ -274,6 +304,32 @@ type CreateToolComposerQueriesArgsSchemaOptions = {
     enableApiNodes?: boolean;
 };
 
+const mergeCalculationFormatSchema = z.object({
+    type: z
+        .enum(['number', 'percent', 'currency'])
+        .describe('"percent" shows 0.12 as 12%.'),
+    currency: z
+        .string()
+        .nullish()
+        .default(null)
+        .describe(
+            'ISO code for "currency", the governed metric\'s currency (e.g. "USD"). null otherwise.',
+        ),
+    decimals: z
+        .number()
+        .int()
+        .min(0)
+        .max(6)
+        .nullish()
+        .default(null)
+        .describe('Decimal places. null keeps the default.'),
+});
+// Calls persisted before the format object carry "number" or "percent".
+const persistedMergeCalculationFormatSchema = z.union([
+    mergeCalculationFormatSchema,
+    z.enum(['number', 'percent']),
+]);
+
 export const createToolComposerQueriesArgsSchemaV1 = ({
     maxLimit = DEFAULT_COMPOSER_QUERY_MAX_LIMIT,
     defaultLimit = DEFAULT_COMPOSER_QUERY_LIMIT,
@@ -320,7 +376,7 @@ export const createToolComposerQueriesArgsSchemaV1 = ({
             .nullish()
             .default(null)
             .describe(
-                'Sorts by fields this node also selects in dimensions or metrics, e.g. [{"fieldId": "orders_order_date", "descending": true}].',
+                'Sorts by fields this node also selects in dimensions, metrics or customMetrics, e.g. [{"fieldId": "orders_order_date", "descending": true}].',
             ),
         customMetrics: z
             .array(composerCustomMetricSchema)
@@ -370,6 +426,107 @@ export const createToolComposerQueriesArgsSchemaV1 = ({
         limit: limitSchema,
     });
 
+    const mergeNodeSchema = z.object({
+        sourceType: z.literal(QuerySourceType.MERGE),
+        nodeId: nodeIdSchema,
+        ...nodeMetaSchema,
+        sources: z
+            .array(
+                z.object({
+                    nodeId: referencedNodeIdSchema.describe(
+                        'A semanticLayer node of this call or of the thread.',
+                    ),
+                    repeatValues: z
+                        .boolean()
+                        .nullish()
+                        .default(null)
+                        .describe(
+                            "true repeats this node's values on every row of the one source that keeps a dimension outside the join key, e.g. a monthly target beside daily sales. Every source but that one sets it. null otherwise.",
+                        ),
+                }),
+            )
+            .min(2)
+            .describe(
+                "The semanticLayer nodes to merge, in order; a left join keeps the first one's rows. Each node selects its join-key dimensions plus metrics; one source may keep another dimension when every other source sets repeatValues. Each returns fewer rows than its limit: a node cut off at its limit is refused.",
+            ),
+        joinKey: z
+            .array(
+                z.object({
+                    name: z
+                        .string()
+                        .regex(
+                            /^[a-z][a-z0-9_]*$/,
+                            'Join key names use lowercase snake_case',
+                        )
+                        .describe(
+                            'snake_case name of the shared key column, which the result calls merge_<name>.',
+                        ),
+                    fields: z
+                        .array(
+                            z.object({
+                                nodeId: referencedNodeIdSchema,
+                                fieldId: z
+                                    .string()
+                                    .describe('A dimension that node selects.'),
+                            }),
+                        )
+                        .min(2)
+                        .describe(
+                            'One dimension per source, the same value at the same grain (both a month, both a customer id).',
+                        ),
+                }),
+            )
+            .min(1)
+            .describe('The dimensions the sources share, one entry per key.'),
+        joinType: z
+            .enum(MergeJoinType)
+            .describe(
+                '"full" keeps keys found in any source, "left" keeps the first source\'s keys, "inner" keeps keys found in every source.',
+            ),
+        tableCalculations: z
+            .array(
+                z.object({
+                    name: z
+                        .string()
+                        .regex(
+                            /^[a-z][a-z0-9_]*$/,
+                            'Calculation names use lowercase snake_case',
+                        )
+                        .describe(
+                            'snake_case name; the result calls it merge_<name>.',
+                        ),
+                    displayName: z.string().describe('Column label.'),
+                    formula: z
+                        .string()
+                        .describe(
+                            'Spreadsheet formula over merged columns by id: `<source nodeId>_<fieldId>` for a source\'s column, `merge_<name>` for a join key. Sources `weekly_orders` and `weekly_sessions` give `weekly_orders_orders_total_revenue / weekly_sessions_sessions_count`. It supports: arithmetic across sources (dividing by zero gives blank); a blank-safe sum, `COALESCE(a, 0) + COALESCE(b, 0)`; SUM, AVG, MIN, MAX and COUNT over all rows, so `a / SUM(a)` is a share of total, and `SUM(a) OVER (PARTITION BY merge_<name>)` a group\'s total; LAG, LEAD, RUNNING_TOTAL, MOVING_AVG and RANK, each naming its order, as in `a / LAG(a, PARTITION BY merge_category, ORDER BY merge_year) - 1` for year on year; conditions with IF, ISNULL, comparisons and AND/OR between them, as in `IF(YEAR(merge_year) = 2025, "Full year", "Partial year")` for a label; YEAR, MONTH and DATE_TRUNC on a date key; ROUND and ABS.',
+                        ),
+                    format: (persisted
+                        ? persistedMergeCalculationFormatSchema
+                        : mergeCalculationFormatSchema
+                    )
+                        .nullish()
+                        .default(null)
+                        .describe(
+                            "How the column displays, matching the metrics it is built from: money stays money, so a revenue change or revenue per customer is currency in the revenue metric's currency; a share or growth rate is percent. null shows a plain number.",
+                        ),
+                }),
+            )
+            .nullish()
+            .default(null)
+            .describe(
+                'Every calculation over the merged columns: ratios, year on year, shares of total, conditional labels. null for none.',
+            ),
+        sorts: z
+            .array(sortFieldSchema)
+            .nullish()
+            .default(null)
+            .describe(
+                'Sorts by merged column id (`merge_<name>`, `<source nodeId>_<fieldId>`). null sorts by every join key, in order.',
+            ),
+        limit: limitSchema,
+    });
+
     const externalNodeSchema = z.object({
         sourceType: z.literal(QuerySourceType.EXTERNAL),
         nodeId: nodeIdSchema,
@@ -410,11 +567,7 @@ export const createToolComposerQueriesArgsSchemaV1 = ({
         payload: z
             .object({
                 kind: z.literal('query'),
-                query: z
-                    .string()
-                    .describe(
-                        'For "posthog": one HogQL SELECT, the ClickHouse SQL dialect, over tables such as events (event, timestamp, distinct_id, person_id, properties), persons (id, created_at, properties) and sessions. Read a property as properties.$browser or properties.plan. Alias every column with AS using letters, digits and underscores. PostHog stops a query after 10 seconds, so aggregate in HogQL rather than fetching raw events. List event names first when unsure which exist. For "search_console": one Search Analytics request as a JSON object with startDate and endDate (YYYY-MM-DD, required), dimensions from date, query, page, country, device and searchAppearance, and optionally type (web, image, video, news, discover, googleNews), dimensionFilterGroups and aggregationType. Rows carry the dimensions plus clicks, impressions, ctr and position; ctr and position are averages, so never sum them. Data lags about two days. For "ga4": one runReport request as a JSON object with dateRanges (startDate and endDate as YYYY-MM-DD, today, yesterday or NdaysAgo), metrics (1-10, e.g. activeUsers, sessions, screenPageViews, conversions, totalRevenue) and optionally dimensions (up to 9, e.g. date, country, deviceCategory, sessionSource, pagePath, eventName), dimensionFilter, metricFilter and orderBys in the GA4 Data API shape. Columns are the API names, with any character other than letters, digits and underscores replaced by an underscore; date comes back as YYYY-MM-DD. Rate and average metrics such as bounceRate or averageSessionDuration must not be summed. Each report spends hourly quota on the property, so prefer one aggregated report over many.',
-                    ),
+                query: z.string().describe(getLiveSourceAgentQueryGuide()),
             })
             .describe('What the API runs.'),
         limit: limitSchema,
@@ -425,6 +578,7 @@ export const createToolComposerQueriesArgsSchemaV1 = ({
         sqlNodeSchema,
         duckdbNodeSchema,
         externalNodeSchema,
+        mergeNodeSchema,
     ] as const;
     const sourceQueryNodeSchema = z.discriminatedUnion('sourceType', [
         ...baseNodeSchemas,
@@ -452,14 +606,14 @@ export const createToolComposerQueriesArgsSchemaV1 = ({
                 .describe(
                     `The nodes to submit, in any order: reads are resolved from ${
                         enablePythonNodes ? 'duckdb and python' : 'duckdb'
-                    } references.`,
+                    } references and merge sources.`,
                 ),
             terminalNodeId: z
                 .string()
                 .nullish()
                 .default(null)
                 .describe(
-                    'The terminal node. Null picks the one submitted node no other submitted node reads; a node id returns that node of the pipeline instead, including a node from an earlier call.',
+                    'The terminal node. Null picks the last submitted node no other submitted node reads; a node id returns that node of the pipeline instead, including a node from an earlier call.',
                 ),
         })
         .build();
@@ -549,7 +703,96 @@ export type SubmittedSourceQuery = (
     | ExternalSourceQuery
     | PythonSourceQuery
     | ApiSourceQuery
+    | MergeSourceQuery
 ) & { nodeId: QueryNodeId };
+
+type ToolComposerMergeNode = Extract<
+    ToolComposerQueryNode,
+    { sourceType: QuerySourceType.MERGE }
+>;
+
+const toMergeCalculationFormat = (
+    format: NonNullable<
+        ToolComposerMergeNode['tableCalculations']
+    >[number]['format'],
+): CustomFormat => {
+    if (format === null || format === 'number') {
+        return {
+            type: CustomFormatType.NUMBER,
+            separator: NumberSeparator.DEFAULT,
+        };
+    }
+    if (format === 'percent') {
+        return {
+            type: CustomFormatType.PERCENT,
+            separator: NumberSeparator.DEFAULT,
+        };
+    }
+    const currency = currencies.find((code) => code === format.currency);
+    const decimals = format.decimals !== null ? { round: format.decimals } : {};
+    if (format.type === 'currency' && currency) {
+        return {
+            type: CustomFormatType.CURRENCY,
+            separator: NumberSeparator.DEFAULT,
+            currency,
+            ...decimals,
+        };
+    }
+    return {
+        type:
+            format.type === 'percent'
+                ? CustomFormatType.PERCENT
+                : CustomFormatType.NUMBER,
+        separator: NumberSeparator.DEFAULT,
+        ...decimals,
+    };
+};
+
+const toMergeTableCalculation = (
+    calculation: NonNullable<
+        ToolComposerMergeNode['tableCalculations']
+    >[number],
+): MergeTableCalculation => ({
+    name: calculation.name,
+    displayName: calculation.displayName,
+    sql: '',
+    formula: withLeadingEquals(calculation.formula),
+    format: toMergeCalculationFormat(calculation.format),
+});
+
+const toolComposerMergeNodeToSourceQuery = (
+    node: ToolComposerMergeNode,
+): MergeSourceQuery & { nodeId: QueryNodeId } => ({
+    sourceType: node.sourceType,
+    nodeId: node.nodeId,
+    ...toSourceQueryNodeMeta(node),
+    sources: node.sources.map(({ nodeId, repeatValues }) => ({
+        nodeId,
+        ...(repeatValues ? { repeatValues: true } : {}),
+    })),
+    joinKey: node.joinKey.map(({ name, fields }) => ({
+        name,
+        fieldIdBySourceId: Object.fromEntries(
+            fields.map(({ nodeId, fieldId }) => [nodeId, fieldId]),
+        ),
+    })),
+    joinType: node.joinType,
+    ...(node.tableCalculations?.length
+        ? {
+              tableCalculations: node.tableCalculations.map(
+                  toMergeTableCalculation,
+              ),
+          }
+        : {}),
+    // Unsorted, every key orders the rows, not only the first
+    sorts: node.sorts?.length
+        ? node.sorts
+        : node.joinKey.map(({ name }) => ({
+              fieldId: getItemId({ table: MERGE_TABLE_NAME, name }),
+              descending: false,
+          })),
+    limit: node.limit,
+});
 
 export const toolComposerQueryNodeToSourceQuery = (
     node: ResolvedToolComposerQueryNode,
@@ -623,6 +866,8 @@ export const toolComposerQueryNodeToSourceQuery = (
                 payload: node.payload,
                 limit: node.limit,
             };
+        case QuerySourceType.MERGE:
+            return toolComposerMergeNodeToSourceQuery(node);
         default:
             return assertUnreachable(node, 'Unknown composer query node');
     }
@@ -736,6 +981,32 @@ export const parsePartialToolComposerQueriesArgs = (
                         limit: DEFAULT_COMPOSER_QUERY_LIMIT,
                     },
                 ];
+            case QuerySourceType.MERGE:
+                return [
+                    {
+                        sourceType: QuerySourceType.MERGE,
+                        ...meta,
+                        sources: asStringArray(
+                            Array.isArray(node.sources)
+                                ? node.sources.map((source: unknown) =>
+                                      source &&
+                                      typeof source === 'object' &&
+                                      'nodeId' in source
+                                          ? source.nodeId
+                                          : null,
+                                  )
+                                : [],
+                        ).map((sourceNodeId) => ({
+                            nodeId: sourceNodeId,
+                            repeatValues: null,
+                        })),
+                        joinKey: [],
+                        joinType: MergeJoinType.FULL,
+                        tableCalculations: null,
+                        sorts: null,
+                        limit: DEFAULT_COMPOSER_QUERY_LIMIT,
+                    },
+                ];
             case QuerySourceType.API: {
                 if (typeof node.connectionUuid !== 'string') return [];
                 const payload =
@@ -805,7 +1076,7 @@ const composerQueryNodeSummarySchema = z.object({
         .array(z.record(z.string(), z.unknown()))
         .nullable()
         .describe(
-            `First ${COMPOSER_NODE_SAMPLE_ROW_LIMIT} rows of a node submitted in this call other than the terminal node; null otherwise or when data access is disabled.`,
+            `First rows of a node submitted in this call other than the terminal node: ${COMPOSER_NODE_SAMPLE_ROW_LIMIT}, more for a node no other node reads; null otherwise or when data access is disabled.`,
         ),
 });
 
@@ -859,15 +1130,21 @@ export const mcpQueryStructuredOutputSchema = z.object({
     status: z
         .enum(['done', 'running'])
         .describe(
-            'running when the terminal node outlived the wait; poll get_query_result with its queryUuid.',
+            'running when a node outlived the wait; poll get_query_result with the queryUuids the result names.',
         ),
-    terminalNodeId: nodeIdSchema.describe('Node whose rows are previewed.'),
+    terminalNodeId: nodeIdSchema.describe('Node whose rows are returned.'),
     rowCount: z
         .number()
         .int()
         .nonnegative()
         .nullable()
         .describe('Total rows in the terminal result; null while running.'),
+    rows: z
+        .array(z.record(z.string(), z.unknown()))
+        .nullable()
+        .describe(
+            'Every row of the terminal result, keyed by column reference; null while running.',
+        ),
     nodes: z
         .array(
             composerQueryNodeSummarySchema.extend({
@@ -890,7 +1167,7 @@ export const mcpQueryStructuredOutputSchema = z.object({
                     .array(z.record(z.string(), z.unknown()))
                     .nullable()
                     .describe(
-                        `First ${COMPOSER_NODE_SAMPLE_ROW_LIMIT} rows of a done node submitted in this call other than the terminal node; null for the terminal node and for reused, failed or unfinished nodes.`,
+                        `First rows of a done node submitted in this call other than the terminal node: ${COMPOSER_NODE_SAMPLE_ROW_LIMIT}, more for a node no other node reads; null for the terminal node and for reused, failed or unfinished nodes.`,
                     ),
             }),
         )

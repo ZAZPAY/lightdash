@@ -1,7 +1,6 @@
 import {
     assertUnreachable,
     ChartType,
-    FeatureFlags,
     MERGE_TABLE_NAME,
     type ApiErrorDetail,
     type ChartConfig,
@@ -47,7 +46,6 @@ import {
 import { useChartColorMappings } from '../../hooks/useChartColorConfig/useChartColorConfig';
 import usePivotDimensions from '../../hooks/usePivotDimensions';
 import { type InfiniteQueryResults } from '../../hooks/useQueryResults';
-import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
 import { useStableCallback } from '../../hooks/useStableCallback';
 import { type EChartsReact } from '../EChartsReactWrapper';
 import { type EchartsSeriesClickEvent } from '../SimpleChart';
@@ -183,8 +181,8 @@ type VisualizationConfigProviderProps = PropsWithChildren<{
     colorPalette: string[];
     colorMappings: ReturnType<typeof useChartColorMappings>['colorMappings'];
     nullColor: string;
+    otherColor: string;
     computedSeries: Series[] | undefined;
-    isCalculateSeriesColorEnabled: boolean;
 }>;
 
 const VisualizationConfigProvider: FC<VisualizationConfigProviderProps> = ({
@@ -194,8 +192,8 @@ const VisualizationConfigProvider: FC<VisualizationConfigProviderProps> = ({
     colorPalette,
     colorMappings,
     nullColor,
+    otherColor,
     computedSeries,
-    isCalculateSeriesColorEnabled,
     children,
 }) => {
     // Keyed on the editor's config alone so an owner echoing the config back
@@ -212,19 +210,19 @@ const VisualizationConfigProvider: FC<VisualizationConfigProviderProps> = ({
                 colorPalette,
                 colorMappings,
                 nullColor,
+                otherColor,
                 chartConfig,
                 itemsMap,
                 computedSeries,
-                calculateSeriesColor: isCalculateSeriesColorEnabled,
             }),
         [
             colorPalette,
             colorMappings,
             nullColor,
+            otherColor,
             chartConfig,
             itemsMap,
             computedSeries,
-            isCalculateSeriesColorEnabled,
         ],
     );
     const value: VisualizationConfigValue = useMemo(
@@ -412,13 +410,10 @@ const VisualizationProvider: FC<
         forwardChartConfig(last.config);
     }, [chartConfig, forwardChartConfig]);
 
-    const { data: calculateSeriesColorFlag } = useServerFeatureFlag(
-        FeatureFlags.CalculateSeriesColor,
-    );
-    const isCalculateSeriesColorEnabled =
-        calculateSeriesColorFlag?.enabled ?? false;
-
     const nullColor = theme.colors.ldGray[6];
+    // The "Other" group (groups past the pivot column limit) is lighter than
+    // the null color so it reads as the remainder.
+    const otherColor = theme.colors.ldGray[4];
     // Group colors do not depend on the chart config, so they keep their
     // identity while it is edited.
     const { getGroupColor } = useMemo(
@@ -550,8 +545,8 @@ const VisualizationProvider: FC<
                 colorPalette={colorPalette}
                 colorMappings={colorMappings}
                 nullColor={nullColor}
+                otherColor={otherColor}
                 computedSeries={computedSeries}
-                isCalculateSeriesColorEnabled={isCalculateSeriesColorEnabled}
             >
                 {children}
             </VisualizationConfigProvider>
@@ -562,8 +557,8 @@ const VisualizationProvider: FC<
             colorPalette,
             colorMappings,
             nullColor,
+            otherColor,
             computedSeries,
-            isCalculateSeriesColorEnabled,
             children,
         ],
     );

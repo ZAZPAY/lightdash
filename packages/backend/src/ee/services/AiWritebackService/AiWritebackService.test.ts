@@ -3483,6 +3483,35 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
         },
     );
 
+    it('hands over the project a dbt change parses to only when asked', async () => {
+        const sandbox = fakeSandbox(0, true);
+        fakeSandboxProvider.create.mockResolvedValue(sandbox);
+        const onDbtProject = vi.fn().mockResolvedValue(undefined);
+
+        await runService(sandbox, { onDbtProject });
+
+        expect(onDbtProject).toHaveBeenCalledWith({
+            manifestJson: 'model contents',
+            lightdashConfigYaml: 'model contents',
+            changedFiles: expect.any(Array),
+            prUrl: expect.any(String),
+        });
+        const parse = (sandbox.commands.run as import('vitest').Mock).mock.calls
+            .map((call) => String(call[0]))
+            .find((command) => command.includes('dbt parse'));
+        expect(parse).toContain('-u ANTHROPIC_API_KEY');
+        expect(parse).toContain('--target-path /tmp/ld-try-out-target');
+
+        const quiet = fakeSandbox(0, true);
+        fakeSandboxProvider.create.mockResolvedValue(quiet);
+        await runService(quiet);
+        expect(
+            (quiet.commands.run as import('vitest').Mock).mock.calls.some(
+                (call) => String(call[0]).includes('dbt parse'),
+            ),
+        ).toBe(false);
+    });
+
     it('opens a PR and kills the sandbox for a one-shot run with changes', async () => {
         const sandbox = fakeSandbox(0, true);
         fakeSandboxProvider.create.mockResolvedValue(sandbox);
@@ -3919,6 +3948,96 @@ describe('AiWritebackService repo read access', () => {
             const { service } = buildWithInstallation();
             await expect(
                 service.getRepoReadAccess({
+                    user: userWithOrg(false),
+                    projectUuid: 'p1',
+                }),
+            ).rejects.toThrow(ForbiddenError);
+        });
+
+        it('rejects a GitLab dbt connection whose host differs from the installed app instance', async () => {
+            // The org's GitLab app-install token must never be sent to a
+            // host configured on the project's dbt connection.
+            const { service } = buildWithInstallation({
+                ...gitlabProject(),
+                dbtConnection: {
+                    ...gitlabProject().dbtConnection,
+                    host_domain: 'attacker.example',
+                },
+            });
+            vi.spyOn(
+                (service as AnyType).gitlabProvider,
+                'resolveInstallation',
+            ).mockResolvedValue({
+                provider: PullRequestProvider.GITLAB,
+                token: 'gitlab-install-token',
+                instanceUrl: 'https://gitlab.acme.com',
+                commitAuthor: { name: 'n', email: 'e' },
+            } as AnyType);
+            await expect(
+                service.getRepoReadAccess({
+                    user: userWithOrg(true),
+                    projectUuid: 'p1',
+                }),
+            ).rejects.toThrow(ParameterError);
+        });
+    });
+
+    describe('getGitlabInstallationRepoReadAccess (org GitLab token reads)', () => {
+        const gitlabInstallation = {
+            provider: PullRequestProvider.GITLAB,
+            token: 'gitlab-install-token',
+            instanceUrl: 'https://gitlab.acme.com',
+            commitAuthor: { name: 'n', email: 'e' },
+        };
+
+        const buildGitlab = (hostDomain: string) => {
+            const { service } = buildWithInstallation({
+                ...gitlabProject(),
+                dbtConnection: {
+                    ...gitlabProject().dbtConnection,
+                    host_domain: hostDomain,
+                },
+            });
+            vi.spyOn(
+                (service as AnyType).gitlabProvider,
+                'resolveInstallation',
+            ).mockResolvedValue(gitlabInstallation as AnyType);
+            return service;
+        };
+
+        it('resolves token + hostDomain when the connection host matches the installation', async () => {
+            const service = buildGitlab('gitlab.acme.com');
+            await expect(
+                service.getGitlabInstallationRepoReadAccess({
+                    user: userWithOrg(true),
+                    projectUuid: 'p1',
+                }),
+            ).resolves.toMatchObject({
+                token: 'gitlab-install-token',
+                hostDomain: 'gitlab.acme.com',
+            });
+        });
+
+        it('rejects before any request when the connection host points elsewhere', async () => {
+            const getGitlabProjects = vi.spyOn(
+                GitlabClient,
+                'getGitlabProjects',
+            );
+            const service = buildGitlab('attacker.example');
+            await expect(
+                service.getGitlabInstallationRepoReadAccess({
+                    user: userWithOrg(true),
+                    projectUuid: 'p1',
+                }),
+            ).rejects.toThrow(ParameterError);
+            expect(getGitlabProjects).not.toHaveBeenCalled();
+            getGitlabProjects.mockRestore();
+        });
+
+        it('rejects a user without view:SourceCode', async () => {
+            const service = buildGitlab('gitlab.acme.com');
+            await expect(
+                service.getGitlabInstallationRepoReadAccess({
                     user: userWithOrg(false),
                     projectUuid: 'p1',
                 }),

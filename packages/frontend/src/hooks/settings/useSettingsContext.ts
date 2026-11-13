@@ -72,35 +72,20 @@ export const useSettingsContext = (): SettingsContext => {
     const isCustomRolesEnabled =
         health?.isCustomRolesEnabled || customRolesFlag?.enabled;
 
-    const userGroupsFeatureFlagQuery = useServerFeatureFlag(
-        FeatureFlags.UserGroupsEnabled,
-    );
-
     const dataAppsFlagQuery = useServerFeatureFlag(FeatureFlags.EnableDataApps);
     const { data: dataAppsFlag } = dataAppsFlagQuery;
-    const dataAppAnalysisFlagQuery = useServerFeatureFlag(
-        FeatureFlags.EnableDataAppAnalysis,
-    );
-    const { data: dataAppAnalysisFlag } = dataAppAnalysisFlagQuery;
-    const dashboardAnalysisFlagQuery = useServerFeatureFlag(
-        FeatureFlags.EnableDashboardAnalysis,
-    );
-    const { data: dashboardAnalysisFlag } = dashboardAnalysisFlagQuery;
     const isChartStudioAvailable = useChartStudioAvailable();
 
     const { data: apiQuerySourcesFlag } = useServerFeatureFlag(
         FeatureFlags.ApiQuerySources,
     );
-    const { data: externalSourcesFlag } = useServerFeatureFlag(
-        FeatureFlags.ExternalSources,
-    );
-    const { data: resultsCacheFlag } = useServerFeatureFlag(
-        FeatureFlags.ResultsCacheEnabled,
-    );
-    const isResultsCacheEnabled = resultsCacheFlag?.enabled ?? false;
-
+    const {
+        data: mobileSettingsFlag,
+        isInitialLoading: isMobileSettingsFlagLoading,
+    } = useServerFeatureFlag(FeatureFlags.MobileSettings);
     // The roadmap proxy is only registered behind a validated enterprise license.
     const isOrganizationRoadmapEnabled = health?.license?.valid === true;
+    const isResultsCacheAvailable = health?.license?.valid === true;
     const isServiceAccountsEnabled = health?.license?.valid === true;
 
     const { data: ssoOrganizationSettingsFlag } = useServerFeatureFlag(
@@ -157,12 +142,9 @@ export const useSettingsContext = (): SettingsContext => {
     // out, matching what the backend actually authorizes.
     const { data: projects } = useProjects();
     const organizationUuid = organization?.organizationUuid;
-    const {
-        data: analyticsProjectFlag,
-        isInitialLoading: isAnalyticsProjectFlagLoading,
-    } = useServerFeatureFlag(FeatureFlags.AnalyticsProject);
+    const isAnalyticsProjectLoading = isHealthLoading;
     const canAccessAnalyticsSettings =
-        analyticsProjectFlag?.enabled === true &&
+        health?.hasManagedAnalytics === true &&
         !!organizationUuid &&
         (user?.ability.can(
             'manage',
@@ -209,9 +191,6 @@ export const useSettingsContext = (): SettingsContext => {
         health?.auth.azuread.enabled ||
         health?.auth.oidc.enabled;
 
-    const isGroupManagementEnabled =
-        userGroupsFeatureFlagQuery.data?.enabled ?? false;
-
     const isAgentIdentityEnabled = agentIdentityFlag?.enabled ?? false;
 
     return {
@@ -224,7 +203,7 @@ export const useSettingsContext = (): SettingsContext => {
         showImpersonationPanel,
         isCustomRolesEnabled,
         canAccessAnalyticsSettings,
-        isAnalyticsProjectFlagLoading,
+        isAnalyticsProjectLoading,
         isOrganizationRoadmapEnabled,
         canAccessAiCredits,
         isAiCreditsLoading: isAiCreditUsageLoading,
@@ -239,20 +218,15 @@ export const useSettingsContext = (): SettingsContext => {
         isAiOrganizationSettingsLoading:
             aiOrganizationSettingsQuery.isInitialLoading,
         dataAppsFlag,
-        dataAppAnalysisFlag,
-        dashboardAnalysisFlag,
-        isDataAppsFlagLoading:
-            dataAppsFlagQuery.isInitialLoading ||
-            dataAppAnalysisFlagQuery.isInitialLoading ||
-            dashboardAnalysisFlagQuery.isInitialLoading,
+        isDataAppsFlagLoading: dataAppsFlagQuery.isInitialLoading,
         isChartStudioAvailable,
         isApiQuerySourcesEnabled: apiQuerySourcesFlag?.enabled ?? false,
-        externalSourcesFlag,
-        isResultsCacheEnabled,
+        isMobileSettingsEnabled: mobileSettingsFlag?.enabled ?? false,
+        isMobileSettingsFlagLoading,
+        isResultsCacheAvailable,
         embeddingEnabled,
         allowPasswordAuthentication,
         hasSocialLogin,
-        isGroupManagementEnabled,
         isAgentIdentityEnabled,
         isAgentIdentityFlagLoading,
         isGitProject,

@@ -22,11 +22,13 @@ import {
     extractAppSdkRouteProjectUuid,
     extractAppSdkSpaceCharts,
     extractExploreBaseTable,
+    DATA_APP_NEWER_VERSION_CODE,
     FEATURE_NOT_ENABLED_CODE,
     isAllowedAppSdkRoute,
     parseAppSdkSpaceChartsRequest,
     resolveAppSdkSpaceUuid,
     isAppSdkScheduleDownloadRoute,
+    appStateValueByteLength,
     JWT_HEADER_NAME,
     LightdashAppPreviewTokenHeader,
     LightdashAppUuidHeader,
@@ -82,7 +84,7 @@ const getEmbedAuthHeaders = (
 ): Record<string, string> =>
     embedToken ? { [JWT_HEADER_NAME]: embedToken } : {};
 
-type AppStateBridgeErrorCode =
+export type AppStateBridgeErrorCode =
     | 'conflict'
     | 'feature_disabled'
     | 'forbidden'
@@ -200,6 +202,46 @@ export const resolveAppStateRequest = (
         default:
             return null;
     }
+};
+
+/**
+ * A single app-state call routed through the bridge, reported for the
+ * inspector's Requests tab. Same single-shot lifecycle as
+ * `ExternalRequestEvent`: one `pending` event when the call starts, one
+ * terminal `ready`/`error` event when it settles — matched by `id`.
+ */
+export type AppStateEvent = {
+    id: string;
+    timestamp: number;
+    /** SDK op, e.g. `get`, `set-shared`, `history`. */
+    op: string;
+    key: string | null;
+    scope: 'user' | 'shared' | 'all';
+    /** Serialized size (chars) of the value a set op writes; null otherwise. */
+    valueSize: number | null;
+    status: 'pending' | 'ready' | 'error';
+    durationMs: number | null;
+    /** SDK error code (`conflict`, `feature_disabled`, …) on failure. */
+    errorCode: AppStateBridgeErrorCode | null;
+    error: string | null;
+};
+
+const appStateOpScope = (op: unknown): AppStateEvent['scope'] => {
+    switch (op) {
+        case 'set-user':
+        case 'delete-user':
+            return 'user';
+        case 'get':
+            return 'all';
+        default:
+            return 'shared';
+    }
+};
+
+// UTF-8 bytes, matching the backend's enforced value-size limit.
+const appStateValueSize = (req: AppStateBridgeRequest): number | null => {
+    if (req.op !== 'set-user' && req.op !== 'set-shared') return null;
+    return appStateValueByteLength(req.value);
 };
 
 // Headers every API call made on the app's behalf carries: embed auth and
@@ -470,6 +512,7 @@ export type UseAppSdkBridgeParams = {
     onElementSelected?: (event: ElementSelectedEvent) => void;
     onInspectorAvailable?: () => void;
     onScreenshotAvailable?: () => void;
+    onPdfExportAvailable?: () => void;
     /**
      * When set, these filters are stamped onto every intercepted metric-query
      * POST before it reaches the backend. Used by dashboard data-app tiles so
@@ -515,6 +558,15 @@ export type UseAppSdkBridgeParams = {
      * and a terminal `ready`/`error` event when it settles.
      */
     onExternalRequestEvent?: (event: ExternalRequestEvent) => void;
+    /**
+     * When provided, app-state calls routed through this bridge are reported
+     * for the inspector's Requests tab — mirrors `onExternalRequestEvent`.
+     * Emits `pending` when the call starts and a terminal `ready`/`error`
+     * event when it settles.
+     */
+    onAppStateEvent?: (event: AppStateEvent) => void;
+    /** A request was refused because a newer app version is now the ready one. */
+    onNewerVersion?: () => void;
     // When set, the host pushes this render context into the iframe over the
     // existing bridge — on load and on every change. Only set for data app vizs.
     dataAppVizContext?: DataAppVizContext;
@@ -610,12 +662,15 @@ export function useAppSdkBridge({
     onElementSelected,
     onInspectorAvailable,
     onScreenshotAvailable,
+    onPdfExportAvailable,
     dashboardFilters,
     invalidateCache,
     capabilities,
     onLineageAvailable,
     onLineageSelected,
     onExternalRequestEvent,
+    onAppStateEvent,
+    onNewerVersion,
     dataAppVizContext,
     dataAppVizMode = false,
     chartContext,
@@ -792,6 +847,11 @@ export function useAppSdkBridge({
 
             if (data?.type === 'lightdash:sdk:screenshot-available') {
                 onScreenshotAvailable?.();
+                return;
+            }
+
+            if (data?.type === 'lightdash:sdk:pdf-export-available') {
+                onPdfExportAvailable?.();
                 return;
             }
 
@@ -1026,10 +1086,45 @@ export function useAppSdkBridge({
 
             if (data?.type === APP_SDK_APP_STATE_MESSAGE) {
                 const req = data as AppStateBridgeRequest;
+                // Report the call to the inspector's Requests tab. Base fields
+                // are captured up front; every response path funnels through
+                // `respondAppState`, which emits the matching terminal event.
+                const appStateStartedAt = Date.now();
+                const emitAppState = (
+                    fields: Partial<AppStateEvent> & {
+                        status: AppStateEvent['status'];
+                    },
+                ) => {
+                    onAppStateEvent?.({
+                        id: typeof req.id === 'string' ? req.id : '',
+                        timestamp: appStateStartedAt,
+                        op: typeof req.op === 'string' ? req.op : 'unknown',
+                        key: typeof req.key === 'string' ? req.key : null,
+                        scope: appStateOpScope(req.op),
+                        valueSize: appStateValueSize(req),
+                        durationMs: null,
+                        errorCode: null,
+                        error: null,
+                        ...fields,
+                    });
+                };
                 const respondAppState = (response: {
                     result?: unknown;
                     error?: AppStateBridgeError;
                 }) => {
+                    emitAppState(
+                        response.error
+                            ? {
+                                  status: 'error',
+                                  errorCode: response.error.code,
+                                  error: response.error.message,
+                                  durationMs: Date.now() - appStateStartedAt,
+                              }
+                            : {
+                                  status: 'ready',
+                                  durationMs: Date.now() - appStateStartedAt,
+                              },
+                    );
                     iframeRef.current?.contentWindow?.postMessage(
                         {
                             type: APP_SDK_APP_STATE_RESPONSE_MESSAGE,
@@ -1039,6 +1134,7 @@ export function useAppSdkBridge({
                         '*',
                     );
                 };
+                emitAppState({ status: 'pending' });
                 // The backend authorizes the viewer against the app and
                 // enforces the flag and caps; the host only routes the call.
                 const resolved = resolveAppStateRequest(
@@ -1699,6 +1795,8 @@ export function useAppSdkBridge({
                 } else {
                     const errorMessage =
                         json.error?.message ?? `API error (${res.status})`;
+                    if (json.error?.data?.code === DATA_APP_NEWER_VERSION_CODE)
+                        onNewerVersion?.();
                     emitPostFailure(errorMessage);
                     respond({ error: errorMessage });
                 }
@@ -1719,6 +1817,7 @@ export function useAppSdkBridge({
             onElementSelected,
             onInspectorAvailable,
             onScreenshotAvailable,
+            onPdfExportAvailable,
             dashboardFilters,
             invalidateCache,
             embedToken,
@@ -1727,6 +1826,8 @@ export function useAppSdkBridge({
             onLineageAvailable,
             onLineageSelected,
             onExternalRequestEvent,
+            onAppStateEvent,
+            onNewerVersion,
             pushDataAppVizContext,
             rewriteVizUnderlyingDataRequest,
             onVizUnderlyingDataIntent,

@@ -10,9 +10,12 @@ import {
     selectDashboardTiles,
     useDashboardSelector,
 } from '../dashboard/store';
+import { getParameterTabCounts } from './parameterPeers';
 import { getTakeableTabCounts, getTilesOnTab } from './peers';
 import classes from './TabCounts.module.css';
-import { useControlsSidebarSelector } from './useControlsSidebar';
+import { useControlsEditorSelector } from './useControlsEditor';
+import { useDateZoomMapping } from './useDateZoomMapping';
+import { useParameterMapping } from './useParameterMapping';
 import { usePortalTargets } from './usePortalTargets';
 import { useSqlColumnsByTile } from './useSqlColumnsByTile';
 
@@ -46,10 +49,10 @@ type Props = {
 
 export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
     const getUiString = useUiStrings();
-    const editingRule = useControlsSidebarSelector((c) => c.editingRule);
-    const isPlaceholder = useControlsSidebarSelector((c) => c.isPlaceholder);
-    const isViewer = useControlsSidebarSelector((c) => c.isViewer);
-    const isMapping = useControlsSidebarSelector((c) => c.isMapping);
+    const editingRule = useControlsEditorSelector((c) => c.editingRule);
+    const isPlaceholder = useControlsEditorSelector((c) => c.isPlaceholder);
+    const isViewer = useControlsEditorSelector((c) => c.isViewer);
+    const isMapping = useControlsEditorSelector((c) => c.isMapping);
     const rule = editingRule;
     const dashboardTiles = useDashboardSelector(selectDashboardTiles);
     const dashboardTabs = useDashboardSelector(selectDashboardTabs);
@@ -57,22 +60,29 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
         (c) => c.filterableFieldsByTileUuid,
     );
     const sqlColumnsByTile = useSqlColumnsByTile(rule);
+    const parameterMapping = useParameterMapping();
+    const dateZoomMapping = useDateZoomMapping();
+    // A control's tiles are chosen, by takeable and applied tiles
+    const controlMapping = parameterMapping ?? dateZoomMapping;
+    const controlVerb = parameterMapping !== null ? 'set' : 'zoomed';
+    const mappedTakeable = controlMapping?.takeableTileUuids ?? null;
+    const mappedSet = controlMapping?.appliedTileUuids ?? null;
 
     const tabUuids = useMemo(
         () => dashboardTabs.map((tab) => tab.uuid),
         [dashboardTabs],
     );
-    // An editor's tabs keep the slots at rest, so mapping reflows none; a
-    // viewer never maps, so never gets them
+    // A viewer never maps, so never gets the slots
     const isEnabled = dashboardTabs.length > 0 && !isViewer;
     // An embed editor's plain tabs have no slot: the count goes in the tab
     const isInSlot = hasTabSlots && !isViewer;
+    const isFilterOpen = rule !== null || controlMapping !== null;
     const targets = usePortalTargets(
         tabUuids,
         isInSlot ? getTabSlotSelector : getTabSelector,
         isEnabled,
         // A filter open: the menu beside each count is inert
-        isInSlot && rule !== null,
+        isInSlot && isFilterOpen,
     );
 
     const activeTabUuid = useDashboardSelector(selectActiveTabUuid);
@@ -90,6 +100,16 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
     // The whole filter, whichever chip is hovered or selected, over the tiles
     // that can take it: the tabs add up to the mapping row's "of m"
     const counts = useMemo(() => {
+        if (mappedTakeable !== null && mappedSet !== null) {
+            const takeable = new Set(mappedTakeable);
+            const set = new Set(mappedSet);
+            return getParameterTabCounts({
+                tiles: dashboardTiles ?? [],
+                tabs: dashboardTabs,
+                isTakeable: (uuid) => takeable.has(uuid),
+                isSet: (uuid) => set.has(uuid),
+            });
+        }
         if (rule === null) return {};
         return getTakeableTabCounts(
             rule,
@@ -98,9 +118,18 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
             fieldsByTile,
             sqlColumnsByTile,
         );
-    }, [rule, dashboardTiles, dashboardTabs, fieldsByTile, sqlColumnsByTile]);
+    }, [
+        rule,
+        dashboardTiles,
+        dashboardTabs,
+        fieldsByTile,
+        sqlColumnsByTile,
+        mappedTakeable,
+        mappedSet,
+    ]);
 
     // Every tile on the tab: no count is wider, so none reflows the tabs
+    // while a filter is open. At rest the slot holds no width
     const reserves = useMemo(
         () =>
             Object.fromEntries(
@@ -113,7 +142,7 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
                     return [
                         tab.uuid,
                         interpolateUiString(
-                            getUiString('filters.rail.tabFraction'),
+                            getUiString('controls.tabFraction'),
                             { applied: n, total: n },
                         ),
                     ];
@@ -124,7 +153,7 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
 
     if (!isEnabled) return null;
 
-    const subject = getUiString('filters.rail.thisFilter');
+    const subject = getUiString('controls.thisFilter');
 
     return (
         <>
@@ -133,9 +162,11 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
                 if (!element) return null;
                 // Counts show only while tiles are chosen: the slot stays, empty
                 const count =
-                    rule === null || isPlaceholder || !isMapping
-                        ? null
-                        : counts[tab.uuid];
+                    controlMapping !== null
+                        ? counts[tab.uuid]
+                        : rule === null || isPlaceholder || !isMapping
+                          ? null
+                          : counts[tab.uuid];
                 const isReached = !!count && count.applied > 0;
                 const countValues = count && {
                     applied: count.applied,
@@ -148,12 +179,20 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
                         label={
                             countValues &&
                             interpolateUiString(
-                                getUiString(
-                                    countValues.total === 1
-                                        ? 'filters.rail.tabCountTooltip.singular'
-                                        : 'filters.rail.tabCountTooltip.plural',
-                                ),
-                                { ...countValues, subject },
+                                controlMapping !== null
+                                    ? // Editors only map parameters and date zooms
+                                      countValues.total === 1
+                                        ? `{applied} of {total} tile on this tab is ${controlVerb} by {subject}`
+                                        : `{applied} of {total} tiles on this tab are ${controlVerb} by {subject}`
+                                    : getUiString(
+                                          countValues.total === 1
+                                              ? 'controls.tabCountTooltip.singular'
+                                              : 'controls.tabCountTooltip.plural',
+                                      ),
+                                {
+                                    ...countValues,
+                                    subject: controlMapping?.name ?? subject,
+                                },
                             )
                         }
                     >
@@ -162,7 +201,9 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
                             fz="xs"
                             c="dimmed"
                             data-reached={isReached}
-                            data-reserve={reserves[tab.uuid]}
+                            data-reserve={
+                                isFilterOpen ? reserves[tab.uuid] : undefined
+                            }
                             data-capped={!isViewer || undefined}
                             data-controls-overlay={isInSlot || undefined}
                             className={classes.count}
@@ -171,15 +212,13 @@ export const TabCounts: FC<Props> = ({ hasTabSlots = false }) => {
                                 <>
                                     <span aria-hidden="true">
                                         {interpolateUiString(
-                                            getUiString(
-                                                'filters.rail.tabFraction',
-                                            ),
+                                            getUiString('controls.tabFraction'),
                                             countValues,
                                         )}
                                     </span>
                                     <VisuallyHidden>
                                         {interpolateUiString(
-                                            getUiString('filters.rail.countOf'),
+                                            getUiString('controls.countOf'),
                                             countValues,
                                         )}
                                     </VisuallyHidden>

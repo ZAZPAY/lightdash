@@ -6,6 +6,8 @@ import {
 } from '@lightdash/common';
 import { Knex } from 'knex';
 import { AppsTableName } from '../database/entities/apps';
+import { AppSlugMappingsTableName } from '../database/entities/appSlugMappings';
+import { ComposerChartsTableName } from '../database/entities/composerCharts';
 import { DashboardsTableName } from '../database/entities/dashboards';
 import { DashboardSlugMappingsTableName } from '../database/entities/dashboardSlugMappings';
 import { DocumentsTableName } from '../database/entities/documents';
@@ -20,7 +22,8 @@ type ProjectUuidSlugTable =
     | typeof AppsTableName
     | typeof SavedChartsTableName
     | typeof SavedSqlTableName
-    | typeof DashboardsTableName;
+    | typeof DashboardsTableName
+    | typeof ComposerChartsTableName;
 
 type SlugTable = ProjectUuidSlugTable | typeof SpaceTableName;
 
@@ -51,6 +54,7 @@ const getSlugCandidate = (
         case DashboardsTableName:
         case DocumentsTableName:
         case SavedSqlTableName:
+        case ComposerChartsTableName:
         case SpaceTableName:
             return `${truncateSlug(
                 baseSlug,
@@ -144,7 +148,8 @@ export async function generateUniqueSlugScopedToProject(
         if (
             tableName === SavedChartsTableName ||
             tableName === DocumentsTableName ||
-            tableName === DashboardsTableName
+            tableName === DashboardsTableName ||
+            tableName === AppsTableName
         ) {
             // Alias and canonical rows cannot share a database constraint, so
             // all content writers lock the exact candidate before checking both.
@@ -172,12 +177,16 @@ export async function generateUniqueSlugScopedToProject(
         if (
             !isReserved &&
             (tableName === SavedChartsTableName ||
-                tableName === DashboardsTableName)
+                tableName === DashboardsTableName ||
+                tableName === AppsTableName)
         ) {
             const mappingsTable =
+                // eslint-disable-next-line no-nested-ternary
                 tableName === SavedChartsTableName
                     ? SavedChartSlugMappingsTableName
-                    : DashboardSlugMappingsTableName;
+                    : tableName === DashboardsTableName
+                      ? DashboardSlugMappingsTableName
+                      : AppSlugMappingsTableName;
             // eslint-disable-next-line no-await-in-loop
             const historical = await trx(mappingsTable)
                 .select(`${mappingsTable}.slug`)

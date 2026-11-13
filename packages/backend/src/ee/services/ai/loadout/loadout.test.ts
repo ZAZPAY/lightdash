@@ -75,7 +75,10 @@ const fullInput: LoadoutInput = {
     enableAiWriteback: true,
     enableRepoDiscovery: true,
     enableEditProjectContext: true,
+    isSemanticStudioThread: false,
+    semanticStudioDrafts: false,
     enableReadAttachments: true,
+    enableAskUser: true,
     customSkills: [],
     projectContextEnabled: true,
     aiAgentMemoryEnabled: true,
@@ -106,7 +109,10 @@ const minimalInput: LoadoutInput = {
     enableAiWriteback: false,
     enableRepoDiscovery: false,
     enableEditProjectContext: false,
+    isSemanticStudioThread: false,
+    semanticStudioDrafts: false,
     enableReadAttachments: false,
+    enableAskUser: false,
     customSkills: [],
     projectContextEnabled: false,
     aiAgentMemoryEnabled: false,
@@ -141,6 +147,11 @@ const deepResearch = (
 
 const inputs: Record<LoadoutBase, LoadoutInput> = {
     classic: fullInput,
+    semantic_studio: {
+        ...fullInput,
+        isSemanticStudioThread: true,
+        semanticStudioDrafts: true,
+    },
     composer: { ...fullInput, enableComposerQueries: true },
     no_data_access: {
         ...fullInput,
@@ -310,6 +321,24 @@ describe('loadout contracts', () => {
 });
 
 describe('resolveLoadout', () => {
+    it('gives a Semantic Studio thread the draft tools, or the repository tools on a dbt project, never both', () => {
+        const drafts = resolveLoadout(inputs.semantic_studio).toolNames;
+        expect(drafts.has('proposeSemanticLayerChange')).toBe(true);
+        expect(drafts.has('editDbtProject')).toBe(false);
+        expect(drafts.has('exploreRepo')).toBe(false);
+
+        const dbt = resolveLoadout({
+            ...inputs.semantic_studio,
+            semanticStudioDrafts: false,
+        });
+        expect(dbt.base).toBe('semantic_studio');
+        expect(dbt.toolNames.has('proposeSemanticLayerChange')).toBe(false);
+        expect(dbt.toolNames.has('readSemanticModel')).toBe(false);
+        expect(dbt.toolNames.has('editDbtProject')).toBe(true);
+        expect(dbt.toolNames.has('exploreRepo')).toBe(true);
+        expect(dbt.toolNames.has('generateVisualization')).toBe(false);
+    });
+
     test.each<[string, LoadoutInput, LoadoutBase]>([
         ['classic by default', fullInput, 'classic'],
         ['composer with the composer flag', inputs.composer, 'composer'],
@@ -378,6 +407,30 @@ describe('resolveLoadout', () => {
             expect(loadout.toolNames.has(tool)).toBe(false);
         }
         expect(loadout.promptSections.has('contentTools')).toBe(false);
+    });
+
+    test('Document saves load without chart saves', () => {
+        const loadout = resolveLoadout({
+            ...fullInput,
+            enableContentTools: false,
+            canCreateDashboards: false,
+        });
+        expect(loadout.toolNames.has('createContent')).toBe(true);
+        expect(loadout.toolNames.has('editContent')).toBe(true);
+        expect(loadout.promptSections.has('documents')).toBe(true);
+        expect(loadout.addOns.has('scheduling')).toBe(false);
+        expect(loadout.toolNames.has('generateDashboard')).toBe(false);
+    });
+
+    test('chart saves load without Document saves', () => {
+        const loadout = resolveLoadout({
+            ...fullInput,
+            enableDocuments: false,
+        });
+        expect(loadout.toolNames.has('createContent')).toBe(true);
+        expect(loadout.promptSections.has('contentTools')).toBe(true);
+        expect(loadout.addOns.has('documents')).toBe(false);
+        expect(loadout.promptSections.has('documents')).toBe(false);
     });
 
     test('legacy dashboards load only when content reads are off', () => {

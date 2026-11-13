@@ -1,10 +1,22 @@
 import {
+    DimensionType,
+    FieldType,
     FilterOperator,
     type DashboardControlSection,
     type DashboardFilters,
+    type DashboardParameterControl,
+    type DashboardTile,
+    type FilterableDimension,
+    type ParameterDefinitions,
 } from '@lightdash/common';
 import { MantineProvider } from '@mantine/core';
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import {
+    act,
+    fireEvent,
+    screen,
+    waitFor,
+    within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { type ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,11 +28,15 @@ import {
 } from '../../testing/dashboardStore';
 import { DashboardStoreTestProvider } from '../../testing/DashboardStoreTestProvider';
 import { renderWithProviders as renderWithAppProviders } from '../../testing/testUtils';
+import { dashboardParametersActions } from '../dashboard/store';
 import { AddControl } from './AddControl';
+import { ParameterEditorProvider } from './ParameterEditorProvider';
+import { ParameterPills } from './ParameterPills';
 
-const mockSidebar = vi.hoisted(() => ({
+const mockEditor = vi.hoisted(() => ({
+    tileHoverOwner: { current: null as string | null },
     current: {
-        isSidebarOpen: false,
+        isEditorOpen: false,
         isViewer: false,
         canAddFilters: true,
         isNew: false,
@@ -66,10 +82,19 @@ const renderWithProviders = (
         </DashboardStoreTestProvider>,
     );
 
-vi.mock('./useControlsSidebar', () => ({
-    useControlsSidebarSelector: (
-        selector: (value: typeof mockSidebar.current) => unknown,
-    ) => selector(mockSidebar.current),
+vi.mock('./useControlsEditor', () => ({
+    useControlsEditorSelector: (
+        selector: (value: typeof mockEditor.current) => unknown,
+    ) => {
+        const context = {
+            ...mockEditor.current,
+            tileHoverOwner: mockEditor.tileHoverOwner,
+        };
+        return selector(context);
+    },
+}));
+vi.mock('../../hooks/useProjectUuid', () => ({
+    useProjectUuid: () => 'project-1',
 }));
 vi.mock('../../providers/Dashboard/useDashboardContext', () => ({
     default: vi.fn((selector) => selector(mockDashboardContext.current)),
@@ -81,8 +106,8 @@ describe('AddControl', () => {
 
     beforeEach(() => {
         setIsAddFilterDisabled.mockClear();
-        mockSidebar.current = {
-            isSidebarOpen: false,
+        mockEditor.current = {
+            isEditorOpen: false,
             isViewer: false,
             canAddFilters: true,
             isNew: false,
@@ -125,9 +150,9 @@ describe('AddControl', () => {
         expect(editor()).toBeNull();
         unmount();
 
-        mockSidebar.current = {
-            ...mockSidebar.current,
-            isSidebarOpen: true,
+        mockEditor.current = {
+            ...mockEditor.current,
+            isEditorOpen: true,
             isNew: true,
             isPlaceholder: true,
         };
@@ -136,16 +161,16 @@ describe('AddControl', () => {
         unmountPicking();
 
         // Picked: the editor moves to the new filter's pill
-        mockSidebar.current = { ...mockSidebar.current, isPlaceholder: false };
+        mockEditor.current = { ...mockEditor.current, isPlaceholder: false };
         renderWithProviders(<AddControl />);
         expect(editor()).toBeNull();
     });
 
     it("leaves a new filter started from a section's + to that +, unless the section is gone", () => {
         const editor = () => document.querySelector('[data-controls-editor]');
-        mockSidebar.current = {
-            ...mockSidebar.current,
-            isSidebarOpen: true,
+        mockEditor.current = {
+            ...mockEditor.current,
+            isEditorOpen: true,
             isNew: true,
             isPlaceholder: true,
             editingRule: { sectionId: 's' },
@@ -175,7 +200,7 @@ describe('AddControl', () => {
             tableCalculations: [],
         };
         renderWithProviders(<AddControl />);
-        expect(add().querySelector('svg')).toBeNull();
+        expect(add().querySelector('.tabler-icon-plus')).not.toBeNull();
         expect(
             screen.queryByRole('button', {
                 name: 'Toggle filter visibility for viewers',
@@ -185,7 +210,7 @@ describe('AddControl', () => {
             screen.queryByRole('button', { name: 'Filter rules' }),
         ).not.toBeInTheDocument();
         fireEvent.click(add());
-        expect(mockSidebar.current.openNew).toHaveBeenCalledTimes(1);
+        expect(mockEditor.current.openNew).toHaveBeenCalledTimes(1);
     });
 
     it('is the trigger joined to the menu, with no caret between them', () => {
@@ -207,7 +232,7 @@ describe('AddControl', () => {
         renderWithProviders(<AddControl />);
         openMenu();
         const item = await screen.findByRole('menuitem', {
-            name: 'Hide for viewers',
+            name: 'Hide Add filter for viewers',
         });
         expect(screen.queryByRole('menuitemcheckbox')).not.toBeInTheDocument();
         expect(screen.queryByRole('switch')).not.toBeInTheDocument();
@@ -220,7 +245,7 @@ describe('AddControl', () => {
         await waitFor(() =>
             expect(
                 screen.queryByRole('menuitem', {
-                    name: 'Hide for viewers',
+                    name: 'Hide Add filter for viewers',
                 }),
             ).not.toBeInTheDocument(),
         );
@@ -231,7 +256,7 @@ describe('AddControl', () => {
         renderWithProviders(<AddControl />);
         openMenu();
         const item = await screen.findByRole('menuitem', {
-            name: 'Show for viewers',
+            name: 'Show Add filter for viewers',
         });
         expect(item.querySelector('.tabler-icon-eye')).not.toBeNull();
 
@@ -318,7 +343,7 @@ describe('AddControl', () => {
             await userEvent.click(settings());
             await userEvent.click(
                 await screen.findByRole('menuitem', {
-                    name: 'Hide for viewers',
+                    name: 'Hide Add filter for viewers',
                     hidden: true,
                 }),
             );
@@ -351,10 +376,10 @@ describe('AddControl', () => {
 
     describe('for a viewer', () => {
         beforeEach(() => {
-            mockSidebar.current.isViewer = true;
+            mockEditor.current.isViewer = true;
         });
 
-        it('is the shipped view mode button on the bar: no eye or menu, opens the rail', () => {
+        it('is the shipped view mode button on the bar: no eye or menu, opens the editor', () => {
             renderWithProviders(<AddControl />);
             expect(
                 screen.queryByRole('button', {
@@ -365,7 +390,7 @@ describe('AddControl', () => {
                 screen.queryByRole('button', { name: 'Filter bar settings' }),
             ).not.toBeInTheDocument();
             fireEvent.click(add());
-            expect(mockSidebar.current.openNew).toHaveBeenCalledTimes(1);
+            expect(mockEditor.current.openNew).toHaveBeenCalledTimes(1);
         });
 
         it('shows the tooltip it is given, as an embed passes it', async () => {
@@ -390,11 +415,11 @@ describe('AddControl', () => {
     it.each([false, true])(
         'is inert while a filter is edited, for a viewer too (%s)',
         (isViewer) => {
-            mockSidebar.current.isViewer = isViewer;
+            mockEditor.current.isViewer = isViewer;
             const { rerender } = renderWithProviders(<AddControl />);
             expect(add().closest('[inert]')).toBeNull();
 
-            mockSidebar.current.isSidebarOpen = true;
+            mockEditor.current.isEditorOpen = true;
             rerender(
                 <DashboardStoreTestProvider store={createDashboardTestStore()}>
                     <AddControl />
@@ -419,7 +444,7 @@ describe('AddControl', () => {
 
         expect(add()).toBeDisabled();
         fireEvent.click(add());
-        expect(mockSidebar.current.openNew).not.toHaveBeenCalled();
+        expect(mockEditor.current.openNew).not.toHaveBeenCalled();
     });
 
     it('stays enabled without fields when a SQL chart tile reported columns', () => {
@@ -440,7 +465,596 @@ describe('AddControl', () => {
 
             expect(add()).toHaveAttribute('data-loading', 'true');
             fireEvent.click(add());
-            expect(mockSidebar.current.openNew).not.toHaveBeenCalled();
+            expect(mockEditor.current.openNew).not.toHaveBeenCalled();
         },
     );
+});
+
+describe('AddControl with parameters', () => {
+    const definitions: ParameterDefinitions = {
+        'orders.region': {
+            label: 'Region',
+            type: 'string',
+            options: ['EMEA', 'APAC'],
+            default: 'EMEA',
+        },
+        'payments.region': {
+            label: 'Region',
+            type: 'string',
+            options: ['EMEA', 'APAC'],
+            default: 'EMEA',
+        },
+        fiscal_year_start: {
+            label: 'Fiscal year starts',
+            type: 'string',
+            options: ['January', 'April'],
+            default: 'January',
+        },
+    };
+    const references = {
+        'tile-1': ['orders.region', 'fiscal_year_start'],
+        'tile-2': ['orders.region', 'payments.region'],
+    };
+    const ordersField: FilterableDimension = {
+        fieldType: FieldType.DIMENSION,
+        type: DimensionType.STRING,
+        name: 'status',
+        label: 'Status',
+        table: 'orders',
+        tableLabel: 'Orders',
+        sql: '${TABLE}.status',
+        hidden: false,
+    };
+    const openNew = vi.fn();
+    const discard = vi.fn();
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(
+            300,
+        );
+        vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(
+            400,
+        );
+        mockFilters.current = undefined;
+        mockTileStatus.current = { sqlChartTilesMetadata: {} };
+        mockDashboardContext.current = {
+            allFilterableFields: [ordersField],
+            isLoadingDashboardFilters: false,
+            isFetchingDashboardFilters: false,
+            isAddFilterDisabled: false,
+            setIsAddFilterDisabled: vi.fn(),
+        };
+    });
+
+    const setup = ({
+        discoveryPending = false,
+        isViewer = false,
+        tileParameterReferences = references,
+        controls = [],
+        triggerClassName,
+        section,
+        withParameters,
+        withDateZooms,
+    }: {
+        withParameters?: boolean;
+        withDateZooms?: boolean;
+        discoveryPending?: boolean;
+        isViewer?: boolean;
+        tileParameterReferences?: Record<string, string[]>;
+        controls?: DashboardParameterControl[] | null;
+        triggerClassName?: string;
+        section?: Parameters<typeof AddControl>[0]['section'];
+    } = {}) => {
+        mockEditor.current = {
+            ...mockEditor.current,
+            isViewer,
+            isEditorOpen: false,
+            isNew: false,
+            isPlaceholder: false,
+            editingRule: null,
+            openNew,
+            discard,
+        } as typeof mockEditor.current;
+        const store = createDashboardTestStore({
+            isEditMode: !isViewer,
+            parameterDefinitions: definitions,
+            tileParameterReferences,
+        });
+        seedDashboardEditState(store, {
+            ...(mockDashboardContext.current as DashboardEditTestValues),
+            dashboardTiles: ['tile-1', 'tile-2'].map(
+                (uuid) =>
+                    ({
+                        uuid,
+                        type: 'saved_chart',
+                        properties: discoveryPending
+                            ? { savedChartUuid: `chart-${uuid}` }
+                            : {},
+                    }) as DashboardTile,
+            ),
+        } as DashboardEditTestValues);
+        if (controls !== null) {
+            store.dispatch(
+                dashboardParametersActions.syncParameterControls({
+                    controls,
+                    isSaved: true,
+                }),
+            );
+        }
+        const user = userEvent.setup();
+        renderWithAppProviders(
+            <DashboardStoreTestProvider store={store}>
+                <ParameterEditorProvider isViewer={isViewer}>
+                    <AddControl
+                        triggerClassName={triggerClassName}
+                        section={section}
+                        withParameters={withParameters}
+                        withDateZooms={withDateZooms}
+                    />
+                    <ParameterPills />
+                </ParameterEditorProvider>
+            </DashboardStoreTestProvider>,
+        );
+        return { user, store };
+    };
+
+    const section = {
+        id: 'comparison',
+        name: 'Comparison',
+        isEditorOpen: false,
+        allowParameters: true,
+    };
+
+    it('offers both kinds from the section button and adds the filter to that section', async () => {
+        const { user } = setup({ section });
+        await user.click(
+            screen.getByRole('button', { name: 'Add to Comparison' }),
+        );
+        expect(
+            await screen.findByRole('menuitem', { name: /^Parameter/ }),
+        ).toBeEnabled();
+        await user.click(screen.getByRole('menuitem', { name: /^Filter/ }));
+        expect(openNew).toHaveBeenCalledWith(section.id);
+    });
+
+    it('keeps a parameter selected from a section in that section after Apply', async () => {
+        const { user, store } = setup({ section });
+        await user.click(
+            screen.getByRole('button', { name: 'Add to Comparison' }),
+        );
+        await user.click(
+            await screen.findByRole('menuitem', { name: /^Parameter/ }),
+        );
+        await user.click(
+            await screen.findByRole('option', {
+                name: 'Region, Orders, 2 tiles',
+            }),
+        );
+        const dialog = await screen.findByRole('dialog', { name: 'Region' });
+        await user.click(within(dialog).getByRole('button', { name: 'Apply' }));
+        expect(
+            store.getState().parameters.parameterControls?.[0],
+        ).toMatchObject({
+            sectionId: section.id,
+        });
+    });
+
+    it('returns focus to the section Add after canceling a parameter draft', async () => {
+        const { user } = setup({ section });
+        const sectionAdd = screen.getByRole('button', {
+            name: 'Add to Comparison',
+        });
+        await user.click(sectionAdd);
+        await user.click(
+            await screen.findByRole('menuitem', { name: /^Parameter/ }),
+        );
+        await user.click(
+            await screen.findByRole('option', {
+                name: 'Region, Orders, 2 tiles',
+            }),
+        );
+        const dialog = await screen.findByRole('dialog', { name: 'Region' });
+        await user.click(
+            within(dialog).getByRole('button', { name: 'Cancel' }),
+        );
+        await waitFor(() => expect(sectionAdd).toHaveFocus());
+    });
+
+    const openParameterPicker = async (
+        user: ReturnType<typeof userEvent.setup>,
+    ) => {
+        await user.click(screen.getByRole('button', { name: 'Add' }));
+        await user.click(
+            await screen.findByRole('menuitem', { name: /^Parameter/ }),
+        );
+        return screen.findByRole('textbox', { name: 'Search parameters' });
+    };
+
+    it('says on the "Add" button itself that it opens a menu, and whether it is open', async () => {
+        const { user } = setup();
+        const button = screen.getByRole('button', { name: 'Add' });
+        expect(button.querySelector('.tabler-icon-plus')).toBeInTheDocument();
+        expect(button).toHaveAttribute('aria-haspopup', 'menu');
+        expect(button).toHaveAttribute('aria-expanded', 'false');
+        // Not on a wrapper around it
+        expect(button.parentElement?.closest('[aria-expanded]')).toBeNull();
+        await user.click(button);
+        expect(button).toHaveAttribute('aria-expanded', 'true');
+        expect(
+            screen.getByRole('menu').querySelector('.mantine-Menu-arrow'),
+        ).toBeInTheDocument();
+        await user.click(
+            await screen.findByRole('menuitem', { name: /^Parameter/ }),
+        );
+        // The search is a dialog, not the menu the button announces
+        expect(button).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    it('reads "Add" for an editor and asks Filter or Parameter first', async () => {
+        const { user } = setup();
+        await user.click(screen.getByRole('button', { name: 'Add' }));
+        expect(
+            await screen.findByRole('menuitem', { name: /^Filter/ }),
+        ).toHaveTextContent('Narrow the data in tiles by a field');
+        expect(
+            screen.getByRole('menuitem', { name: /^Parameter/ }),
+        ).toHaveTextContent('Set a value that tiles use');
+        expect(openNew).not.toHaveBeenCalled();
+
+        await user.click(screen.getByRole('menuitem', { name: /^Filter/ }));
+        expect(openNew).toHaveBeenCalledTimes(1);
+    });
+
+    it('is "Add filter" for a viewer, opening the field search directly', async () => {
+        const { user } = setup({ isViewer: true });
+        expect(
+            screen.queryByRole('button', { name: 'Add' }),
+        ).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Add filter' }));
+        expect(openNew).toHaveBeenCalledTimes(1);
+        expect(screen.queryByRole('menuitem')).not.toBeInTheDocument();
+    });
+
+    it('offers an editor whose tiles use no parameter a filter or a date zoom', async () => {
+        const { user } = setup({ tileParameterReferences: {} });
+        await user.click(screen.getByRole('button', { name: 'Add' }));
+        expect(
+            await screen.findByRole('menuitem', { name: /^Date zoom/ }),
+        ).toHaveTextContent('Change the date grain of some tiles');
+        expect(
+            screen.queryByRole('menuitem', { name: /^Parameter/ }),
+        ).not.toBeInTheDocument();
+        await user.click(screen.getByRole('menuitem', { name: /^Filter/ }));
+        expect(openNew).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers only the kinds it is allowed, as in an embed whose token hides the others', async () => {
+        const { user } = setup({ withDateZooms: false });
+        await user.click(screen.getByRole('button', { name: 'Add' }));
+        expect(
+            await screen.findByRole('menuitem', { name: /^Parameter/ }),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByRole('menuitem', { name: /^Date zoom/ }),
+        ).not.toBeInTheDocument();
+    });
+
+    it('is "Add filter" alone for an editor allowed neither parameters nor date zoom', async () => {
+        const { user } = setup({ withParameters: false, withDateZooms: false });
+        await user.click(screen.getByRole('button', { name: 'Add filter' }));
+        expect(openNew).toHaveBeenCalledTimes(1);
+        expect(screen.queryByRole('menuitem')).not.toBeInTheDocument();
+    });
+
+    it('keeps parameter creation unavailable while controls are not loaded', async () => {
+        const { user, store } = setup({ controls: null });
+        expect(
+            screen.queryByRole('button', { name: 'Add' }),
+        ).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Add filter' }));
+        expect(openNew).toHaveBeenCalledTimes(1);
+        expect(store.getState().parameters.parameterControls).toBeNull();
+    });
+
+    it('allows adding filters until every tile has been discovered, even with saved controls', async () => {
+        const { store, user } = setup({ discoveryPending: true });
+        const button = screen.getByRole('button', { name: 'Add' });
+        expect(button).toBeEnabled();
+        await user.click(button);
+        // Parameters wait for discovery; filters and date zooms do not
+        expect(
+            screen.queryByRole('menuitem', { name: /^Parameter/ }),
+        ).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('menuitem', { name: /^Filter/ }));
+        expect(openNew).toHaveBeenCalledTimes(1);
+        expect(store.getState().parameters.parameterControls).toEqual([]);
+        const sources = ['tile-1', 'tile-2'].map((tileUuid) => ({
+            tileUuid,
+            savedChartUuid: `chart-${tileUuid}`,
+            savedSqlUuid: null,
+        }));
+        act(() => {
+            store.dispatch(
+                dashboardParametersActions.addDiscoveredParameterReferences({
+                    chartSavedValues: {},
+                    virtualViewSavedValues: {},
+                    references: { 'tile-1': references['tile-1'] },
+                    definitions,
+                    sources: { 'tile-1': JSON.stringify(sources[0]) },
+                }),
+            );
+        });
+        expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled();
+        act(() => {
+            store.dispatch(
+                dashboardParametersActions.addDiscoveredParameterReferences({
+                    chartSavedValues: {},
+                    virtualViewSavedValues: {},
+                    references,
+                    definitions,
+                    sources: Object.fromEntries(
+                        sources.map((source) => [
+                            source.tileUuid,
+                            JSON.stringify(source),
+                        ]),
+                    ),
+                }),
+            );
+        });
+        expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled();
+    });
+
+    it('does not make a viewer wait for parameter discovery', () => {
+        setup({ discoveryPending: true, isViewer: true });
+        expect(
+            screen.getByRole('button', { name: 'Add filter' }),
+        ).toBeEnabled();
+    });
+
+    it('keeps an embed viewer\'s "Add filter" and its class contract', () => {
+        setup({ isViewer: true, triggerClassName: 'ld-dashboard-add-filter' });
+        expect(screen.getByRole('button', { name: 'Add filter' })).toHaveClass(
+            'ld-dashboard-add-filter',
+        );
+    });
+
+    it('lists each parameter once, by model with the project first, with its tiles', async () => {
+        const { user } = setup();
+        await expect(openParameterPicker(user)).resolves.toHaveFocus();
+        expect(
+            (await screen.findAllByRole('option')).map((option) =>
+                option.getAttribute('aria-label'),
+            ),
+        ).toEqual([
+            'Fiscal year starts, Project, 1 tile',
+            'Region, Orders, 2 tiles',
+            'Region, Payments, 1 tile',
+        ]);
+
+        // The model's name matches too
+        await user.type(
+            screen.getByRole('textbox', { name: 'Search parameters' }),
+            'pay',
+        );
+        await waitFor(() =>
+            expect(screen.getAllByRole('option')).toHaveLength(1),
+        );
+        await user.clear(
+            screen.getByRole('textbox', { name: 'Search parameters' }),
+        );
+        await user.type(
+            screen.getByRole('textbox', { name: 'Search parameters' }),
+            'zzz',
+        );
+        expect(
+            await screen.findByText('No matching parameters'),
+        ).toBeInTheDocument();
+    });
+
+    it('goes back from the parameter search to the choice', async () => {
+        const { user } = setup();
+        await openParameterPicker(user);
+        await user.click(screen.getByRole('button', { name: 'Back' }));
+        expect(
+            await screen.findByRole('menuitem', { name: /^Filter/ }),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByRole('textbox', { name: 'Search parameters' }),
+        ).not.toBeInTheDocument();
+    });
+
+    it('closes the parameter search on Escape, adding nothing', async () => {
+        const { user, store } = setup();
+        await openParameterPicker(user);
+        await user.keyboard('{Escape}');
+        await waitFor(() =>
+            expect(
+                screen.queryByRole('textbox', { name: 'Search parameters' }),
+            ).not.toBeInTheDocument(),
+        );
+        expect(store.getState().parameters.parameterControls).toEqual([]);
+        await waitFor(() =>
+            expect(screen.getByRole('button', { name: 'Add' })).toHaveFocus(),
+        );
+    });
+
+    it('closes the parameter search on a click on "Add"', async () => {
+        const { user } = setup();
+        await openParameterPicker(user);
+        await user.click(screen.getByRole('button', { name: 'Add' }));
+        await waitFor(() =>
+            expect(
+                screen.queryByRole('textbox', { name: 'Search parameters' }),
+            ).not.toBeInTheDocument(),
+        );
+        expect(screen.queryByRole('menuitem')).not.toBeInTheDocument();
+    });
+
+    it('opens a new control on a pick, and Apply adds it on every tile using the parameter', async () => {
+        const { user, store } = setup();
+        await user.type(await openParameterPicker(user), 'orders');
+        await waitFor(() =>
+            expect(screen.getAllByRole('option')).toHaveLength(1),
+        );
+        await user.keyboard('{Enter}');
+
+        const dialog = await screen.findByRole('dialog', { name: 'Region' });
+        expect(dialog).toHaveTextContent('Sets 2 tiles');
+        expect(store.getState().parameters.parameterControls).toEqual([]);
+        await user.click(within(dialog).getByRole('button', { name: 'Apply' }));
+        expect(store.getState().parameters.parameterControls).toEqual([
+            expect.objectContaining({
+                label: null,
+                valueType: { type: 'string', multiple: false },
+                parameters: { 'orders.region': 'all' },
+            }),
+        ]);
+    });
+
+    it('drops a new control on Cancel', async () => {
+        const { user, store } = setup();
+        await user.type(await openParameterPicker(user), 'fiscal');
+        await waitFor(() =>
+            expect(screen.getAllByRole('option')).toHaveLength(1),
+        );
+        await user.keyboard('{Enter}');
+        const dialog = await screen.findByRole('dialog', {
+            name: 'Fiscal year starts',
+        });
+        await user.click(
+            within(dialog).getByRole('button', { name: 'Cancel' }),
+        );
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(
+            screen.queryByRole('button', { name: /^Fiscal year starts/ }),
+        ).not.toBeInTheDocument();
+        expect(store.getState().parameters.parameterControls).toEqual([]);
+        // Its pill went with it: focus goes back to Add
+        await waitFor(() =>
+            expect(screen.getByRole('button', { name: 'Add' })).toHaveFocus(),
+        );
+    });
+
+    it('a key held only by an explicit control starts with no tiles', async () => {
+        const { user, store } = setup({
+            controls: [
+                {
+                    id: 'first',
+                    label: 'Region',
+                    value: null,
+                    valueType: { type: 'string', multiple: false },
+                    parameters: { 'orders.region': { only: ['tile-1'] } },
+                },
+            ],
+        });
+        await openParameterPicker(user);
+        await user.click(
+            await screen.findByRole('option', {
+                name: 'Region, Orders, 2 tiles',
+            }),
+        );
+        const dialog = await screen.findByRole('dialog', { name: 'Region' });
+        await user.click(within(dialog).getByRole('button', { name: 'Apply' }));
+        expect(
+            store.getState().parameters.parameterControls?.[1],
+        ).toMatchObject({ parameters: { 'orders.region': { only: [] } } });
+        expect(
+            store.getState().parameters.parameterControls?.[0].parameters,
+        ).toEqual({ 'orders.region': { only: ['tile-1'] } });
+    });
+
+    it('allows a second control to be saved with no tiles', async () => {
+        const { user, store } = setup({
+            controls: [
+                {
+                    id: 'first',
+                    label: 'Region',
+                    value: null,
+                    valueType: { type: 'string', multiple: false },
+                    parameters: { 'orders.region': 'all' },
+                },
+            ],
+        });
+        await openParameterPicker(user);
+        const onBar = await screen.findByRole('option', {
+            name: 'Region, Orders, 2 tiles',
+        });
+        expect(onBar).not.toHaveAttribute('data-combobox-disabled');
+        await user.click(onBar);
+
+        const dialog = await screen.findByRole('dialog', {
+            // Both set Orders Region: the model tells them nothing apart
+            name: 'Region',
+        });
+        expect(dialog).toHaveTextContent('Sets 0 of 2 tiles');
+        await user.click(within(dialog).getByRole('button', { name: 'Apply' }));
+        expect(
+            store.getState().parameters.parameterControls?.[1],
+        ).toMatchObject({
+            parameters: { 'orders.region': { only: [] } },
+        });
+    });
+
+    it('starts a second control unset even when the dashboard has a value', async () => {
+        const { user, store } = setup({
+            controls: [
+                {
+                    id: 'first',
+                    label: 'Region',
+                    value: 'APAC',
+                    valueType: { type: 'string', multiple: false },
+                    parameters: { 'orders.region': 'all' },
+                },
+            ],
+        });
+        act(() => {
+            store.dispatch(
+                dashboardParametersActions.setParameter({
+                    key: 'orders.region',
+                    value: 'APAC',
+                }),
+            );
+        });
+        await openParameterPicker(user);
+        await user.click(
+            await screen.findByRole('option', {
+                name: 'Region, Orders, 2 tiles',
+            }),
+        );
+        const dialog = await screen.findByRole('dialog', { name: 'Region' });
+        await user.click(within(dialog).getByRole('button', { name: 'Apply' }));
+        expect(
+            store.getState().parameters.parameterControls?.[1],
+        ).toMatchObject({
+            value: null,
+            parameters: { 'orders.region': { only: [] } },
+        });
+    });
+
+    it('prefills the first control from the dashboard value', async () => {
+        const { user, store } = setup();
+        act(() => {
+            store.dispatch(
+                dashboardParametersActions.setParameter({
+                    key: 'orders.region',
+                    value: 'APAC',
+                }),
+            );
+        });
+        await openParameterPicker(user);
+        await user.click(
+            await screen.findByRole('option', {
+                name: 'Region, Orders, 2 tiles',
+            }),
+        );
+        const dialog = await screen.findByRole('dialog', { name: 'Region' });
+        await user.click(within(dialog).getByRole('button', { name: 'Apply' }));
+        expect(
+            store.getState().parameters.parameterControls?.[0],
+        ).toMatchObject({
+            value: 'APAC',
+            parameters: { 'orders.region': 'all' },
+        });
+    });
 });

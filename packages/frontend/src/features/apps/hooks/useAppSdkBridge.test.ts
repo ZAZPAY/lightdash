@@ -31,6 +31,7 @@ import {
     mapAppStateApiError,
     resolveAppStateRequest,
     useAppSdkBridge,
+    type AppStateEvent,
     type ExternalRequestEvent,
     type QueryEvent,
 } from './useAppSdkBridge';
@@ -128,6 +129,7 @@ function renderBridge(
     onQueryEvent: (event: QueryEvent) => void,
     previewToken = PREVIEW_TOKEN,
     dataAppVizMode = false,
+    onNewerVersion?: () => void,
 ) {
     const iframeRef = {
         current: { contentWindow: window } as unknown as HTMLIFrameElement,
@@ -142,6 +144,7 @@ function renderBridge(
             previewToken,
             onQueryEvent,
             dataAppVizMode,
+            onNewerVersion,
         }),
     );
 }
@@ -670,6 +673,53 @@ describe('useAppSdkBridge', () => {
             queryUuid: null,
             error: 'Internal server error',
         });
+    });
+
+    it('tells the host when a query is refused because a newer app version is ready', async () => {
+        const events: QueryEvent[] = [];
+        const onNewerVersion = vi.fn();
+        renderBridge(
+            (e) => events.push(e),
+            PREVIEW_TOKEN,
+            false,
+            onNewerVersion,
+        );
+
+        mockFetchNonOk(
+            {
+                status: 'error',
+                error: {
+                    message: 'This data app has a newer version.',
+                    data: { code: 'data_app_newer_version' },
+                },
+            },
+            403,
+        );
+        postMetricQuery();
+
+        await vi.waitFor(() => expect(events).toHaveLength(2));
+        expect(onNewerVersion).toHaveBeenCalledTimes(1);
+        expect(events[1]).toMatchObject({ id: POST_ID, status: 'error' });
+    });
+
+    it('does not report a newer version for other refused queries', async () => {
+        const events: QueryEvent[] = [];
+        const onNewerVersion = vi.fn();
+        renderBridge(
+            (e) => events.push(e),
+            PREVIEW_TOKEN,
+            false,
+            onNewerVersion,
+        );
+
+        mockFetchNonOk(
+            { status: 'error', error: { message: 'Forbidden', data: {} } },
+            403,
+        );
+        postMetricQuery();
+
+        await vi.waitFor(() => expect(events).toHaveLength(2));
+        expect(onNewerVersion).not.toHaveBeenCalled();
     });
 
     it('emits a terminal error event when the metric-query POST fetch throws', async () => {
@@ -3210,5 +3260,119 @@ describe('app-state branch', () => {
                 error: { code: 'unavailable', message: 'offline' },
             }),
         );
+    });
+
+    describe('inspector events', () => {
+        function renderBridgeWithAppStateEvents() {
+            const events: AppStateEvent[] = [];
+            const iframeRef = {
+                current: {
+                    contentWindow: window,
+                } as unknown as HTMLIFrameElement,
+            } as RefObject<HTMLIFrameElement | null>;
+            renderHook(() =>
+                useAppSdkBridge({
+                    colorScheme: 'light',
+                    iframeRef,
+                    expectedPreviewOrigin: window.location.origin,
+                    projectUuid: PROJECT_UUID,
+                    appUuid: APP_UUID,
+                    previewToken: PREVIEW_TOKEN,
+                    onAppStateEvent: (event) => events.push(event),
+                }),
+            );
+            return events;
+        }
+
+        it('emits pending then ready with op, key, scope and value size', async () => {
+            const events = renderBridgeWithAppStateEvents();
+            mockFetchOk({ status: 'ok', results: {} });
+
+            postAppState({
+                op: 'set-shared',
+                key: 'targets',
+                value: { q1: 1 },
+                expectedVersion: null,
+            });
+
+            await vi.waitFor(() => expect(events).toHaveLength(2));
+            expect(events[0]).toMatchObject({
+                id: POST_ID,
+                op: 'set-shared',
+                key: 'targets',
+                scope: 'shared',
+                valueSize: JSON.stringify({ q1: 1 }).length,
+                status: 'pending',
+                durationMs: null,
+                errorCode: null,
+                error: null,
+            });
+            expect(events[1]).toMatchObject({
+                id: POST_ID,
+                status: 'ready',
+                errorCode: null,
+            });
+            expect(events[1].durationMs).not.toBeNull();
+        });
+
+        it('sizes values in UTF-8 bytes, matching the backend limit', async () => {
+            const events = renderBridgeWithAppStateEvents();
+            mockFetchOk({ status: 'ok', results: {} });
+
+            postAppState({
+                op: 'set-user',
+                key: 'note',
+                value: '日本語',
+            });
+
+            await vi.waitFor(() => expect(events).toHaveLength(2));
+            // '"日本語"' is 5 chars but 11 UTF-8 bytes
+            expect(events[0].valueSize).toBe(11);
+        });
+
+        it('emits a terminal error carrying the SDK error code', async () => {
+            const events = renderBridgeWithAppStateEvents();
+            mockFetchNonOk(
+                {
+                    status: 'error',
+                    error: { message: 'stale', data: { current: 1 } },
+                },
+                409,
+            );
+
+            postAppState({
+                op: 'set-shared',
+                key: 'targets',
+                value: 1,
+                expectedVersion: 3,
+            });
+
+            await vi.waitFor(() => expect(events).toHaveLength(2));
+            expect(events[1]).toMatchObject({
+                status: 'error',
+                errorCode: 'conflict',
+                error: 'stale',
+            });
+        });
+
+        it('reports an invalid op without a fetch, with user scope and no value size', async () => {
+            const events = renderBridgeWithAppStateEvents();
+
+            postAppState({ op: 'delete-user', key: undefined });
+
+            await vi.waitFor(() => expect(events).toHaveLength(2));
+            expect(events[0]).toMatchObject({
+                op: 'delete-user',
+                key: null,
+                scope: 'user',
+                valueSize: null,
+                status: 'pending',
+            });
+            expect(events[1]).toMatchObject({
+                status: 'error',
+                errorCode: 'invalid',
+            });
+            expect(fetch).not.toHaveBeenCalled();
+        });
     });
 });

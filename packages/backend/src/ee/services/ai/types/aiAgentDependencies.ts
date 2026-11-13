@@ -44,6 +44,7 @@ import {
     ResultColumns,
     SavedChart,
     SchedulerAndTargets,
+    SemanticLayerDraftModelInput,
     SlackPrompt,
     SourceQuery,
     SourceQuerySubmission,
@@ -73,6 +74,8 @@ import { PostSlackFile } from '../../../../clients/Slack/SlackClient';
 import type { DbAiPromptTurnDecision } from '../../../database/entities/ai';
 import type { DataAppRead } from '../../AiAgentToolsService/dataAppRead';
 import type { DataAppBuildStatusSource } from '../../AppGenerateService/AppGenerateService';
+import type { SemanticLayerDraftProposal } from '../../SemanticStudioService/SemanticStudioService';
+import type { RepoCodeSearchMatch } from '../repoFs/RepoFs';
 import { AiAgentSkill } from '../skills/types';
 import type {
     ApproveSqlFn,
@@ -532,7 +535,8 @@ export type RunAsyncQueryFn = (
 export type RunSavedChartQueryFn = (args: {
     chartUuid: string;
     dashboardSlug: string | null;
-    limit: number | null;
+    /** The chart's saved limit; clamped to the AI max. */
+    limit: number;
     onQueryPrepared?: (
         execution: Pick<
             ApiExecuteAsyncMetricQueryResults,
@@ -563,12 +567,11 @@ export type SqlChartSummary = {
 /** A saved SQL chart the agent may view; checks view and agent space access, like readContent. */
 export type GetSqlChartFn = (slug: string) => Promise<SqlChartSummary>;
 
-/** Runs a saved SQL chart, on its own or as a dashboard tile with the dashboard's filters. */
+/** Runs a saved SQL chart at its saved limit (clamped to the AI max), on its own or as a dashboard tile with the dashboard's filters. */
 export type RunSqlChartQueryFn = (args: {
     chartSlug: string;
     dashboardSlug: string | null;
-    limit: number;
-}) => Promise<SqlQueryRows & { sqlChart: SqlChartSummary }>;
+}) => Promise<SqlQueryRows & { sqlChart: SqlChartSummary; limit: number }>;
 
 export type SendFileFn = (args: PostSlackFile) => Promise<string | undefined>;
 
@@ -779,7 +782,7 @@ export type ComposerRunOutcome =
           terminal: {
               queryUuid: string;
               columns: ResultColumns;
-              /** First COMPOSER_QUERY_PREVIEW_ROW_LIMIT rows; rowCount is the full count. */
+              /** First COMPOSER_QUERY_PREVIEW_ROW_LIMIT rows unless readAllTerminalRows; rowCount is the full count. */
               rows: Record<string, AnyType>[];
               rowCount: number;
           };
@@ -788,12 +791,16 @@ export type ComposerRunOutcome =
     | {
           status: 'failure';
           error: string;
+          /** The in-process error behind the failure; null when it only came back as a stored query error. */
+          cause: Error | null;
+          /** True when the failure is a stored query error, which AsyncQueryService reports where it is thrown. */
+          reportedAtSource: boolean;
           nodeStatuses: ComposerNodeStatus[];
       };
 
 /**
  * Submits a composer query (multi-source pipeline) and waits for the terminal
- * node to settle. Submissions carry the pinned nodeId → queryUuid mapping for
+ * node and the other unread nodes to settle. Submissions carry the pinned nodeId → queryUuid mapping for
  * every node; the terminal snapshot is the first page of the terminal node's
  * results, capped at that node's limit. `onNodeStatus` receives per-node
  * lifecycle transitions (running on submission, then success/error) while the
@@ -802,12 +809,14 @@ export type ComposerRunOutcome =
 export type RunComposerQueriesFn = (args: {
     queries: SourceQuery[];
     terminalNodeId: string;
+    /** Nodes the run also waits for; when sampled, their node sample holds up to COMPOSER_QUERY_PREVIEW_ROW_LIMIT rows read by that wait. */
+    otherUnreadNodeIds: string[];
     /** Nodes whose node sample is read through the terminal rows' reader once the terminal settles. */
     sampleNodeIds: string[];
     onNodeStatus?: (update: ComposerNodeStatusUpdate) => void;
 }) => Promise<ComposerRunOutcome>;
 
-/** Terminal still running at the deadline; statuses are read once then. */
+/** Terminal or another unread node still running at the deadline; statuses are read once then. */
 export type ComposerRunningOutcome = {
     status: 'running';
     submissions: SourceQuerySubmission[];
@@ -818,9 +827,13 @@ export type ComposerRunningOutcome = {
 export type RunComposerQueriesUntilDeadlineFn = (args: {
     queries: SourceQuery[];
     terminalNodeId: string;
+    /** Nodes the run also waits for; when sampled, their node sample holds up to COMPOSER_QUERY_PREVIEW_ROW_LIMIT rows read by that wait. */
+    otherUnreadNodeIds: string[];
     /** Ready nodes to read a node sample of, also when the terminal is still running. */
     sampleNodeIds: string[];
     deadlineMs: number;
+    /** Reads every terminal row instead of a preview. */
+    readAllTerminalRows?: boolean;
 }) => Promise<ComposerRunOutcome | ComposerRunningOutcome>;
 
 export type ListWarehouseTablesFn = (
@@ -972,6 +985,18 @@ export type EditProjectContextFn = (
     entry: AiAgentJudgeProjectContextEntry,
 ) => Promise<{ prUrl: string; prAction: 'opened' | 'updated' }>;
 
+/** Checks a change on top of the person's draft and adds what passes to it. */
+export type ProposeSemanticLayerChangeFn = (
+    models: SemanticLayerDraftModelInput[],
+) => Promise<SemanticLayerDraftProposal>;
+
+/** The YAML of one model as the person's draft leaves it, and every model's name so a wrong name can be corrected. */
+export type ReadSemanticModelFn = (name: string) => Promise<{
+    content: string | null;
+    inDraft: boolean;
+    modelNames: string[];
+}>;
+
 /**
  * Run one read-only shell command (ls/cat/find/grep/head/wc) against a repo
  * virtual filesystem and return combined stdout. With no `target` this reads the
@@ -981,7 +1006,13 @@ export type EditProjectContextFn = (
 export type ExploreRepoFn = (args: {
     command: string;
     target?: string | null;
+    /** Reorders what the shell's `search` found, most useful first; null leaves the order as found. */
+    rankMatches: RankRepoMatchesFn | null;
 }) => Promise<string>;
+
+export type RankRepoMatchesFn = (
+    matches: RepoCodeSearchMatch[],
+) => Promise<RepoCodeSearchMatch[]>;
 
 /**
  * List every repository the org's GitHub App installation can read, so the agent

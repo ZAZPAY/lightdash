@@ -30,6 +30,7 @@ import {
     MODEL_PRESETS,
     ModelPreset,
     ModelPresetProvider,
+    ModelTier,
     openRouterPreset,
     ReasoningEffort,
     SelectableModelProvider,
@@ -395,6 +396,19 @@ export const reconcileInheritedModelConfig = (
     };
 };
 
+/** A provider's latest preset of a tier, among those the org is offered; null when it has none. */
+export const findPreferredPreset = (
+    catalogue: ModelCatalogue,
+    provider: string,
+    tier: ModelTier,
+): ModelPreset<SelectableModelProvider> | null =>
+    catalogue.offeredPresets.find(
+        (preset) =>
+            preset.provider === provider &&
+            preset.tier === tier &&
+            !preset.deprecated,
+    ) ?? null;
+
 // The returned config is what gets recorded on the prompt, so the swap must
 // happen before the prompt is stored.
 export const resolveModelConfigForPrompt = (
@@ -500,6 +514,8 @@ export const getModel = (
          * (text generation, summaries, simple structured output)
          */
         useFastModel?: boolean;
+        /** For latency-bound calls; Anthropic and OpenAI presets only. */
+        minimalReasoning?: boolean;
     },
 ) => {
     const provider = options?.provider ?? config.defaultProvider;
@@ -523,6 +539,7 @@ export const getModel = (
                 applyStreamingCapability(
                     getOpenaiGptmodel(openaiConfig, preset, {
                         enableReasoning: options?.enableReasoning,
+                        minimalReasoning: options?.minimalReasoning,
                     }),
                     openaiConfig.supportsStreaming,
                 ),
@@ -559,6 +576,7 @@ export const getModel = (
                     getAnthropicModel(anthropicConfig, preset, {
                         enableReasoning: options?.enableReasoning,
                         reasoningEffort: options?.reasoningEffort,
+                        minimalReasoning: options?.minimalReasoning,
                     }),
                     anthropicConfig.supportsStreaming,
                 ),

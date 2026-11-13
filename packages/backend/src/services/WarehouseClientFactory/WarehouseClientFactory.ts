@@ -18,6 +18,7 @@ import {
     usesBigqueryWorkloadIdentity,
     WarehouseTypes,
     type AiExecutionPlan,
+    type AnalyticsActivityWindow,
     type CreateDatabricksCredentials,
     type CreateSnowflakeCredentials,
     type CreateWarehouseCredentials,
@@ -98,6 +99,7 @@ import type {
 } from './WarehouseCredentialSource';
 
 export type WarehouseClientOverrides = {
+    analyticsActivityWindow?: AnalyticsActivityWindow;
     snowflakeVirtualWarehouse?: string;
     databricksCompute?: string;
 };
@@ -192,6 +194,7 @@ export type WarehouseConnectionLeaseRef =
 type WarehouseClientFactoryDependencies = {
     lightdashConfig: LightdashConfig;
     projectModel: ProjectModel;
+    isAnalyticsProjectEnabled?: () => boolean;
     featureFlagModel: FeatureFlagModel;
     aiAccessService: AiAccessService;
     credentialSource: WarehouseCredentialSource;
@@ -224,6 +227,8 @@ export class WarehouseClientFactory {
 
     private readonly featureFlagModel: FeatureFlagModel;
 
+    private readonly isAnalyticsProjectEnabled: () => boolean;
+
     private readonly aiAccessService: AiAccessService;
 
     private readonly credentialSource: WarehouseCredentialSource;
@@ -243,6 +248,8 @@ export class WarehouseClientFactory {
         this.credentialResolvers = deps.credentialResolvers;
         this.projectModel = deps.projectModel;
         this.featureFlagModel = deps.featureFlagModel;
+        this.isAnalyticsProjectEnabled =
+            deps.isAnalyticsProjectEnabled ?? (() => false);
         this.aiAccessService = deps.aiAccessService;
         this.credentialSource = deps.credentialSource;
         this.logger = deps.logger;
@@ -964,11 +971,9 @@ export class WarehouseClientFactory {
     async acquireUnscoped(
         projectUuid: string | null,
         credentials: CreateWarehouseCredentials,
-        overrides?: {
+        overrides?: WarehouseClientOverrides & {
             aiPlan?: AiExecutionPlan | null;
             agentSession?: boolean;
-            snowflakeVirtualWarehouse?: string;
-            databricksCompute?: string;
         },
         tunnelOptions?: SshTunnelOptions,
         organizationUuid: string | null = null,
@@ -1033,7 +1038,8 @@ export class WarehouseClientFactory {
                 return {
                     warehouseClient: await createAnalyticsClient(
                         project.organizationUuid,
-                        this.featureFlagModel,
+                        this.isAnalyticsProjectEnabled,
+                        { activityWindow: overrides?.analyticsActivityWindow },
                     ),
                     sshTunnel,
                     tunnelConnectMs: null,

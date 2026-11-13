@@ -51,10 +51,12 @@ import {
     isDimension,
     isField,
     isMetric,
+    isOtherPivotValue,
     isPivotReferenceWithValues,
     isTableCalculation,
     LightdashParameters,
     MetricType,
+    OTHER_PIVOT_LABEL,
     resolveGranularityInLabel,
     StackType,
     TableCalculationType,
@@ -1130,15 +1132,19 @@ const getPivotSeries = ({
 }: GetPivotSeriesArg): EChartsSeries => {
     const pivotLabel = pivotReference.pivotValues.reduce(
         (acc, { field, value }) => {
-            const formattedValue = getFormattedValue(
-                value,
-                field,
-                itemsMap,
-                undefined,
-                pivotValuesColumnsMap,
-                parameters,
-                resolvedTimezone,
-            );
+            // The "Other" group is not a real value of the field, so it must
+            // not go through the field's formatter (dates, numbers).
+            const formattedValue = isOtherPivotValue(value)
+                ? OTHER_PIVOT_LABEL
+                : getFormattedValue(
+                      value,
+                      field,
+                      itemsMap,
+                      undefined,
+                      pivotValuesColumnsMap,
+                      parameters,
+                      resolvedTimezone,
+                  );
             return acc ? `${acc} - ${formattedValue}` : formattedValue;
         },
         '',
@@ -3108,8 +3114,14 @@ export const getStackTotalSeries = (
     resolvedTimezone?: string,
     // User-configured max per value axis, used to clamp overflowing totals
     valueAxisMaxes?: (number | undefined)[],
+    parameters?: ParametersValuesMap,
 ) => {
-    const seriesGroupedByStack = groupBy(seriesWithStack, 'stack');
+    // Only stacked series have a total. Series with no stack would otherwise
+    // all be grouped under the key "undefined" and get one total between them.
+    const seriesGroupedByStack = groupBy(
+        seriesWithStack.filter((series) => !!series.stack),
+        'stack',
+    );
     return Object.entries(seriesGroupedByStack).reduce<EChartsSeries[]>(
         (acc, [stack, series]) => {
             // A series can land at index 0 without a `stackLabel` config (e.g.
@@ -3135,7 +3147,7 @@ export const getStackTotalSeries = (
                         itemsMap,
                         undefined,
                         undefined,
-                        undefined,
+                        parameters,
                         resolvedTimezone,
                     );
                 }
@@ -3147,7 +3159,11 @@ export const getStackTotalSeries = (
                 flipAxis,
                 selectedLegendNames,
             );
+            // ECharts matches series between updates by id, falling back to
+            // their position in the list. Without a stable id, hiding one
+            // stack's total makes the next stack's labels slide into its place.
             const stackSeries: EChartsSeries = {
+                id: `stack-total-${stack}`,
                 type: series[0].type,
                 ...(series[0].type === CartesianSeriesType.LINE ||
                 series[0].type === CartesianSeriesType.AREA
@@ -3198,6 +3214,7 @@ export const getStackTotalSeries = (
                           );
             if (clampedRows.length > 0) {
                 acc.push({
+                    id: `stack-total-clamped-${stack}`,
                     type: CartesianSeriesType.LINE,
                     showSymbol: true,
                     symbolSize: 0,
@@ -4129,6 +4146,7 @@ export const buildCartesianLegendState = (
         pivotDimensions,
         itemsMap,
         resolvedTimezone,
+        parameters,
         series,
         axes,
         dynamicRadius,
@@ -4225,6 +4243,7 @@ export const buildCartesianLegendState = (
                 validCartesianConfig?.layout.connectNulls,
                 resolvedTimezone,
                 valueAxisMaxes,
+                parameters,
             ),
         ];
     })();
@@ -4276,7 +4295,7 @@ export const buildCartesianLegendState = (
                         itemsMap,
                         undefined,
                         undefined,
-                        undefined,
+                        parameters,
                         resolvedTimezone,
                     );
                     maxCharCount = Math.max(maxCharCount, formatted.length);

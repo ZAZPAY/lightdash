@@ -8,7 +8,10 @@ import {
 import { store as aiAgentStore } from '../../ee/features/aiCopilot/store';
 import { openAnalysisPanel } from '../../ee/features/aiCopilot/store/aiAgentLauncherSlice';
 import { useAnalysisController } from '../../features/analysis/useAnalysisController';
-import { useAnalysisAvailability } from '../../features/apps/analysis/useDataAppAnalysisAvailability';
+import {
+    useAnalysisAvailability,
+    useIsAnalysisEntryVisible,
+} from '../../features/apps/analysis/useDataAppAnalysisAvailability';
 import {
     findActiveTileForQuery,
     selectDashboardAnalysisSources,
@@ -33,7 +36,7 @@ const DashboardAnalysisAdapterBridge = () => {
     const isEditMode = mode === 'edit';
     const projectUuid = useProjectUuid();
     const dashboard = useDashboardContext((c) => c.dashboard);
-    const availability = useAnalysisAvailability('dashboard');
+    const availability = useAnalysisAvailability();
     const { sources, inFlight } = useDashboardSelector(
         selectDashboardAnalysisSources,
     );
@@ -43,24 +46,18 @@ const DashboardAnalysisAdapterBridge = () => {
     const clearCacheAndFetch = useDashboardTileStatusContext(
         (c) => c.clearCacheAndFetch,
     );
-    const {
-        invalidateDashboardRelatedQueries,
-        invalidateDashboardResultsQueries,
-        removeDashboardResultsQueries,
-    } = useDashboardRefresh();
-    // Same sequence as the refresh button: invalidateCache is sticky once
-    // true, so clearCacheAndFetch alone would clear the registry without
-    // refetching anything and the analysis would wait forever.
+    const { invalidateDashboardRelatedQueries, removeDashboardResultsQueries } =
+        useDashboardRefresh();
+    // Same sequence as the refresh button: clearCacheAndFetch bumps the tile
+    // query keys, so every tile re-runs past the results cache.
     const onSourcesExpired = useCallback(() => {
         removeDashboardResultsQueries();
         clearCacheAndFetch();
         void invalidateDashboardRelatedQueries();
-        void invalidateDashboardResultsQueries();
     }, [
         removeDashboardResultsQueries,
         clearCacheAndFetch,
         invalidateDashboardRelatedQueries,
-        invalidateDashboardResultsQueries,
     ]);
     const dashboardStore = useDashboardStore();
 
@@ -105,12 +102,7 @@ const DashboardAnalysisAdapterBridge = () => {
         [dashboardStore],
     );
 
-    // Hidden entirely until the org is rolled out; otherwise the panel
-    // explains any remaining reason it is unavailable.
-    const showAnalysis =
-        availability.status === 'available' ||
-        (availability.status === 'unavailable' &&
-            availability.reason !== 'not_rolled_out');
+    const showAnalysis = useIsAnalysisEntryVisible(availability);
     const adapter = useMemo<LauncherAnalysisAdapter | null>(
         () =>
             projectUuid && target && showAnalysis && !isEditMode

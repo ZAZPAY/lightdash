@@ -105,6 +105,7 @@ import {
     MetricsTreesTableName,
 } from '../../database/entities/catalog';
 import { DashboardTileCommentsTableName } from '../../database/entities/comments';
+import { DashboardTileComposerChartsTableName } from '../../database/entities/composerCharts';
 import {
     DashboardsTableName,
     DashboardTabsTableName,
@@ -268,6 +269,7 @@ import {
     type CachedExploreSource,
     type CachedSourceCatalog,
 } from './cachedExploreSource';
+import { copyComposerChartsToPreview } from './copyComposerChartsToPreview';
 import {
     allocateStagedExploreNames,
     getLegacyPrimaryExploreNames,
@@ -544,6 +546,24 @@ type PreviewChartUuidMapping = {
     sourceChartUuid: string;
     previewChartUuid: string;
 };
+
+// Only shapes the query for a live source in a project without a warehouse; it can never open a connection
+export const LIVE_SOURCE_ONLY_CREDENTIALS: CreateWarehouseCredentials = {
+    type: WarehouseTypes.DUCKDB,
+    connectionType: DuckdbConnectionType.MOTHERDUCK,
+    database: '',
+    schema: '',
+    token: '',
+};
+
+/** The deprecated RESULTS_CACHE_ENABLED env var, when set, overrides every project's setting. */
+export const resolveResultsCacheEnabled = (
+    instanceCacheEnabled: boolean | null,
+    projectCacheEnabled: boolean,
+): { cacheEnabled: boolean; cacheEnabledSetByInstance: boolean } => ({
+    cacheEnabled: instanceCacheEnabled ?? projectCacheEnabled,
+    cacheEnabledSetByInstance: instanceCacheEnabled !== null,
+});
 
 export class ProjectModel {
     /** Serializes create-or-get across API pods without relying on a slug. */
@@ -1495,6 +1515,10 @@ export class ProjectModel {
                               use_project_timezone_in_filters:
                                   copiedProjects[0]
                                       .use_project_timezone_in_filters,
+                              results_cache_enabled:
+                                  copiedProjects[0].results_cache_enabled,
+                              results_cache_ttl_seconds:
+                                  copiedProjects[0].results_cache_ttl_seconds,
                           }
                         : {}),
                     created_by_user_uuid: userUuid,
@@ -1642,6 +1666,8 @@ export class ProjectModel {
     }
 
     async getResultsCacheSettings(projectUuid: string): Promise<{
+        cacheEnabled: boolean;
+        cacheEnabledSetByInstance: boolean;
         cacheTtlSeconds: number | null;
         cacheGeneration: number;
         lastInvalidatedAt: Date | null;
@@ -1652,6 +1678,7 @@ export class ProjectModel {
         const row = await this.database(ProjectTableName)
             .where('project_uuid', projectUuid)
             .select(
+                'results_cache_enabled',
                 'results_cache_ttl_seconds',
                 'results_cache_generation',
                 'results_cache_invalidated_at',
@@ -1668,6 +1695,10 @@ export class ProjectModel {
         }
 
         return {
+            ...resolveResultsCacheEnabled(
+                this.lightdashConfig.results.cacheEnabled,
+                row.results_cache_enabled,
+            ),
             cacheTtlSeconds: row.results_cache_ttl_seconds,
             cacheGeneration: row.results_cache_generation,
             lastInvalidatedAt: row.results_cache_invalidated_at,
@@ -1706,11 +1737,27 @@ export class ProjectModel {
 
     async updateResultsCacheSettings(
         projectUuid: string,
-        settings: { cacheTtlSeconds: number | null },
+        settings: { cacheEnabled?: boolean; cacheTtlSeconds?: number | null },
     ): Promise<void> {
         const affectedRows = await this.database(ProjectTableName)
             .where('project_uuid', projectUuid)
-            .update({ results_cache_ttl_seconds: settings.cacheTtlSeconds });
+            .update({
+                results_cache_enabled: settings.cacheEnabled,
+                results_cache_ttl_seconds: settings.cacheTtlSeconds,
+                // Turning caching off or on clears the cache so stale results are never reused
+                ...(settings.cacheEnabled !== undefined
+                    ? {
+                          results_cache_generation: this.database.raw(
+                              'CASE WHEN results_cache_enabled IS DISTINCT FROM ? THEN results_cache_generation + 1 ELSE results_cache_generation END',
+                              [settings.cacheEnabled],
+                          ) as unknown as number,
+                          results_cache_invalidated_at: this.database.raw(
+                              'CASE WHEN results_cache_enabled IS DISTINCT FROM ? THEN NOW() ELSE results_cache_invalidated_at END',
+                              [settings.cacheEnabled],
+                          ) as unknown as Date,
+                      }
+                    : {}),
+            });
         if (affectedRows === 0) {
             throw new NotFoundError(
                 `Cannot find project with id: ${projectUuid}`,
@@ -1742,6 +1789,7 @@ export class ProjectModel {
             cron: string;
             schedulerTimezone: string;
             nextRunAt: Date;
+            cacheEnabled: boolean;
         }[]
     > {
         const rows = await this.database(ProjectTableName)
@@ -1763,6 +1811,7 @@ export class ProjectModel {
                     results_cache_clear_cron: string;
                     scheduler_timezone: string;
                     results_cache_clear_next_run_at: Date;
+                    results_cache_enabled: boolean;
                 }[]
             >(
                 `${ProjectTableName}.project_uuid`,
@@ -1770,6 +1819,7 @@ export class ProjectModel {
                 `${ProjectTableName}.results_cache_clear_cron`,
                 `${ProjectTableName}.scheduler_timezone`,
                 `${ProjectTableName}.results_cache_clear_next_run_at`,
+                `${ProjectTableName}.results_cache_enabled`,
             );
         return rows.map((row) => ({
             projectUuid: row.project_uuid,
@@ -1777,6 +1827,10 @@ export class ProjectModel {
             cron: row.results_cache_clear_cron,
             schedulerTimezone: row.scheduler_timezone,
             nextRunAt: row.results_cache_clear_next_run_at,
+            cacheEnabled: resolveResultsCacheEnabled(
+                this.lightdashConfig.results.cacheEnabled,
+                row.results_cache_enabled,
+            ).cacheEnabled,
         }));
     }
 
@@ -1810,12 +1864,23 @@ export class ProjectModel {
     async getEffectiveResultsCacheTtlSeconds(
         projectUuid: string,
     ): Promise<number> {
-        const { cacheTtlSeconds } =
+        return (await this.getResultsCacheState(projectUuid)).ttlSeconds;
+    }
+
+    async getResultsCacheState(projectUuid: string): Promise<{
+        enabled: boolean;
+        cacheGeneration: number;
+        ttlSeconds: number;
+    }> {
+        const { cacheEnabled, cacheGeneration, cacheTtlSeconds } =
             await this.getResultsCacheSettings(projectUuid);
-        return (
-            cacheTtlSeconds ??
-            this.lightdashConfig.results.cacheStateTimeSeconds
-        );
+        return {
+            enabled: cacheEnabled,
+            cacheGeneration,
+            ttlSeconds:
+                cacheTtlSeconds ??
+                this.lightdashConfig.results.cacheStateTimeSeconds,
+        };
     }
 
     async updateExpiresAt(projectUuid: string, expiresAt: Date): Promise<void> {
@@ -2229,6 +2294,7 @@ export class ProjectModel {
                 DashboardTileLoomsTableName,
                 DashboardTileHeadingsTableName,
                 DashboardTileDataAppsTableName,
+                DashboardTileComposerChartsTableName,
             ];
             // Child rows reference the tile by (version, uuid) without ON
             // UPDATE, so the tile is re-inserted under the new uuid, the
@@ -6178,7 +6244,28 @@ export class ProjectModel {
                 'Extra connection credentials load per user',
             );
         }
-        return this.getWarehouseCredentialsForProject(projectUuid);
+        return this.getWarehouseCredentialsForProject(projectUuid).catch(
+            (error: unknown) =>
+                this.liveSourceCredentialsOrThrow(error, projectUuid, binding),
+        );
+    }
+
+    async liveSourceCredentialsOrThrow(
+        error: unknown,
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ): Promise<CreateWarehouseCredentials> {
+        if (!(error instanceof NotFoundError) || binding.kind !== 'explore') {
+            throw error;
+        }
+        const explore = await this.getExploreFromCache(
+            projectUuid,
+            binding.exploreName,
+        ).catch(() => null);
+        if (explore?.type === ExploreType.API_SOURCE) {
+            return LIVE_SOURCE_ONLY_CREDENTIALS;
+        }
+        throw error;
     }
 
     /** The column is the only source; a version copied into stored credentials is ignored. */
@@ -8105,6 +8192,12 @@ export class ProjectModel {
             // source project's app — the preview project gets no `apps` row of
             // its own. See `docs/data-apps.md` Limitations.
             await copyDashboardTileContent('dashboard_tile_data_apps');
+            await copyComposerChartsToPreview(
+                trx,
+                previewProjectUuid,
+                previewDashboardUuidBySource,
+                previewDashboardVersionIdBySource,
+            );
 
             // Get AI Agents from the source project
             // Note: AI agents are an Enterprise Edition feature. The table may not exist
@@ -8813,7 +8906,7 @@ export class ProjectModel {
     /** Which of these explore names belong to something other than this live source. */
     async findExploreNamesTakenByOthers(
         projectUuid: string,
-        connectionUuid: string,
+        connectionUuid: string | null,
         names: string[],
     ): Promise<string[]> {
         if (names.length === 0) {
@@ -8829,6 +8922,47 @@ export class ProjectModel {
             .pluck('name');
     }
 
+    /** The stored definition hash of every live data source explore in these projects. */
+    async listApiSourceExploreHashes(
+        projectUuids: string[],
+    ): Promise<{ connectionUuid: string; definitionHash: string | null }[]> {
+        if (projectUuids.length === 0) {
+            return [];
+        }
+        const rows = await this.database(CachedExploreTableName)
+            .whereIn('project_uuid', projectUuids)
+            .whereRaw("explore->>'type' = ?", [ExploreType.API_SOURCE])
+            .select<{ connection_uuid: string; hash: string | null }[]>(
+                this.database.raw(
+                    "explore->'apiSource'->>'connectionUuid' as connection_uuid",
+                ),
+                this.database.raw(
+                    "explore->'apiSource'->>'definitionHash' as hash",
+                ),
+            );
+        return rows.map(({ connection_uuid: connectionUuid, hash }) => ({
+            connectionUuid,
+            definitionHash: hash,
+        }));
+    }
+
+    /** Every field id stored on one live data source's explores. */
+    async getApiSourceFieldIds(
+        projectUuid: string,
+        connectionUuid: string,
+    ): Promise<string[]> {
+        const rows = await this.database(CachedExploreTableName)
+            .where('project_uuid', projectUuid)
+            .whereRaw("explore->>'type' = ?", [ExploreType.API_SOURCE])
+            .whereRaw("explore->'apiSource'->>'connectionUuid' = ?", [
+                connectionUuid,
+            ])
+            .select<{ fields: Record<string, unknown> | null }[]>(
+                this.database.raw("explore->'apiSource'->'fields' as fields"),
+            );
+        return rows.flatMap(({ fields }) => Object.keys(fields ?? {}));
+    }
+
     async hasApiSourceExplores(
         projectUuid: string,
         connectionUuid: string,
@@ -8842,6 +8976,23 @@ export class ProjectModel {
             ])
             .first();
         return row !== undefined;
+    }
+
+    /** Removes the named explores, never user-managed ones such as virtual views. */
+    async deleteCachedExplores(
+        projectUuid: string,
+        names: string[],
+    ): Promise<void> {
+        await this.database.transaction(async (trx) => {
+            await ProjectModel.lockAndEnsureCachedExplores(trx, projectUuid);
+            await trx(CachedExploreTableName)
+                .where('project_uuid', projectUuid)
+                .whereIn('name', names)
+                .whereRaw("coalesce(explore->>'type', '') <> ALL(?)", [
+                    [...USER_MANAGED_EXPLORE_TYPES],
+                ])
+                .delete();
+        });
     }
 
     async deleteApiSourceExplores(

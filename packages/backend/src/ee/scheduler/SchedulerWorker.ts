@@ -9,14 +9,12 @@ import {
     SchedulerJobStatus,
     type AnonymousAccount,
 } from '@lightdash/common';
-import type { AddJobFunction } from 'graphile-worker';
 import Logger from '../../logging/logger';
 import { type ContentReviewRequestModel } from '../../models/ContentReviewRequestModel';
 import { type ContentReviewSettingsModel } from '../../models/ContentReviewSettingsModel';
 import { type OpenIdIdentityModel } from '../../models/OpenIdIdentitiesModel';
 import { type ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { type UserModel } from '../../models/UserModel';
-import type PrometheusMetrics from '../../prometheus/PrometheusMetrics';
 import { SchedulerClient } from '../../scheduler/SchedulerClient';
 import { tryJobOrTimeout } from '../../scheduler/SchedulerJobTimeout';
 import {
@@ -26,11 +24,15 @@ import {
 import { TypedEETaskList } from '../../scheduler/types';
 import { type JiraAppService } from '../../services/JiraAppService/JiraAppService';
 import { type LinearAppService } from '../../services/LinearAppService/LinearAppService';
+import { toFailedScan } from '../../services/QuerySourceService/api/posthog/postHogSchemaScan';
 import { type AiAgentReviewClassifierModel } from '../models/AiAgentReviewClassifierModel';
 import { type AiAgentReviewNotificationModel } from '../models/AiAgentReviewNotificationModel';
 import { type AiOrganizationSettingsModel } from '../models/AiOrganizationSettingsModel';
 import { type AppStateModel } from '../models/AppStateModel';
-import { type ExternalConnectionModel } from '../models/ExternalConnectionModel';
+import {
+    API_SOURCE_SCHEMA_SCAN_TIMEOUT_MS,
+    type ExternalConnectionModel,
+} from '../models/ExternalConnectionModel';
 import { type McpToolCallModel } from '../models/McpToolCallModel';
 import { type ScimRequestLogModel } from '../models/ScimRequestLogModel';
 import { AiAgentAdminService } from '../services/AiAgentAdminService';
@@ -45,24 +47,24 @@ import type { AnalyticsProjectService } from '../services/AnalyticsProjectServic
 import { AppGenerateService } from '../services/AppGenerateService/AppGenerateService';
 import type { DataAppAnalysisService } from '../services/DataAppAnalysisService/DataAppAnalysisService';
 import type { EmbedService } from '../services/EmbedService/EmbedService';
+import type { ExternalConnectionService } from '../services/ExternalConnectionService/ExternalConnectionService';
 import type { ExternalSourceService } from '../services/ExternalSourceService/ExternalSourceService';
 import { ManagedAgentService } from '../services/ManagedAgentService/ManagedAgentService';
 import { type MobilePushNotificationService } from '../services/MobilePushNotificationService/MobilePushNotificationService';
-import { type OnboardingAgentService } from '../services/OnboardingAgentService/OnboardingAgentService';
 import { ProjectContextService } from '../services/ProjectContextService/ProjectContextService';
 import type { ProjectHomepageService } from '../services/ProjectHomepageService';
+import { type SemanticStudioService } from '../services/SemanticStudioService/SemanticStudioService';
 import { createReviewJiraIssue } from './tasks/createReviewJiraIssue';
 import { createReviewLinearIssue } from './tasks/createReviewLinearIssue';
+import { scanApiSourceSchema } from './tasks/scanApiSourceSchema';
 import { sendContentReviewNotification } from './tasks/sendContentReviewNotification';
 import { sendReviewNotification } from './tasks/sendReviewNotification';
 
 const MCP_TOOL_CALL_RETENTION_DAYS = 90;
 const AI_THREAD_RETENTION_CLEANUP_BATCH_SIZE = 500;
-export const AI_DEEP_RESEARCH_REPORT_CLEANUP_BATCH_SIZE = 100;
 const AI_AGENT_EVAL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const AI_AGENT_REVIEW_REMEDIATION_RUN_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const DATA_APP_INVESTIGATE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
-const APP_CAPTURE_THUMBNAIL_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
 const AI_AGENT_REVIEW_CLASSIFIER_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 const AI_AGENT_REVIEW_WRITEBACK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const AI_AGENT_MEMORY_LLM_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes
@@ -73,53 +75,7 @@ const AI_AGENT_MEMORY_CONSOLIDATE_LLM_TIMEOUT_MS = 25 * 60 * 1000; // 25 minutes
 const AI_AGENT_MEMORY_CONSOLIDATE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const APP_GENERATE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 const AI_WRITEBACK_TIMEOUT_MS = 30 * 60 * 1000;
-const AGENT_ONBOARDING_TIMEOUT_MS = 60 * 60 * 1000;
 const EXTERNAL_SOURCE_INGEST_TIMEOUT_MS = 30 * 60 * 1000;
-
-export const cleanAiDeepResearchReports = async ({
-    aiDeepResearchService,
-    cleanupMetrics,
-    addJob,
-}: {
-    aiDeepResearchService: Pick<AiDeepResearchService, 'cleanExpiredReports'>;
-    cleanupMetrics: Pick<
-        PrometheusMetrics,
-        'incrementAiDeepResearchReportCleanup'
-    > | null;
-    addJob: AddJobFunction;
-}): Promise<void> => {
-    Logger.info('Starting Deep Research report cleanup job');
-    const result = await aiDeepResearchService.cleanExpiredReports(
-        AI_DEEP_RESEARCH_REPORT_CLEANUP_BATCH_SIZE,
-    );
-    cleanupMetrics?.incrementAiDeepResearchReportCleanup(
-        'scanned',
-        result.scanned,
-    );
-    cleanupMetrics?.incrementAiDeepResearchReportCleanup(
-        'expired',
-        result.expired,
-    );
-    cleanupMetrics?.incrementAiDeepResearchReportCleanup(
-        'failed',
-        result.failed,
-    );
-    Logger.info(
-        `Deep Research report cleanup completed. Scanned: ${result.scanned}; expired: ${result.expired}; failed: ${result.failed}`,
-    );
-    if (result.failed > 0) {
-        throw new Error(
-            `Failed to clean ${result.failed} Deep Research reports`,
-        );
-    }
-    if (result.scanned === AI_DEEP_RESEARCH_REPORT_CLEANUP_BATCH_SIZE) {
-        await addJob(
-            EE_SCHEDULER_TASKS.CLEAN_AI_DEEP_RESEARCH_REPORTS,
-            {},
-            { maxAttempts: 3 },
-        );
-    }
-};
 
 type CommercialSchedulerWorkerArguments = SchedulerWorkerArguments & {
     analyticsProjectService: Pick<
@@ -127,11 +83,11 @@ type CommercialSchedulerWorkerArguments = SchedulerWorkerArguments & {
         'reconcileContent' | 'syncContent'
     >;
     aiAgentService: AiAgentService;
+    semanticStudioService: SemanticStudioService;
     dataAppAnalysisService: DataAppAnalysisService;
     aiAgentMemoryService: AiAgentMemoryService;
     aiWritebackService: AiWritebackService;
     aiDeepResearchService: AiDeepResearchService;
-    onboardingAgentService: OnboardingAgentService;
     aiAgentReviewClassifierService: AiAgentReviewClassifierService;
     aiAgentReviewClassifierModel: AiAgentReviewClassifierModel;
     aiAgentReviewNotificationModel: AiAgentReviewNotificationModel;
@@ -159,6 +115,10 @@ type CommercialSchedulerWorkerArguments = SchedulerWorkerArguments & {
         'runIngest' | 'markIngestError' | 'maintain'
     >;
     aiThreadFileService: Pick<AiThreadFileService, 'sweepExpiredUnclaimed'>;
+    externalConnectionService: Pick<
+        ExternalConnectionService,
+        'scanApiSourceSchema' | 'rebuildOutdatedApiSourceExplores'
+    >;
     mobilePushNotificationService: Pick<
         MobilePushNotificationService,
         | 'deliverLiveActivityStart'
@@ -177,6 +137,8 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
 
     protected readonly aiAgentService: AiAgentService;
 
+    protected readonly semanticStudioService: SemanticStudioService;
+
     protected readonly dataAppAnalysisService: DataAppAnalysisService;
 
     protected readonly aiAgentMemoryService: AiAgentMemoryService;
@@ -184,8 +146,6 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
     protected readonly aiWritebackService: AiWritebackService;
 
     protected readonly aiDeepResearchService: AiDeepResearchService;
-
-    protected readonly onboardingAgentService: OnboardingAgentService;
 
     protected readonly aiAgentReviewClassifierService: AiAgentReviewClassifierService;
 
@@ -229,6 +189,8 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
 
     protected readonly aiThreadFileService: CommercialSchedulerWorkerArguments['aiThreadFileService'];
 
+    protected readonly externalConnectionService: CommercialSchedulerWorkerArguments['externalConnectionService'];
+
     protected readonly mobilePushNotificationService: CommercialSchedulerWorkerArguments['mobilePushNotificationService'];
 
     protected readonly contentReviewRequestModel: ContentReviewRequestModel;
@@ -241,17 +203,15 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
 
     private readonly findRetainedOrganizations: () => Promise<string[]>;
 
-    private readonly cleanupMetrics: PrometheusMetrics | null;
-
     constructor(args: CommercialSchedulerWorkerArguments) {
         super(args);
         this.analyticsProjectService = args.analyticsProjectService;
         this.aiAgentService = args.aiAgentService;
+        this.semanticStudioService = args.semanticStudioService;
         this.dataAppAnalysisService = args.dataAppAnalysisService;
         this.aiAgentMemoryService = args.aiAgentMemoryService;
         this.aiWritebackService = args.aiWritebackService;
         this.aiDeepResearchService = args.aiDeepResearchService;
-        this.onboardingAgentService = args.onboardingAgentService;
         this.aiAgentReviewClassifierService =
             args.aiAgentReviewClassifierService;
         this.aiAgentReviewClassifierModel = args.aiAgentReviewClassifierModel;
@@ -276,6 +236,7 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
         this.projectHomepageService = args.projectHomepageService;
         this.externalSourceService = args.externalSourceService;
         this.aiThreadFileService = args.aiThreadFileService;
+        this.externalConnectionService = args.externalConnectionService;
         this.mobilePushNotificationService = args.mobilePushNotificationService;
         this.contentReviewRequestModel = args.contentReviewRequestModel;
         this.contentReviewSettingsModel = args.contentReviewSettingsModel;
@@ -283,7 +244,6 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
         this.sendAiCreditAllowanceAlerts = args.sendAiCreditAllowanceAlerts;
         this.findRetainedOrganizations =
             args.findAiUsageLedgerRetainedOrganizations;
-        this.cleanupMetrics = args.prometheusMetrics ?? null;
     }
 
     protected findAiUsageLedgerRetainedOrganizations(): Promise<string[]> {
@@ -305,6 +265,14 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                     backfillPeriod: 10 * 60 * 1000,
                     maxAttempts: 3,
                 },
+            },
+            {
+                // A cron rather than a startup job: graphile runs each tick
+                // once across workers, a failed source is retried next tick,
+                // and a rollback is repaired the same way.
+                task: EE_SCHEDULER_TASKS.REBUILD_OUTDATED_API_SOURCE_EXPLORES,
+                pattern: '*/15 * * * *',
+                options: { backfillPeriod: 0, maxAttempts: 1 },
             },
             {
                 task: EE_SCHEDULER_TASKS.SWEEP_UNCLAIMED_AI_THREAD_FILES,
@@ -409,14 +377,6 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                 pattern: '55 0 * * *', // 00:55 UTC daily
                 options: {
                     backfillPeriod: 24 * 3600 * 1000,
-                    maxAttempts: 3,
-                },
-            },
-            {
-                task: EE_SCHEDULER_TASKS.CLEAN_AI_DEEP_RESEARCH_REPORTS,
-                pattern: '41 * * * *',
-                options: {
-                    backfillPeriod: 2 * 60 * 60 * 1000,
                     maxAttempts: 3,
                 },
             },
@@ -559,15 +519,6 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                     );
                 }
             },
-            [EE_SCHEDULER_TASKS.CLEAN_AI_DEEP_RESEARCH_REPORTS]: async (
-                _payload,
-                helpers,
-            ) =>
-                cleanAiDeepResearchReports({
-                    aiDeepResearchService: this.aiDeepResearchService,
-                    cleanupMetrics: this.cleanupMetrics,
-                    addJob: helpers.addJob,
-                }),
             [EE_SCHEDULER_TASKS.CLEAN_AI_AGENT_THREADS]: async (
                 _payload,
                 helpers,
@@ -797,6 +748,11 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                     },
                 );
             },
+            [EE_SCHEDULER_TASKS.CHECK_SEMANTIC_LAYER_DRAFT_IMPACT]: async (
+                payload,
+            ) => {
+                await this.semanticStudioService.checkDraftImpact(payload);
+            },
             [EE_SCHEDULER_TASKS.EMBED_ARTIFACT_VERSION]: async (
                 payload,
                 _helpers,
@@ -960,13 +916,13 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                     );
                 }
 
-                const aiAutopilotEnabled =
-                    await this.managedAgentService.isAiAutopilotEnabledForProject(
+                const autopilotAvailable =
+                    await this.managedAgentService.isAutopilotAvailableForProject(
                         settings,
                     );
-                if (!aiAutopilotEnabled) {
+                if (!autopilotAvailable) {
                     Logger.info(
-                        `AI autopilot feature flag disabled for project ${projectUuid}, skipping managed agent heartbeat`,
+                        `AI is not enabled for the organization of project ${projectUuid}, skipping managed agent heartbeat`,
                     );
                     return;
                 }
@@ -1087,29 +1043,11 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                     },
                 );
             },
-            [EE_SCHEDULER_TASKS.APP_CAPTURE_THUMBNAIL]: async (
-                payload,
-                helpers,
-            ) => {
-                await tryJobOrTimeout(
-                    SchedulerClient.processJob(
-                        EE_SCHEDULER_TASKS.APP_CAPTURE_THUMBNAIL,
-                        helpers.job.id,
-                        helpers.job.run_at,
-                        payload,
-                        async () => {
-                            await this.appGenerateService.captureVersionThumbnail(
-                                payload,
-                            );
-                        },
-                    ),
-                    helpers.job,
-                    APP_CAPTURE_THUMBNAIL_TIMEOUT_MS,
-                    async (_job, e) => {
-                        Logger.warn(
-                            `App ${payload.appUuid}: thumbnail capture timed out for version ${payload.version}: ${getErrorMessage(e)}`,
-                        );
-                    },
+            // Automatic thumbnails are removed. Drains jobs that an older
+            // release enqueued during a rolling deploy; remove next release.
+            [EE_SCHEDULER_TASKS.APP_CAPTURE_THUMBNAIL]: async (payload) => {
+                Logger.info(
+                    `App ${payload.appUuid}: skipped thumbnail capture for version ${payload.version} (automatic thumbnails are removed)`,
                 );
             },
             [EE_SCHEDULER_TASKS.AI_WRITEBACK_PIPELINE]: async (
@@ -1136,31 +1074,6 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                     },
                 );
             },
-            [EE_SCHEDULER_TASKS.AGENT_ONBOARDING_RUN]: async (
-                payload,
-                helpers,
-            ) => {
-                await tryJobOrTimeout(
-                    SchedulerClient.processJob(
-                        EE_SCHEDULER_TASKS.AGENT_ONBOARDING_RUN,
-                        helpers.job.id,
-                        helpers.job.run_at,
-                        payload,
-                        async () => {
-                            await this.onboardingAgentService.executeRun(
-                                payload,
-                            );
-                        },
-                    ),
-                    helpers.job,
-                    AGENT_ONBOARDING_TIMEOUT_MS,
-                    async () => {
-                        await this.onboardingAgentService.markRunTimedOut(
-                            payload.agentOnboardingRunUuid,
-                        );
-                    },
-                );
-            },
             [EE_SCHEDULER_TASKS.AI_DEEP_RESEARCH]: async (payload, helpers) => {
                 await SchedulerClient.processJob(
                     EE_SCHEDULER_TASKS.AI_DEEP_RESEARCH,
@@ -1182,6 +1095,44 @@ export class CommercialSchedulerWorker extends SchedulerWorker {
                 ),
             [EE_SCHEDULER_TASKS.MAINTAIN_EXTERNAL_SOURCES]: async () => {
                 await this.externalSourceService.maintain();
+            },
+            [EE_SCHEDULER_TASKS.REBUILD_OUTDATED_API_SOURCE_EXPLORES]:
+                async () => {
+                    const { rebuilt, failed } =
+                        await this.externalConnectionService.rebuildOutdatedApiSourceExplores();
+                    if (rebuilt > 0 || failed > 0) {
+                        Logger.info(
+                            `Rebuilt ${rebuilt} live data sources after a code change; ${failed} failed`,
+                        );
+                    }
+                },
+            [EE_SCHEDULER_TASKS.SCAN_API_SOURCE_SCHEMA]: async (
+                payload,
+                helpers,
+            ) => {
+                await tryJobOrTimeout(
+                    SchedulerClient.processJob(
+                        EE_SCHEDULER_TASKS.SCAN_API_SOURCE_SCHEMA,
+                        helpers.job.id,
+                        helpers.job.run_at,
+                        payload,
+                        () =>
+                            scanApiSourceSchema({
+                                userService: this.userService,
+                                externalConnectionService:
+                                    this.externalConnectionService,
+                                externalConnectionModel:
+                                    this.externalConnectionModel,
+                            })(payload),
+                    ),
+                    helpers.job,
+                    API_SOURCE_SCHEMA_SCAN_TIMEOUT_MS,
+                    async (_job, error) =>
+                        this.externalConnectionModel.setApiSourceSchema(
+                            payload.externalConnectionUuid,
+                            toFailedScan(error),
+                        ),
+                );
             },
             [EE_SCHEDULER_TASKS.SWEEP_UNCLAIMED_AI_THREAD_FILES]: async () => {
                 await this.aiThreadFileService.sweepExpiredUnclaimed();

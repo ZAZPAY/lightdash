@@ -140,6 +140,7 @@ export type Explore = {
      * the label.
      */
     groups?: string[];
+    combineJoinedFields?: boolean; // Display visible joined fields in shared sidebar sections.
     baseTable: string; // Must match a tableName in tables
     joinedTables: CompiledExploreJoin[]; // Must match a tableName in tables
     tables: { [tableName: string]: CompiledTable }; // All tables in this explore, potentially filtered by user attributes
@@ -279,6 +280,14 @@ export const isSummaryExploreError = (
     'errors' in summary &&
     summary.errors !== null &&
     summary.errors !== undefined;
+
+// Compiled from a dbt or Lightdash YAML deploy, not a virtual/uploaded/pre-aggregate explore
+export const isSemanticLayerExplore = (summary: SummaryExplore): boolean =>
+    !isSummaryExploreError(summary) &&
+    (summary.type === undefined || summary.type === ExploreType.DEFAULT);
+
+export const hasSemanticLayerExplore = (summaries: SummaryExplore[]): boolean =>
+    summaries.some(isSemanticLayerExplore);
 
 export type Table = TableBase & {
     dimensions: { [fieldName: string]: Dimension }; // Field names must be unique across dims and metrics

@@ -16,6 +16,7 @@ import { AppModel } from './AppModel';
 import { AwsWebIdentityAudienceModel } from './AwsWebIdentityAudienceModel';
 import { CatalogModel } from './CatalogModel/CatalogModel';
 import { CommentModel } from './CommentModel/CommentModel';
+import { ComposerChartModel } from './ComposerChartModel';
 import { ContentAsCodeProjectSettingsModel } from './ContentAsCodeProjectSettingsModel';
 import { ContentAsCodeSnapshotModel } from './ContentAsCodeSnapshotModel';
 import { ContentAsCodeWritebackModel } from './ContentAsCodeWritebackModel';
@@ -49,6 +50,8 @@ import { LinearAppInstallationsModel } from './LinearAppInstallations/LinearAppI
 import { ManagedSignInModel } from './ManagedSignInModel';
 import { McpContextModel } from './McpContextModel';
 import { MigrationModel } from './MigrationModel/MigrationModel';
+import { MobileAppLinkModel } from './MobileAppLinkModel';
+import { MobileSignInCodeModel } from './MobileSignInCodeModel';
 import { NotificationsModel } from './NotificationsModel/NotificationsModel';
 import { OAuth2Model } from './OAuth2Model';
 import { OnboardingModel } from './OnboardingModel/OnboardingModel';
@@ -200,7 +203,9 @@ export type ModelManifest = {
     organizationAgentIdentitySettingsModel: OrganizationAgentIdentitySettingsModel;
     userWarehouseCredentialsModel: UserWarehouseCredentialsModel;
     warehouseAvailableTablesModel: WarehouseAvailableTablesModel;
+    mobileAppLinkModel: MobileAppLinkModel;
     warehouseConnectCodeModel: WarehouseConnectCodeModel;
+    mobileSignInCodeModel: MobileSignInCodeModel;
     aiUsageLedgerModel: AiUsageLedgerModel;
     warehouseConnectionModel: WarehouseConnectionModel;
     warehouseConnectionSwitchModel: WarehouseConnectionSwitchModel;
@@ -210,6 +215,7 @@ export type ModelManifest = {
     validationModel: ValidationModel;
     catalogModel: CatalogModel;
     savedSqlModel: SavedSqlModel;
+    composerChartModel: ComposerChartModel;
     contentModel: ContentModel;
     contentAsCodeProjectSettingsModel: ContentAsCodeProjectSettingsModel;
     contentAsCodeSnapshotModel: ContentAsCodeSnapshotModel;
@@ -236,6 +242,8 @@ export type ModelManifest = {
     aiAgentMemoryModel: unknown;
     aiAgentModel: unknown;
     homepageRecommendedActionSkipsModel: unknown;
+    projectModelDocumentModel: unknown;
+    semanticStudioWorkspaceModel: unknown;
     projectHomepageModel: unknown;
     aiAgentDocumentModel: unknown;
     aiThreadFileModel: unknown;
@@ -243,7 +251,6 @@ export type ModelManifest = {
     aiWritebackThreadModel: unknown;
     aiWritebackRunModel: unknown;
     aiDeepResearchRunModel: unknown;
-    agentOnboardingRunModel: unknown;
     sandboxRegistryModel: unknown;
     aiAgentReviewClassifierModel: unknown;
     aiAgentReviewNotificationModel: unknown;
@@ -1126,10 +1133,24 @@ export class ModelRepository
         );
     }
 
+    public getMobileAppLinkModel(): MobileAppLinkModel {
+        return this.getModel(
+            'mobileAppLinkModel',
+            () => new MobileAppLinkModel({ database: this.database }),
+        );
+    }
+
     public getWarehouseConnectCodeModel(): WarehouseConnectCodeModel {
         return this.getModel(
             'warehouseConnectCodeModel',
             () => new WarehouseConnectCodeModel({ database: this.database }),
+        );
+    }
+
+    public getMobileSignInCodeModel(): MobileSignInCodeModel {
+        return this.getModel(
+            'mobileSignInCodeModel',
+            () => new MobileSignInCodeModel({ database: this.database }),
         );
     }
 
@@ -1155,6 +1176,13 @@ export class ModelRepository
                     database: this.database,
                     lightdashConfig: this.lightdashConfig,
                 }),
+        );
+    }
+
+    public getComposerChartModel(): ComposerChartModel {
+        return this.getModel(
+            'composerChartModel',
+            () => new ComposerChartModel({ database: this.database }),
         );
     }
 
@@ -1274,6 +1302,14 @@ export class ModelRepository
         return this.getModel('homepageRecommendedActionSkipsModel');
     }
 
+    public getProjectModelDocumentModel<ModelImplT>(): ModelImplT {
+        return this.getModel('projectModelDocumentModel');
+    }
+
+    public getSemanticStudioWorkspaceModel<ModelImplT>(): ModelImplT {
+        return this.getModel('semanticStudioWorkspaceModel');
+    }
+
     public getMcpToolCallModel<ModelImplT>(): ModelImplT {
         return this.getModel('mcpToolCallModel');
     }
@@ -1300,10 +1336,6 @@ export class ModelRepository
 
     public getAiDeepResearchRunModel<ModelImplT>(): ModelImplT {
         return this.getModel('aiDeepResearchRunModel');
-    }
-
-    public getAgentOnboardingRunModel<ModelImplT>(): ModelImplT {
-        return this.getModel('agentOnboardingRunModel');
     }
 
     public getSandboxRegistryModel<ModelImplT>(): ModelImplT {
