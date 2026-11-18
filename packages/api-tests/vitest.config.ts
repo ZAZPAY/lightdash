@@ -14,6 +14,8 @@ const serialFiles = [
     'tests/embedDashboard.test.ts',
     'tests/embedTimezone.test.ts',
     'tests/dataAppVizRender.test.ts',
+    // Assigns a temporary custom role on the seed project (projectPermissions).
+    'tests/chartCustomSqlSavePermissions.test.ts',
     // Toggles the org AI setting and a user attribute other files could read.
     'tests/dataAppAnalysisIsolation.test.ts',
     'tests/dashboardAnalysisIsolation.test.ts',
@@ -29,6 +31,7 @@ const serialFiles = [
 ];
 
 const shared = {
+    clearMocks: false,
     environment: 'node',
     testTimeout: 120_000,
     hookTimeout: 120_000,
@@ -39,11 +42,13 @@ const shared = {
 
 export default defineConfig({
     test: {
+        clearMocks: false,
         // Runs once per run (root project only): creates the shared warehouse
         // projects used by the parity suites.
         globalSetup: ['vitest.global-setup.ts'],
         projects: [
             {
+                extends: false,
                 test: {
                     ...shared,
                     name: 'parallel',
@@ -57,6 +62,7 @@ export default defineConfig({
                 },
             },
             {
+                extends: false,
                 test: {
                     ...shared,
                     name: 'serial',
