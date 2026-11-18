@@ -1,9 +1,12 @@
 import {
     ForbiddenError,
+    getComposerChartPivotStage,
     type Account,
     type ComposerChart,
     type ComposerChartPipelineNode,
     type ComposerChartRunSource,
+    type DashboardFilters,
+    type ParametersValuesMap,
     type RegisteredAccount,
 } from '@lightdash/common';
 
@@ -13,27 +16,45 @@ export class ComposerRunBinding {
         private readonly userUuid: string,
         readonly projectUuid: string,
         readonly nodes: ComposerChartPipelineNode[],
+        /** The dashboard's values for the shared map SQL, DuckDB and Python nodes read. */
+        readonly parameters: ParametersValuesMap,
+        /** The dashboard's filters; each SQL node applies the tile's column targets it has, as a SQL chart tile does. */
+        readonly dashboardFilters: DashboardFilters,
         readonly stamp: ComposerChartRunSource,
+        /** The server-built series-split stage, run after the terminal node; null without a group-by. */
+        readonly chartStageNodeId: string | null,
     ) {}
 
     static forAuthorizedViewer({
         account,
         chart,
         tileUuid,
+        resolved,
+        dashboardFilters,
     }: {
         account: RegisteredAccount;
         chart: ComposerChart;
         tileUuid: string;
+        /** The stored nodes with the dashboard's filters and parameters written on, and the shared parameter map. */
+        resolved: {
+            nodes: ComposerChartPipelineNode[];
+            parameters: ParametersValuesMap;
+        };
+        dashboardFilters: DashboardFilters;
     }): ComposerRunBinding {
+        const stage = getComposerChartPivotStage(chart.pipeline, chart.chart);
         return new ComposerRunBinding(
             account.user.userUuid,
             chart.projectUuid,
-            chart.pipeline.nodes,
+            stage ? [...resolved.nodes, stage] : resolved.nodes,
+            resolved.parameters,
+            dashboardFilters,
             {
                 composerChartUuid: chart.uuid,
                 dashboardUuid: chart.dashboardUuid,
                 tileUuid,
             },
+            stage?.nodeId ?? null,
         );
     }
 

@@ -27,6 +27,8 @@ import {
     LightdashPage,
     LightdashRequestMethodHeader,
     LightdashUser,
+    LiveSourceErrorOrigin,
+    LiveSourceInternalErrorCode,
     LiveSourceRefusalCode,
     LiveSourceUpstreamErrorCode,
     MergeJoinType,
@@ -102,7 +104,8 @@ import Logger from '../logging/logger';
 import type { ExecutionContextInfo } from '../logging/winston';
 import type { FeatureFlagCheckAggregateEntry } from '../models/FeatureFlagModel/flagCheckAggregator';
 import { type PersistentDownloadFileSource } from '../services/PersistentDownloadFileService/PersistentDownloadFileService';
-import type { ApiQueryOutcome } from '../services/QuerySourceService/api/apiQueryOutcome';
+import type { LiveQueryOutcome } from '../services/QuerySourceService/live/query/outcome';
+import type { LiveQueryShape } from '../services/QuerySourceService/live/query/queryShape';
 import { VERSION } from '../version';
 import {
     isAiUsageEvent,
@@ -823,10 +826,11 @@ export type QueryCompletedEvent = BaseTrack & {
         totalRowCount: number | null;
         columnsCount: number | null;
         // Set only when executionSource is 'live_source'.
-        apiConnector?: ApiConnectorType;
-        apiQueryOutcome?: ApiQueryOutcome;
+        integration?: ApiConnectorType;
+        apiQueryOutcome?: LiveQueryOutcome;
         /** Set only when a live_source query failed. */
-        liveSourceErrorCode?: LiveSourceUpstreamErrorCode;
+        errorCode?: LiveSourceInternalErrorCode | LiveSourceUpstreamErrorCode;
+        errorOrigin?: LiveSourceErrorOrigin;
         truncated?: boolean;
     };
 };
@@ -840,8 +844,11 @@ export type LiveSourceQueryRefusedEvent = BaseTrack & {
         externalConnectionUuid: string;
         integration: ApiConnectorType;
         exploreName: string;
-        code: LiveSourceRefusalCode;
+        errorOrigin: 'refused';
+        errorCode: LiveSourceRefusalCode;
         fieldId: string | null;
+        /** What the query asked for, with no filter values or custom SQL. */
+        queryShape: LiveQueryShape;
         querySurface: QuerySurface | null;
         context: QueryExecutionContext;
     };
@@ -2035,6 +2042,7 @@ export type DashboardView = BaseTrack & {
     userId: string;
     properties: {
         dashboardId: string;
+        dashboardSlug?: string;
         projectId: string;
         organizationId: string;
         parametersCount: number;
@@ -2594,6 +2602,7 @@ export type DataAppViewedEvent = BaseTrack & {
         organizationId: string;
         projectId: string;
         appUuid: string;
+        appSlug?: string;
         viewContext?: DataAppViewContext | 'embed' | 'mcp';
         version?: number;
         navigationId?: string | null;
@@ -3276,6 +3285,14 @@ export type RoadmapProjectFollowRequestedEvent = BaseTrack & {
         organizationId: string;
         roadmapProjectId: string;
         noteLength: number;
+    };
+};
+
+export type BillingPortalLinkCreatedEvent = BaseTrack & {
+    event: 'billing_portal.link_created';
+    userId: string;
+    properties: {
+        organizationId: string;
     };
 };
 
@@ -5104,6 +5121,7 @@ type TypedEvent =
     | UserAttributesPageEvent
     | RoadmapViewedEvent
     | RoadmapProjectFollowRequestedEvent
+    | BillingPortalLinkCreatedEvent
     | UserAttributeCreateAndUpdateEvent
     | UserAttributeDeleteEvent
     | MetricFlowQueryEvent
