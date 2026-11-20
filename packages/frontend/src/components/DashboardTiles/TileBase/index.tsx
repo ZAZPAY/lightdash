@@ -1,5 +1,7 @@
 import {
+    DashboardHeadingVerticalAlign,
     DashboardTileTypes,
+    DEFAULT_DASHBOARD_HEADING_VERTICAL_ALIGN,
     isDashboardChartTileType,
     LOADING_CHART_OVERLAY_CLASS,
     type Dashboard,
@@ -34,7 +36,7 @@ import {
     IconDotsVertical,
 } from '@tabler/icons-react';
 import { clsx } from 'clsx';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { v4 as uuid4 } from 'uuid';
 import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
 import {
@@ -67,6 +69,13 @@ import { TileCopyPlacement } from './TileCopyPlacement';
 import { TileHeaderPopoverContext } from './tileHeaderPopoverContext';
 import { TileSelectionToolbar } from './TileSelectionToolbar';
 import { type TileBaseProps } from './types';
+import { useTileTitleAim } from './useTileTitleAim';
+
+const HEADING_FLEX_ALIGN: Record<DashboardHeadingVerticalAlign, string> = {
+    [DashboardHeadingVerticalAlign.TOP]: 'flex-start',
+    [DashboardHeadingVerticalAlign.CENTER]: 'center',
+    [DashboardHeadingVerticalAlign.BOTTOM]: 'flex-end',
+};
 
 const TileBase = <T extends Dashboard['tiles'][number]>({
     isEditMode,
@@ -88,6 +97,7 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
     children,
     extraHeaderElement,
     visibleHeaderElement,
+    focusedActions = null,
     hasNonMenuHeaderContent = false,
     titleHref,
     minimal = false,
@@ -115,7 +125,7 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
     const { isHovered: chartHovered, ...chartHoveredProps } = useDelayedHover({
         delay: 500,
     });
-    const [titleHovered, setTitleHovered] = useState(false);
+    const titleRef = useRef<HTMLAnchorElement>(null);
     const [isMenuOpen, toggleMenu] = useToggle([false, true]);
     const [openHeaderPopovers, setOpenHeaderPopovers] = useState<
         ReadonlySet<string>
@@ -139,6 +149,19 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
         (tile.type !== DashboardTileTypes.MARKDOWN
             ? tile.properties.hideTitle
             : false);
+    const isTitleLink =
+        !isEditMode && tile.type !== DashboardTileTypes.MARKDOWN;
+    // Touch keeps the plain :hover, which a tap makes sticky
+    const canHover = useMediaQuery('(hover: hover)', undefined, {
+        getInitialValueInEffect: false,
+    });
+    const followsTitleAim = isTitleLink && !minimal && !hideTitle && canHover;
+    const { titleHovered, descriptionOpened, pointerHandlers } =
+        useTileTitleAim({
+            enabled: followsTitleAim,
+            titleRef,
+            actionsSelector: `.${styles.tileTooltip}`,
+        });
     const belongsToDashboard: boolean =
         isDashboardChartTileType(tile) && !!tile.properties.belongsToDashboard;
 
@@ -191,8 +214,13 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
     const canManageDashboard = useCanManageDashboard();
     const canEditTileContent = isEditMode || (!minimal && canManageDashboard);
 
+    // Headings are edited in place, and only while the dashboard is being edited:
+    // a view-mode edit saves and reloads the whole dashboard
+    const hasContentModal =
+        canEditTileContent && tile.type !== DashboardTileTypes.HEADING;
+
     const hasMenuContent =
-        canEditTileContent || !!extraMenuItems || canCopyTileLink;
+        hasContentModal || isEditMode || !!extraMenuItems || canCopyTileLink;
     const isVerified = verification !== null && verification !== undefined;
     const hasHeaderContent =
         hasMenuContent || isVerified || hasNonMenuHeaderContent || canViewChart;
@@ -213,12 +241,12 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                     Copy link to tile
                 </Menu.Item>
             )}
-            {canCopyTileLink && (!!extraMenuItems || canEditTileContent) && (
+            {canCopyTileLink && (!!extraMenuItems || hasContentModal) && (
                 <Menu.Divider />
             )}
             {extraMenuItems}
-            {canEditTileContent && extraMenuItems && <Menu.Divider />}
-            {canEditTileContent && (
+            {hasContentModal && extraMenuItems && <Menu.Divider />}
+            {hasContentModal && (
                 <Box>
                     <Menu.Item
                         leftSection={<MantineIcon icon={IconEdit} />}
@@ -264,7 +292,14 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
         </>
     );
     const useCompactActions = isPhoneLayout && mobileMenuItems !== undefined;
-    const headerActions = useCompactActions ? (
+    const headerActions = focusedActions ? (
+        <FloatingActionsPill
+            visible
+            className={clsx('non-draggable', styles.tileTooltip)}
+        >
+            {focusedActions}
+        </FloatingActionsPill>
+    ) : useCompactActions ? (
         <FloatingActionsPill
             visible
             className={clsx('non-draggable', styles.tileTooltip)}
@@ -389,8 +424,12 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
     ) : null;
 
     return (
-        <div ref={containerRef} className={styles.tileWrapper}>
-            {containerHovered && isEditMode && !minimal && (
+        <Box
+            ref={containerRef}
+            className={styles.tileWrapper}
+            {...pointerHandlers}
+        >
+            {containerHovered && isEditMode && !minimal && !focusedActions && (
                 <Paper
                     className={styles.dragHandleIcon}
                     pos="absolute"
@@ -404,7 +443,7 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                 </Paper>
             )}
 
-            {isSelected && (
+            {isSelected && !focusedActions && (
                 <TileSelectionToolbar
                     tileUuid={tile.uuid}
                     width={tile.w}
@@ -454,6 +493,11 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                 data-with-edit-mode={isEditMode}
                 data-selected={isSelected || undefined}
                 data-has-error={hasError}
+                data-inline-editable={
+                    (isEditMode && tile.type === DashboardTileTypes.HEADING) ||
+                    undefined
+                }
+                data-content-focused={focusedActions ? true : undefined}
                 data-with-shadow={!isEditMode && !transparent}
                 h="100%"
                 p={transparent ? 0 : 'md'}
@@ -507,6 +551,7 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                         ) : (
                             <Tooltip
                                 disabled={!description}
+                                opened={descriptionOpened}
                                 label={
                                     <Text
                                         className={styles.description}
@@ -518,8 +563,7 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                                 position="top-start"
                                 maw={400}
                             >
-                                {isEditMode ||
-                                tile.type === DashboardTileTypes.MARKDOWN ? (
+                                {!isTitleLink ? (
                                     <Text
                                         className={styles.tileTitle}
                                         data-hidden={hideTitle}
@@ -533,13 +577,11 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                                         className={styles.tileTitle}
                                         data-hidden={hideTitle}
                                         data-hovered={titleHovered}
+                                        data-follows-aim={
+                                            followsTitleAim || undefined
+                                        }
+                                        ref={titleRef}
                                         href={titleHref}
-                                        onMouseEnter={() =>
-                                            setTitleHovered(true)
-                                        }
-                                        onMouseLeave={() =>
-                                            setTitleHovered(false)
-                                        }
                                         target="_blank"
                                     >
                                         {title}
@@ -569,7 +611,10 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                     flex="1"
                     align={
                         tile.type === DashboardTileTypes.HEADING
-                            ? 'center'
+                            ? HEADING_FLEX_ALIGN[
+                                  tile.properties.verticalAlign ??
+                                      DEFAULT_DASHBOARD_HEADING_VERTICAL_ALIGN
+                              ]
                             : undefined
                     }
                     onMouseEnter={
@@ -645,7 +690,7 @@ const TileBase = <T extends Dashboard['tiles'][number]>({
                     onClose={() => setIsMovingTabs(false)}
                 />
             </Card>
-        </div>
+        </Box>
     );
 };
 

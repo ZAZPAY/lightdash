@@ -232,6 +232,11 @@ import {
     toolGrepFieldsOutputSchema,
 } from './toolGrepFieldsArgs';
 import {
+    TOOL_GREP_WAREHOUSE_COLUMNS_DESCRIPTION,
+    toolGrepWarehouseColumnsArgsSchema,
+    toolGrepWarehouseColumnsOutputSchema,
+} from './toolGrepWarehouseColumnsArgs';
+import {
     MCP_TOOL_ITERATE_CUSTOM_CHART_TYPE_DESCRIPTION,
     mcpIterateCustomChartTypeArgsSchema,
 } from './toolIterateCustomChartTypeArgs';
@@ -377,6 +382,8 @@ import {
 import {
     TOOL_PROPOSE_SEMANTIC_LAYER_CHANGE_DESCRIPTION,
     TOOL_READ_SEMANTIC_MODEL_DESCRIPTION,
+    toolListChangesArgsSchema,
+    toolListChangesOutputSchema,
     toolProposeSemanticLayerChangeArgsSchema,
     toolProposeSemanticLayerChangeOutputSchema,
     toolReadSemanticModelArgsSchema,
@@ -839,7 +846,7 @@ export const renderChartToolDefinition: ToolDefinitionWithMcpOutput<
     },
 });
 
-/** @deprecated Legacy CSV-only metric query tool. */
+/** Metric query that returns CSV only, for agents that check numbers and show no charts. */
 export const runMetricQueryToolDefinition: ToolDefinitionWithoutMcpOutput<
     'runMetricQuery',
     typeof toolRunMetricQueryArgsSchema,
@@ -1328,6 +1335,21 @@ export const proposeSemanticLayerChangeToolDefinition: ToolDefinitionWithoutMcpO
     agent: { outputSchema: toolProposeSemanticLayerChangeOutputSchema },
 });
 
+export const listChangesToolDefinition: ToolDefinitionWithoutMcpOutput<
+    'listChanges',
+    typeof toolListChangesArgsSchema,
+    typeof toolListChangesArgsSchema,
+    typeof toolListChangesOutputSchema
+> = defineTool({
+    name: 'listChanges',
+    title: 'List changes',
+    description:
+        'List your open changes in this project, the current checkout and the native models drafted in each change.',
+    availability: ['agent'],
+    inputSchema: toolListChangesArgsSchema,
+    agent: { outputSchema: toolListChangesOutputSchema },
+});
+
 export const readSemanticModelToolDefinition: ToolDefinitionWithoutMcpOutput<
     'readSemanticModel',
     typeof toolReadSemanticModelArgsSchema,
@@ -1452,6 +1474,20 @@ export const listWarehouseTablesToolDefinition: ToolDefinitionWithoutMcpOutput<
     availability: ['agent'],
     inputSchema: toolListWarehouseTablesArgsSchema,
     agent: { outputSchema: toolListWarehouseTablesOutputSchema },
+});
+
+export const grepWarehouseColumnsToolDefinition: ToolDefinitionWithoutMcpOutput<
+    'grepWarehouseColumns',
+    typeof toolGrepWarehouseColumnsArgsSchema,
+    typeof toolGrepWarehouseColumnsArgsSchema,
+    typeof toolGrepWarehouseColumnsOutputSchema
+> = defineTool({
+    name: 'grepWarehouseColumns',
+    title: 'Search warehouse columns',
+    description: TOOL_GREP_WAREHOUSE_COLUMNS_DESCRIPTION,
+    availability: ['agent'],
+    inputSchema: toolGrepWarehouseColumnsArgsSchema,
+    agent: { outputSchema: toolGrepWarehouseColumnsOutputSchema },
 });
 
 export const describeWarehouseTableToolDefinition: ToolDefinitionWithoutMcpOutput<
@@ -2028,6 +2064,7 @@ type AgentToolDefinitionsByName = {
     editDbtProject: typeof editDbtProjectToolDefinition;
     editProjectContext: typeof editProjectContextToolDefinition;
     proposeSemanticLayerChange: typeof proposeSemanticLayerChangeToolDefinition;
+    listChanges: typeof listChangesToolDefinition;
     readSemanticModel: typeof readSemanticModelToolDefinition;
     syncDbtProject: typeof syncDbtProjectToolDefinition;
     exploreRepo: typeof exploreRepoToolDefinition;
@@ -2035,9 +2072,11 @@ type AgentToolDefinitionsByName = {
     listWorkstreams: typeof listWorkstreamsToolDefinition;
     closePullRequest: typeof closePullRequestToolDefinition;
     getPullRequestDiff: typeof getPullRequestDiffToolDefinition;
+    runMetricQuery: typeof runMetricQueryToolDefinition;
     runSavedChart: typeof runSavedChartToolDefinition;
     listWarehouseTables: typeof listWarehouseTablesToolDefinition;
     describeWarehouseTable: typeof describeWarehouseTableToolDefinition;
+    grepWarehouseColumns: typeof grepWarehouseColumnsToolDefinition;
     listKnowledgeDocuments: typeof listKnowledgeDocumentsToolDefinition;
     getKnowledgeDocumentContent: typeof getKnowledgeDocumentContentToolDefinition;
     readPinnedThread: typeof readPinnedThreadToolDefinition;
@@ -2091,6 +2130,7 @@ export const agentToolDefinitionsByName: AgentToolDefinitionsByName = {
     editDbtProject: editDbtProjectToolDefinition,
     editProjectContext: editProjectContextToolDefinition,
     proposeSemanticLayerChange: proposeSemanticLayerChangeToolDefinition,
+    listChanges: listChangesToolDefinition,
     readSemanticModel: readSemanticModelToolDefinition,
     syncDbtProject: syncDbtProjectToolDefinition,
     exploreRepo: exploreRepoToolDefinition,
@@ -2098,9 +2138,11 @@ export const agentToolDefinitionsByName: AgentToolDefinitionsByName = {
     listWorkstreams: listWorkstreamsToolDefinition,
     closePullRequest: closePullRequestToolDefinition,
     getPullRequestDiff: getPullRequestDiffToolDefinition,
+    runMetricQuery: runMetricQueryToolDefinition,
     runSavedChart: runSavedChartToolDefinition,
     listWarehouseTables: listWarehouseTablesToolDefinition,
     describeWarehouseTable: describeWarehouseTableToolDefinition,
+    grepWarehouseColumns: grepWarehouseColumnsToolDefinition,
     listKnowledgeDocuments: listKnowledgeDocumentsToolDefinition,
     getKnowledgeDocumentContent: getKnowledgeDocumentContentToolDefinition,
     readPinnedThread: readPinnedThreadToolDefinition,
@@ -2161,6 +2203,7 @@ export const builtInToolDefinitions: readonly ToolDefinitionInstance[] = [
     editDbtProjectToolDefinition,
     editProjectContextToolDefinition,
     proposeSemanticLayerChangeToolDefinition,
+    listChangesToolDefinition,
     readSemanticModelToolDefinition,
     syncDbtProjectToolDefinition,
     exploreRepoToolDefinition,
@@ -2168,9 +2211,11 @@ export const builtInToolDefinitions: readonly ToolDefinitionInstance[] = [
     listWorkstreamsToolDefinition,
     closePullRequestToolDefinition,
     getPullRequestDiffToolDefinition,
+    runMetricQueryToolDefinition,
     runSavedChartToolDefinition,
     listWarehouseTablesToolDefinition,
     describeWarehouseTableToolDefinition,
+    grepWarehouseColumnsToolDefinition,
     listKnowledgeDocumentsToolDefinition,
     getKnowledgeDocumentContentToolDefinition,
     readPinnedThreadToolDefinition,

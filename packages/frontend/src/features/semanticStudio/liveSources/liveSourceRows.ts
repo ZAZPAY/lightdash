@@ -22,7 +22,8 @@ export type LiveSourceUsage = {
     /** Bytes read from the integration, in words, such as 361 KB. */
     dataRead: string;
     apiCalls: string;
-    cacheHits: string;
+    /** The cache hits with their noun, such as 1 hit; null until usage loads. */
+    cacheHitsLabel: string | null;
     /** Null until the integration has been called. */
     medianLatency: string | null;
 };
@@ -43,16 +44,20 @@ export const isLiveSourceConnection = (
 const LOADING_USAGE: LiveSourceUsage = {
     dataRead: '—',
     apiCalls: '—',
-    cacheHits: '—',
+    cacheHitsLabel: null,
     medianLatency: null,
 };
+
+/** A count of cache hits in words: "1 hit", "1,204 hits". */
+export const formatCacheHits = (count: number): string =>
+    `${count.toLocaleString()} ${count === 1 ? 'hit' : 'hits'}`;
 
 const formatLiveSourceUsage = (
     usage: ExternalConnectionApiUsage | undefined,
 ): LiveSourceUsage => ({
     dataRead: formatEstimatedBytes(usage?.responseBytes ?? 0),
     apiCalls: (usage?.apiCalls ?? 0).toLocaleString(),
-    cacheHits: (usage?.cacheHits ?? 0).toLocaleString(),
+    cacheHitsLabel: formatCacheHits(usage?.cacheHits ?? 0),
     medianLatency:
         usage && usage.medianDurationMs !== null
             ? formatDuration(usage.medianDurationMs)

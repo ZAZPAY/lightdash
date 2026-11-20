@@ -64,6 +64,12 @@ export enum FeatureFlags {
     DashboardEditErgonomics = 'dashboard-edit-ergonomics',
 
     /**
+     * Wide result tables mount only the columns in view. Frontend only; off
+     * by default; organization scope. Temporary: remove once it is the default.
+     */
+    TableColumnVirtualization = 'table-column-virtualization',
+
+    /**
      * Data apps availability, computed rather than rolled out: on for any org
      * with AI (the AI copilot flag or an AI trial) on an instance with a
      * configured sandbox runtime. Overrides and the flag default are ignored
@@ -73,6 +79,20 @@ export enum FeatureFlags {
      * is available with a valid licence and a configured sandbox provider.
      */
     EnableDataApps = 'enable-data-apps',
+
+    /**
+     * Voice Design in the data app builder: the user draws on the preview
+     * while talking, and the marked-up screenshots and what they said land
+     * in the prompt box. Off by default; per user or organization.
+     */
+    DataAppCapture = 'data-app-capture',
+
+    /**
+     * Voice Design on dashboards in view mode: layout changes the user asks
+     * for are applied as an unsaved preview, and questions or other changes
+     * go to an AI agent thread. Off by default; per user or organization.
+     */
+    DashboardCapture = 'dashboard-capture',
 
     /**
      * AI access (in-app agent, Slack agent, MCP) skips the results cache,
@@ -197,6 +217,13 @@ export enum FeatureFlags {
     SemanticStudioEditing = 'semantic-studio-editing',
 
     /**
+     * Undo and redo for the chart being built in the Explorer: the header
+     * buttons and their keyboard shortcuts. Off by default; resolves per user
+     * or organization. It gates the browser only, there is no backend action.
+     */
+    ExplorerUndoRedo = 'explorer-undo-redo',
+
+    /**
      * Configurable retention for AI agent threads. Off by default; enabled
      * per-org on demand for enterprise customers.
      */
@@ -226,6 +253,8 @@ export enum FeatureFlags {
      * experiment, off by default.
      */
     AiAgentBattleMode = 'ai-agent-battle-mode',
+    /** Browser chat images, off by default; requires compatible readers and durable storage before enablement. */
+    AiThreadImages = 'ai-thread-images',
     /**
      * Slack agent answers send eligible bar/line charts as native charts. Off by default; standard
      * resolver for the prompt author: ENV enable/disable lists, then user → org override → default.
@@ -272,6 +301,12 @@ export enum FeatureFlags {
      * Only enable on instances whose pods run as their own Google service account.
      */
     BigqueryWorkloadIdentityAuth = 'bigquery-workload-identity-auth',
+    /**
+     * Organization-scoped, off by default: "Sign in with Google" for BigQuery
+     * also requests drive.readonly, so Google Sheets-backed tables can be queried.
+     * Restricted scope: only enable once the instance's OAuth app is verified for it.
+     */
+    BigqueryOAuthDriveAccess = 'bigquery-oauth-drive-access',
     /**
      * Organization-scoped: org admins can bring their own AI provider keys,
      * restrict model visibility, and route those keys through a custom base

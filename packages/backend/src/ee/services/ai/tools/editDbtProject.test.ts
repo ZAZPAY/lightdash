@@ -1,4 +1,7 @@
-import { toolEditDbtProjectOutputSchema } from '@lightdash/common';
+import {
+    toolEditDbtProjectMetadataSchema,
+    toolEditDbtProjectOutputSchema,
+} from '@lightdash/common';
 import { getEditDbtProject } from './editDbtProject';
 
 type EditDbtProjectTool = ReturnType<typeof getEditDbtProject>;
@@ -9,6 +12,7 @@ const executeEditDbtProject = async (
         prompt: string;
         prUrl: string | null;
         startNewPullRequest: boolean | null;
+        requestedBy: 'user_asked' | 'offer_accepted' | 'agent_initiated';
         script: string | null;
     }> = {},
 ) => {
@@ -18,6 +22,7 @@ const executeEditDbtProject = async (
             prompt: 'fix the descriptions',
             prUrl: null,
             startNewPullRequest: false,
+            requestedBy: 'user_asked',
             ...args,
         },
         {
@@ -33,6 +38,42 @@ const executeEditDbtProject = async (
 };
 
 describe('getEditDbtProject', () => {
+    it('refuses an agent-initiated change without starting a run', async () => {
+        const editDbtProject = vi.fn();
+
+        const output = await executeEditDbtProject(
+            getEditDbtProject({ editDbtProject, acceptsScript: false }),
+            { requestedBy: 'agent_initiated' },
+        );
+
+        expect(editDbtProject).not.toHaveBeenCalled();
+        expect(output.metadata).toEqual({
+            status: 'error',
+            errorCode: 'unknown',
+        });
+        expect(output.result).toContain('No pull request was opened');
+        expect(output.result).toContain('offer_accepted');
+    });
+
+    it.each(['user_asked', 'offer_accepted'] as const)(
+        'starts a run when the change is %s',
+        async (requestedBy) => {
+            const editDbtProject = vi.fn().mockResolvedValue({
+                status: 'started',
+                inSandbox: false,
+                aiWritebackRunUuid: 'run-1',
+            });
+
+            const output = await executeEditDbtProject(
+                getEditDbtProject({ editDbtProject, acceptsScript: false }),
+                { requestedBy },
+            );
+
+            expect(editDbtProject).toHaveBeenCalledTimes(1);
+            expect(output.metadata.status).toBe('pending');
+        },
+    );
+
     it('forwards startNewPullRequest: true to the editDbtProject dependency', async () => {
         const editDbtProject = vi.fn().mockResolvedValue({
             status: 'started',
@@ -92,6 +133,7 @@ describe('getEditDbtProject', () => {
             status: 'started',
             inSandbox: true,
             aiWritebackRunUuid: 'run-1',
+            diffs: null,
         });
 
         const output = await executeEditDbtProject(
@@ -101,9 +143,10 @@ describe('getEditDbtProject', () => {
         expect(output.metadata).toEqual({
             status: 'pending',
             aiWritebackRunUuid: 'run-1',
+            diffs: null,
         });
         expect(output.result).toBe(
-            'Started the change; the pull request opens in the background. Acknowledge it briefly.',
+            'Started the change; the pull request opens in the background. Acknowledge it briefly. Until it opens, listWorkstreams shows it as a change still being opened.',
         );
         expect(output.result).not.toContain('run-1');
     });
@@ -194,6 +237,40 @@ describe('getEditDbtProject', () => {
         expect(toolEditDbtProjectOutputSchema.safeParse(output).success).toBe(
             true,
         );
+    });
+
+    it('carries what a script save writes on the pending result, and reads rows from before it did', async () => {
+        const diffs = [
+            '--- a/models/a.yml\n+++ b/models/a.yml\n@@ -1,1 +1,1 @@\n-a\n+b\n',
+        ];
+        const output = await executeEditDbtProject(
+            getEditDbtProject({
+                editDbtProject: vi.fn().mockResolvedValue({
+                    status: 'started',
+                    inSandbox: false,
+                    aiWritebackRunUuid: 'run-1',
+                    diffs,
+                }),
+                acceptsScript: true,
+            }),
+            { script: 'yaml.set()' },
+        );
+
+        expect(output.metadata).toEqual({
+            status: 'pending',
+            aiWritebackRunUuid: 'run-1',
+            diffs,
+        });
+        expect(output.result).not.toContain('+b');
+        expect(toolEditDbtProjectOutputSchema.safeParse(output).success).toBe(
+            true,
+        );
+        expect(
+            toolEditDbtProjectMetadataSchema.safeParse({
+                status: 'pending',
+                aiWritebackRunUuid: 'run-1',
+            }).success,
+        ).toBe(true);
     });
 
     it('says a save that falls back to the sandbox takes minutes', async () => {

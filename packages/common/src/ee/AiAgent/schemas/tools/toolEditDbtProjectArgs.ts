@@ -7,7 +7,7 @@ export const AI_WRITEBACK_PENDING_GRACE_MS = 5 * 60 * 1000;
 export const TOOL_EDIT_DBT_PROJECT_DESCRIPTION = [
     "Open or update a pull request that changes this project's semantic layer (dbt or Lightdash YAML): it edits the repository in an isolated sandbox, validates the semantic layer and opens the pull request on your behalf, so report it as your own work.",
     'Call it, in the same turn you decide to make the change, when the user asks for one in the repository (add or rename a metric, edit a dimension or model, update YAML metadata) or accepts one you offered. It is not for questions about data or code, nor for changes that can be made inside Lightdash, such as to saved charts and dashboards.',
-    'It returns status "pending" once the run starts, and the pull request opens in the background: do not call it again to check on it.',
+    'It returns status "pending" once the run starts, and the pull request opens in the background a few minutes later: do not call it again to check on it. Until it opens, listWorkstreams shows the change as still being opened.',
 ].join(' ');
 
 export const toolEditDbtProjectArgsSchema = z.object({
@@ -27,6 +27,11 @@ export const toolEditDbtProjectArgsSchema = z.object({
         .nullable()
         .describe(
             'true opens a new pull request in this conversation for a change unrelated to the open one; null continues the most recent pull request. Ignored when prUrl is set.',
+        ),
+    requestedBy: z
+        .enum(['user_asked', 'offer_accepted', 'agent_initiated'])
+        .describe(
+            'Who asked for this repository change: user_asked when the user asked for it in the repository, offer_accepted when the user said yes to a change you offered, agent_initiated when you decided it alone. An agent_initiated change is not opened: the tool tells you to make what the user asked for with the content tools and offer the repository change instead.',
         ),
 });
 
@@ -48,7 +53,35 @@ export const toolEditDbtProjectCodeModeArgsSchema =
                     'With a script, start prompt with a one-line summary under 72 characters, like a commit subject: it becomes the pull request title.',
                 ].join(' '),
             ),
+        note: z
+            .string()
+            .nullable()
+            .describe(
+                'The one thing about this change most worth checking, under 15 words, shown on its card; null when nothing is.',
+            ),
+        options: z
+            .array(z.string().trim().min(1))
+            .max(2)
+            .describe(
+                'At most two things the person might ask for next instead, each written as they would say it in under 8 words. Each shows as a button that sends it. Empty for none.',
+            ),
     });
+
+/** The line kept as the reply when a Studio save ends its turn on the card with nothing written. */
+export const DBT_SAVE_CARD_REPLY = 'Saved the change to the draft.';
+
+/** The note and offers a Studio save was called with, read back from its stored arguments; none on a call made before it carried them. */
+export const getEditDbtProjectCardExtras = (
+    toolArgs: unknown,
+): { note: string | null; options: string[] } => {
+    const parsed = z
+        .object({
+            note: z.string().nullable().default(null),
+            options: z.array(z.string()).default([]),
+        })
+        .safeParse(toolArgs);
+    return parsed.success ? parsed.data : { note: null, options: [] };
+};
 
 export const toolEditDbtProjectStructuredContentSchema = z.object({
     status: z
@@ -62,6 +95,8 @@ export const toolEditDbtProjectMetadataSchema = z.discriminatedUnion('status', [
     z.object({
         status: z.literal('pending'),
         aiWritebackRunUuid: z.string(),
+        // What a script save writes, one unified diff per file, shown while it runs. Nullish: sandbox saves and rows from before this field have none.
+        diffs: z.array(z.string()).nullish(),
     }),
     z.object({
         status: z.literal('success'),
