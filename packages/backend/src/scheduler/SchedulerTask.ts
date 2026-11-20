@@ -8,6 +8,7 @@ import {
     assertUnreachable,
     BackfillDefaultUserSpacesPayload,
     canEmbedViewerResolveTileParameters,
+    ChartType,
     CompileProjectPayload,
     convertReplaceableFieldMatchMapToReplaceCustomFields,
     CreateProject,
@@ -132,6 +133,7 @@ import {
     ValidateProjectPayload,
     VizColumn,
     WarehouseConnectionError,
+    XlsxExportContent,
     type Account as AccountType,
     type AgentConnectionTaskEffect,
     type AgentWorkMarker,
@@ -174,7 +176,7 @@ import {
     LightdashAnalytics,
     parseAnalyticsLimit,
 } from '../analytics/LightdashAnalytics';
-import { toSessionUser } from '../auth/account';
+import { fromSession, toSessionUser } from '../auth/account';
 import { type AgentConnectionGrantService } from '../auth/agentConnectionGrants/AgentConnectionGrantService';
 import EmailClient from '../clients/EmailClient/EmailClient';
 import { type FileStorageClient } from '../clients/FileStorage/FileStorageClient';
@@ -239,7 +241,10 @@ import {
     getDashboardTileParameterLayer,
     getEnabledParameterControls,
 } from '../services/ProjectService/parameters';
-import { ProjectService } from '../services/ProjectService/ProjectService';
+import {
+    ProjectService,
+    type IncrementalCompileResult,
+} from '../services/ProjectService/ProjectService';
 import { RenameService } from '../services/RenameService/RenameService';
 import { SchedulerService } from '../services/SchedulerService/SchedulerService';
 import {
@@ -1902,6 +1907,24 @@ export default class SchedulerTask {
                             };
                         });
 
+                        const exportChartsAsImages =
+                            format === SchedulerFormat.XLSX &&
+                            csvOptions?.xlsxContent ===
+                                XlsxExportContent.CHART_IMAGE;
+                        // Each image is a headless-browser render; run them one
+                        // at a time so a large dashboard cannot swamp the browser.
+                        let chartImageQueue: Promise<void> = Promise.resolve();
+                        const runChartImageExport = <T>(
+                            task: () => Promise<T>,
+                        ): Promise<T> => {
+                            const result = chartImageQueue.then(task);
+                            chartImageQueue = result.then(
+                                () => undefined,
+                                () => undefined,
+                            );
+                            return result;
+                        };
+
                         const downloadChartTileResults = async ({
                             chartUuid,
                             tileUuid,
@@ -1914,6 +1937,9 @@ export default class SchedulerTask {
                                 await this.schedulerService.savedChartModel.get(
                                     chartUuid,
                                 );
+                            const exportAsImage =
+                                exportChartsAsImages &&
+                                chart.chartConfig.type !== ChartType.TABLE;
                             const {
                                 pivotConfig: downloadPivotConfig,
                                 exportPivotedData: effectiveExportPivotedData,
@@ -1949,8 +1975,8 @@ export default class SchedulerTask {
                                         pivotResults: shouldPivotResults,
                                     },
                                 );
-                            const downloadResult =
-                                await this.asyncQueryService.downloadSyncQueryResults(
+                            const downloadTileResults = () =>
+                                this.asyncQueryService.downloadSyncQueryResults(
                                     {
                                         account,
                                         accessMode: downloadAccessMode,
@@ -1984,10 +2010,16 @@ export default class SchedulerTask {
                                                 chart.chartConfig.config,
                                             ),
                                         expirationSecondsOverride,
+                                        xlsxContent: exportAsImage
+                                            ? XlsxExportContent.CHART_IMAGE
+                                            : undefined,
                                     },
                                     this.schedulerPollingOptions,
                                     dashboardUuid,
                                 );
+                            const downloadResult = exportAsImage
+                                ? await runChartImageExport(downloadTileResults)
+                                : await downloadTileResults();
                             return {
                                 chartName: chart.name,
                                 filename: chart.name,
@@ -2111,6 +2143,7 @@ export default class SchedulerTask {
                                         composerTileParameters?.excludedParameterKeys ??
                                         [],
                                     invalidateCache: !useCachedResults,
+                                    dateZoom: dateZoom ?? null,
                                     context:
                                         QueryExecutionContext.SCHEDULED_DELIVERY,
                                     download: {
@@ -3354,6 +3387,14 @@ export default class SchedulerTask {
                                       ),
                               }
                             : undefined,
+                        !account && payload.incremental === true
+                            ? () =>
+                                  this.compileIncrementally(
+                                      user,
+                                      payload.projectUuid,
+                                      payload.jobUuid,
+                                  )
+                            : undefined,
                     );
                     if (revalidate) await revalidate();
                     await this.schedulerService.logSchedulerJob({
@@ -3415,6 +3456,15 @@ export default class SchedulerTask {
         );
     }
 
+    // Only the commercial worker can patch a dbt manifest, so this one always runs the full compile.
+    protected async compileIncrementally(
+        _user: SessionUser,
+        _projectUuid: string,
+        _jobUuid: string,
+    ): Promise<IncrementalCompileResult | null> {
+        return null;
+    }
+
     // Files that could not be applied fail the step so the job details say why
     private async syncContentFromRepo(
         user: SessionUser,
@@ -3422,6 +3472,7 @@ export default class SchedulerTask {
     ): Promise<void> {
         const summary = await this.contentAsCodeWritebackService.pullFromGit(
             user,
+            fromSession(user),
             projectUuid,
         );
         if (summary.failures.length > 0) {
@@ -7113,6 +7164,7 @@ export default class SchedulerTask {
                                     parameters: {},
                                     excludedParameterKeys: [],
                                     invalidateCache: true,
+                                    dateZoom: dateZoom ?? null,
                                     context: QueryExecutionContext.CSV,
                                     download: {
                                         accessMode:
@@ -7203,6 +7255,7 @@ export default class SchedulerTask {
         parameters,
         excludedParameterKeys,
         invalidateCache,
+        dateZoom,
         context,
         download,
     }: {
@@ -7215,6 +7268,7 @@ export default class SchedulerTask {
         parameters: ParametersValuesMap;
         excludedParameterKeys: string[];
         invalidateCache: boolean;
+        dateZoom: DateZoom | null;
         context: ComposerChartRunContext;
         download: Pick<
             DownloadAsyncQueryResultsArgs,
@@ -7244,6 +7298,7 @@ export default class SchedulerTask {
                     parameters,
                     excludedParameterKeys,
                     invalidateCache,
+                    dateZoom,
                 },
                 context,
             )

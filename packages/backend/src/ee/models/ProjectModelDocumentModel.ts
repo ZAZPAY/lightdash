@@ -23,6 +23,8 @@ import {
 } from '../../database/entities/projectModelDraftImpacts';
 import { UserTableName } from '../../database/entities/users';
 import { AiPromptTableName } from '../database/entities/ai';
+import { SemanticStudioWorkspacesTableName } from '../database/entities/semanticStudioWorkspaces';
+import { lockStudioWorkspaceOwner } from './SemanticStudioWorkspaceModel';
 
 const MODEL_HISTORY_LIMIT = 50;
 const SETTLED_DRAFT_CHANGES_LIMIT = 100;
@@ -63,6 +65,15 @@ type DraftPerson = { projectUuid: string; userUuid: string };
 /** A person's draft is the one of their active Studio workspace; null when they have none. */
 export type DraftOwner = DraftPerson & { workspaceUuid: string | null };
 
+type NewDraftChange = DraftOwner & {
+    promptUuid: string | null;
+    models: SemanticLayerDraftModelInput[];
+    baseVersions: Record<string, number | null> | null;
+};
+
+/** One workspace's draft alone, without changes from before drafts had workspaces. */
+export type WorkspaceDraftOwner = DraftPerson & { workspaceUuid: string };
+
 export type DraftImpactCheck = {
     draftHash: string;
     status: DraftImpactCheckStatus;
@@ -96,26 +107,17 @@ export class ProjectModelDocumentModel {
         { projectUuid, userUuid, workspaceUuid }: DraftOwner,
     ) {
         const workspaceColumn = `${ProjectModelDraftChangesTableName}.workspace_uuid`;
-        return (
-            database(ProjectModelDraftChangesTableName)
-                // Changes from before drafts had workspaces belong to whichever workspace is active.
-                .where((builder) =>
-                    workspaceUuid === null
-                        ? builder.whereNull(workspaceColumn)
-                        : builder
-                              .whereNull(workspaceColumn)
-                              .orWhere(workspaceColumn, workspaceUuid),
-                )
-                .where(
-                    `${ProjectModelDraftChangesTableName}.project_uuid`,
-                    projectUuid,
-                )
-                .where(
-                    `${ProjectModelDraftChangesTableName}.created_by_user_uuid`,
-                    userUuid,
-                )
-                .where(`${ProjectModelDraftChangesTableName}.status`, 'draft')
-        );
+        return database(ProjectModelDraftChangesTableName)
+            .where(workspaceColumn, workspaceUuid)
+            .where(
+                `${ProjectModelDraftChangesTableName}.project_uuid`,
+                projectUuid,
+            )
+            .where(
+                `${ProjectModelDraftChangesTableName}.created_by_user_uuid`,
+                userUuid,
+            )
+            .where(`${ProjectModelDraftChangesTableName}.status`, 'draft');
     }
 
     async findDocuments(projectUuid: string): Promise<ProjectModelDocument[]> {
@@ -237,7 +239,23 @@ export class ProjectModelDocumentModel {
 
     /** A person's draft on a project, oldest first. */
     async findDraftChanges(owner: DraftOwner): Promise<StoredDraftChange[]> {
-        return ProjectModelDocumentModel.openDraftChanges(this.database, owner)
+        return ProjectModelDocumentModel.selectDraftChanges(
+            ProjectModelDocumentModel.openDraftChanges(this.database, owner),
+        );
+    }
+
+    async findWorkspaceDraftChanges({
+        projectUuid,
+        userUuid,
+        workspaceUuid,
+    }: WorkspaceDraftOwner): Promise<StoredDraftChange[]> {
+        return this.findDraftChanges({ projectUuid, userUuid, workspaceUuid });
+    }
+
+    private static selectDraftChanges(
+        query: ReturnType<typeof ProjectModelDocumentModel.openDraftChanges>,
+    ): Promise<StoredDraftChange[]> {
+        return query
             .leftJoin(
                 AiPromptTableName,
                 `${AiPromptTableName}.ai_prompt_uuid`,
@@ -528,6 +546,49 @@ export class ProjectModelDocumentModel {
         );
     }
 
+    /** A person's changes sent as pull requests that are still open, oldest first. */
+    async findInReviewDraftChanges(
+        projectUuid: string,
+        userUuid: string,
+    ): Promise<
+        { pullRequestUrl: string; models: SemanticLayerDraftModelInput[] }[]
+    > {
+        return this.database(ProjectModelDraftChangesTableName)
+            .innerJoin(
+                SemanticStudioWorkspacesTableName,
+                `${SemanticStudioWorkspacesTableName}.semantic_studio_workspace_uuid`,
+                `${ProjectModelDraftChangesTableName}.workspace_uuid`,
+            )
+            .select<
+                {
+                    pullRequestUrl: string;
+                    models: SemanticLayerDraftModelInput[];
+                }[]
+            >({
+                pullRequestUrl: `${ProjectModelDraftChangesTableName}.applied_pull_request_url`,
+                models: `${ProjectModelDraftChangesTableName}.models`,
+            })
+            .where(
+                `${ProjectModelDraftChangesTableName}.project_uuid`,
+                projectUuid,
+            )
+            .where(
+                `${ProjectModelDraftChangesTableName}.created_by_user_uuid`,
+                userUuid,
+            )
+            .where(`${ProjectModelDraftChangesTableName}.status`, 'applied')
+            .where(
+                `${SemanticStudioWorkspacesTableName}.pull_request_state`,
+                'open',
+            )
+            .whereRaw('?? = ??', [
+                `${SemanticStudioWorkspacesTableName}.pull_request_url`,
+                `${ProjectModelDraftChangesTableName}.applied_pull_request_url`,
+            ])
+            .orderBy(`${ProjectModelDraftChangesTableName}.created_at`, 'asc')
+            .limit(SETTLED_DRAFT_CHANGES_LIMIT);
+    }
+
     /** What became of a person's recent draft changes, newest first. */
     async findSettledDraftChanges(
         projectUuid: string,
@@ -545,12 +606,14 @@ export class ProjectModelDocumentModel {
                     status: SettledDraftChangeStatus;
                     pullRequestUrl: string | null;
                     revertedBy: string | null;
+                    models: SemanticLayerDraftModelInput[];
                 }[]
             >({
                 draftChangeUuid: `${ProjectModelDraftChangesTableName}.project_model_draft_change_uuid`,
                 status: `${ProjectModelDraftChangesTableName}.status`,
                 pullRequestUrl: `${ProjectModelDraftChangesTableName}.applied_pull_request_url`,
                 revertedBy: `${ProjectModelChangeSetsTableName}.reverted_by_change_set_uuid`,
+                models: `${ProjectModelDraftChangesTableName}.models`,
             })
             .where(
                 `${ProjectModelDraftChangesTableName}.project_uuid`,
@@ -564,28 +627,84 @@ export class ProjectModelDocumentModel {
             .orderBy(`${ProjectModelDraftChangesTableName}.created_at`, 'desc')
             .limit(SETTLED_DRAFT_CHANGES_LIMIT);
         return rows.map(
-            ({ draftChangeUuid, status, pullRequestUrl, revertedBy }) => ({
+            ({
+                draftChangeUuid,
+                status,
+                pullRequestUrl,
+                revertedBy,
+                models,
+            }) => ({
                 draftChangeUuid,
                 status: revertedBy ? 'undone' : status,
                 pullRequestUrl,
+                models: models.map(({ name }) => name),
             }),
         );
     }
 
-    async createDraftChange({
-        projectUuid,
-        userUuid,
-        workspaceUuid,
-        promptUuid,
-        models,
-        baseVersions,
-    }: DraftOwner & {
-        promptUuid: string | null;
-        models: SemanticLayerDraftModelInput[];
-        baseVersions: Record<string, number | null> | null;
-    }): Promise<string> {
+    async createCheckedOutDraftChange(
+        /** `changeName` names the change this starts when the person is on Live. */
+        input: NewDraftChange & { changeName: string },
+        organizationUuid: string,
+    ) {
+        return this.database.transaction(async (trx) => {
+            await lockStudioWorkspaceOwner(trx, input);
+            const active = await trx(SemanticStudioWorkspacesTableName)
+                .where({
+                    project_uuid: input.projectUuid,
+                    created_by_user_uuid: input.userUuid,
+                    is_active: true,
+                })
+                .forUpdate()
+                .first();
+            if (
+                (active?.semantic_studio_workspace_uuid ?? null) !==
+                input.workspaceUuid
+            ) {
+                throw new ModelDocumentsChangedError();
+            }
+            const workspace =
+                active ??
+                (
+                    await trx(SemanticStudioWorkspacesTableName)
+                        .insert({
+                            organization_uuid: organizationUuid,
+                            project_uuid: input.projectUuid,
+                            created_by_user_uuid: input.userUuid,
+                            ai_thread_uuid: null,
+                            name: input.changeName,
+                            is_active: true,
+                        })
+                        .returning(['semantic_studio_workspace_uuid', 'name'])
+                )[0];
+            const workspaceUuid = workspace.semantic_studio_workspace_uuid;
+            const draftChangeUuid = await this.createDraftChange(
+                { ...input, workspaceUuid },
+                trx,
+            );
+            return {
+                workspaceUuid,
+                draftChangeUuid,
+                startedChange: active
+                    ? null
+                    : { workspaceUuid, name: workspace.name },
+            };
+        });
+    }
+
+    async createDraftChange(
+        {
+            projectUuid,
+            userUuid,
+            workspaceUuid,
+            promptUuid,
+            models,
+            baseVersions,
+        }: NewDraftChange,
+        database: Knex = this.database,
+    ): Promise<string> {
         const [{ project_model_draft_change_uuid: draftChangeUuid }] =
-            await this.database(ProjectModelDraftChangesTableName)
+            await database(ProjectModelDraftChangesTableName)
                 .insert({
                     project_uuid: projectUuid,
                     created_by_user_uuid: userUuid,

@@ -68,6 +68,7 @@ import { GroupsService } from './GroupService';
 import { HeadlessBrowserService } from './HeadlessBrowserService';
 import { HealthService } from './HealthService/HealthService';
 import { InstanceBrandService } from './InstanceBrandService/InstanceBrandService';
+import { InviteRenewalAuthorization } from './InviteRenewalAuthorization';
 import { JiraAppService } from './JiraAppService/JiraAppService';
 import { LearnSandboxService } from './LearnSandboxService/LearnSandboxService';
 import { LicenseService } from './LicenseService/LicenseService';
@@ -835,6 +836,8 @@ export class ServiceRepository
                     oauthModel: this.models.getOauthModel(),
                     getUserService: () => this.getUserService(),
                     getProjectService: () => this.getProjectService(),
+                    getMobilePushNotificationService: () =>
+                        this.getMobilePushNotificationService(),
                     analytics: this.context.lightdashAnalytics,
                 }),
         );
@@ -1400,6 +1403,7 @@ export class ServiceRepository
                     refreshTokenRotation: this.models.getRefreshTokenRotation(),
                     aiAccessService: this.getAiAccessService(),
                     getDocumentService: () => this.getDocumentService(),
+                    getUnfurlService: () => this.getUnfurlService(),
                     getComposerChartService: () =>
                         this.getComposerChartService(),
                     lightdashConfig: this.context.lightdashConfig,
@@ -1807,6 +1811,16 @@ export class ServiceRepository
                     userLearnProgressModel:
                         this.models.getUserLearnProgressModel(),
                     rolesModel: this.models.getRolesModel(),
+                    inviteRenewalAuthorization: new InviteRenewalAuthorization({
+                        rolesModel: this.models.getRolesModel(),
+                        userModel: this.models.getUserModel(),
+                        projectModel: this.models.getProjectModel(),
+                        spacePermissionModel:
+                            this.models.getSpacePermissionModel(),
+                        spacePermissionService:
+                            this.getSpacePermissionService(),
+                        directAccessService: this.getDirectAccessService(),
+                    }),
                 }),
         );
     }
@@ -1979,6 +1993,9 @@ export class ServiceRepository
                         this.models.getWarehouseConnectionModel(),
                     appModel: this.models.getAppModel(),
                     getDocumentService: () => this.getDocumentService(),
+                    composerChartModel: this.models.getComposerChartModel(),
+                    getComposerChartService: () =>
+                        this.getComposerChartService(),
                     // Lazy accessor (not the instance) to promote embedded data
                     // apps during dashboard promotion. AppGenerateService depends
                     // on PromoteService, so resolving it eagerly here would cycle.
@@ -2403,6 +2420,7 @@ export class ServiceRepository
                     getStatus: () => ({ enabled: false, environments: [] }),
                     registerInstallation: async () => undefined,
                     revokeInstallation: async () => undefined,
+                    revokeInstallationsWithoutGrant: async () => undefined,
                     registerLiveActivity: async () => undefined,
                     revokeLiveActivity: async () => undefined,
                     enqueueThreadReconciliation: async () => undefined,

@@ -194,6 +194,7 @@ import {
     MergeQueryErrorKind,
     MergeQueryField,
     MergeQueryMetricSource,
+    mergeReservedDefinitions,
     mergeWarehouseCredentials,
     MetricQuery,
     MetricType,
@@ -292,6 +293,7 @@ import {
     validateMergeQuery,
     VizAggregationOptions,
     VizColumn,
+    WarehouseCatalog,
     WarehouseClient,
     WarehouseConnection,
     WarehouseConnectionError,
@@ -496,6 +498,7 @@ import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
 import { ExploreCompilationSummary } from '../../utils/ExploreCompilationSummary';
 import { inheritUpstreamSshTunnelPrivateKey } from '../../utils/inheritUpstreamSshTunnelPrivateKey';
 import { createComposeMergeQueryBuilder } from '../../utils/QueryBuilder/composeMergeSql';
+import { updateExploreWithDateZoom } from '../../utils/QueryBuilder/dateZoom';
 import { applyMergeTerminalWrapper } from '../../utils/QueryBuilder/MergeQueryBuilder';
 import { PivotQueryBuilder } from '../../utils/QueryBuilder/PivotQueryBuilder';
 import { QueryComposer } from '../../utils/QueryBuilder/QueryComposer';
@@ -680,7 +683,35 @@ const manifestWithCompilationSelection = (
     };
 };
 
+/** The same git connection, reading another branch. */
+const withGitBranch = (
+    connection: DbtProjectConfig,
+    branch: string,
+): DbtProjectConfig => {
+    switch (connection.type) {
+        case DbtProjectType.GITHUB:
+        case DbtProjectType.GITLAB:
+        case DbtProjectType.BITBUCKET:
+        case DbtProjectType.AZURE_DEVOPS:
+            return { ...connection, branch };
+        case DbtProjectType.DBT:
+        case DbtProjectType.DBT_CLOUD_IDE:
+        case DbtProjectType.NONE:
+        case DbtProjectType.MANIFEST:
+            throw new ParameterError(
+                'Only a project connected to a git repository can compile a branch',
+            );
+        default:
+            return assertUnreachable(connection, 'Unknown dbt connection');
+    }
+};
+
 const gzipAsync = promisify(gzip);
+
+// Reading columns table by table costs one warehouse request each.
+const MAX_TABLES_READ_ONE_BY_ONE = 500;
+
+type WarehouseTableRef = { database: string; schema: string; table: string };
 
 type TestProjectAdapterCredentials =
     | { kind: 'submitted_resolved'; credentials: CreateWarehouseCredentials }
@@ -845,6 +876,13 @@ type ResolvedCompileAdapter = {
     failedDbtSourceUuids?: string[];
     exploreNaming?: ExploreNaming;
 };
+/** What a compile that saved only the explores a change reaches reports to its job. */
+export type IncrementalCompileResult = {
+    indexCatalogJobUuid: string;
+    errorCount: number;
+    total: number;
+};
+
 type SaveCompiledExploresArgs = {
     userUuid: string;
     projectUuid: string;
@@ -7164,6 +7202,13 @@ export class ProjectService
                                 projectUuid,
                                 user.organizationUuid,
                                 compileAdapter,
+                                ProjectService.isWholeCacheCompile({
+                                    multiConnection,
+                                    stagedMergedManifest,
+                                    exploreNaming,
+                                })
+                                    ? job.jobUuid
+                                    : null,
                             );
                             timings.compileExplores.end = performance.now();
                             timings.getConfig.start = performance.now();
@@ -8352,15 +8397,24 @@ export class ProjectService
             dbtTargetPolicy: DbtTargetPolicy;
         }) => Promise<T>,
         manifestFetchAdapters: ProjectAdapter[],
+        /** Compiles this branch of the project's repository instead, leaving the live project as it is. */
+        branch: string | null = null,
     ): Promise<T> {
-        const {
-            project,
-            dbtConnection,
-            warehouseCredentials,
-            cachedWarehouse,
-            dbtVersionOption,
-            dbtPartialParse,
-        } = await this.prepareCompileAdapter(projectUuid, user);
+        const prepared = await this.prepareCompileAdapter(projectUuid, user);
+        const { project, warehouseCredentials, dbtVersionOption } = prepared;
+        const dbtConnection =
+            branch === null
+                ? prepared.dbtConnection
+                : withGitBranch(prepared.dbtConnection, branch);
+        const dbtPartialParse = branch === null && prepared.dbtPartialParse;
+        // Columns a branch adds stay out of the live project's warehouse cache.
+        const cachedWarehouse: CachedWarehouse =
+            branch === null
+                ? prepared.cachedWarehouse
+                : {
+                      ...prepared.cachedWarehouse,
+                      onWarehouseCatalogChange: async () => {},
+                  };
         const dbtTargetPolicy = await this.getDbtTargetPolicy(
             project.organizationUuid,
         );
@@ -8420,6 +8474,24 @@ export class ProjectService
                     );
                 }
             },
+        );
+    }
+
+    /**
+     * Compiles a branch of a git-connected project's repository the way a refresh
+     * compiles its own branch, without saving anything; only the primary dbt source.
+     */
+    async compileExploresFromBranch(
+        user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
+        projectUuid: string,
+        branch: string,
+    ): Promise<(Explore | ExploreError)[]> {
+        return this.withCompileAdapter(
+            projectUuid,
+            user,
+            ({ adapter }) => adapter.compileAllExplores(undefined, false, true),
+            [],
+            branch,
         );
     }
 
@@ -8707,11 +8779,26 @@ export class ProjectService
         }
     }
 
+    /** Whether the explores a compile saves are exactly what its one dbt manifest compiles to, the whole cache over. */
+    private static isWholeCacheCompile(compile: {
+        multiConnection: MultiConnectionCompilation | null;
+        stagedMergedManifest: Buffer | undefined;
+        exploreNaming: ExploreNaming | undefined;
+    }): boolean {
+        return (
+            compile.multiConnection === null &&
+            compile.stagedMergedManifest === undefined &&
+            compile.exploreNaming === undefined &&
+            !agentExecutionContext.getStore()?.agentConnectionExecution
+        );
+    }
+
     /** Keeps what a single-source dbt compile parsed, so Semantic Studio's code mode can change its YAML without running dbt. */
     private async saveCompiledDbtManifestBestEffort(
         projectUuid: string,
         organizationUuid: string,
         adapter: ProjectAdapter,
+        exploresJobUuid: string | null,
     ): Promise<void> {
         if (
             !(adapter instanceof DbtGitProjectAdapter) ||
@@ -8731,6 +8818,7 @@ export class ProjectService
             await saveCompiledDbtManifest(this.fileStorageClient, projectUuid, {
                 commitSha,
                 manifest: projectMergedManifest(adapter.lastManifest),
+                exploresJobUuid,
             });
         } catch (error) {
             this.logger.warn(
@@ -9619,9 +9707,9 @@ export class ProjectService
     }
 
     /**
-     * Custom SQL already saved on a chart `account` can view, in the same project
-     * and explore. Matches any version of a chart that is not deleted; a
-     * dashboard-owned chart counts through its dashboard's space.
+     * Custom SQL on the current version of a chart `account` can view, in the
+     * same project and explore. A dashboard-owned chart counts through its
+     * dashboard's space.
      */
     private async findViewableCustomSqlProvenance({
         account,
@@ -9789,7 +9877,7 @@ export class ProjectService
      * with hand-authored SQL is gated like a custom SQL dimension.
      *
      * A caller who lacks the scope may still run SQL that is byte-identical to SQL
-     * already persisted in a saved chart they can view (same project + explore), so
+     * on the current version of a saved chart they can view (same project + explore), so
      * editors can re-run and filter existing saved charts in Explore edit mode
      * without gaining authoring rights. That general exemption is only granted to
      * registered users. Embedded Explore has a narrower path: it may use only the
@@ -10063,6 +10151,7 @@ export class ProjectService
             userAttributeOverrides?: UserAttributeValueMap;
             /** Saved chart whose custom SQL an embed viewer may compile */
             customSqlProvenanceChartUuid?: UUID;
+            dateZoom?: DateZoom;
         } & ({ exploreName: string } | { explore: Explore }),
     ) {
         const {
@@ -10113,6 +10202,10 @@ export class ProjectService
             case 'composer':
                 // The author's custom SQL rights were checked at save
                 authority.binding.assertExecution(account, projectUuid);
+                break;
+            case 'mergedChart':
+                // Each source's SQL was checked at save, as a plain chart's is
+                authority.run.assertExecution(account, projectUuid);
                 break;
             case 'document':
                 authority.context.assertMetricQuery(
@@ -10214,7 +10307,7 @@ export class ProjectService
                 timezone,
                 availableParameterDefinitions,
                 parameters: combinedParameters,
-                dateZoom: undefined,
+                dateZoom: args.dateZoom,
                 pivotDimensions,
                 pivotItemsMap: undefined,
                 continueOnError: true, // Return SQL even with compilation errors for debugging
@@ -10397,6 +10490,32 @@ export class ProjectService
             .map((calculation) => calculation.name);
     }
 
+    /** The explore with one dimension re-grained under its own name, as a dashboard tile's metric query is zoomed. */
+    private async getDateZoomedExplore(
+        projectUuid: string,
+        explore: Explore,
+        metricQuery: MetricQuery,
+        dateZoom: DateZoom,
+    ): Promise<Explore> {
+        const settings = await this.getWarehouseSqlBuilderSettings(
+            projectUuid,
+            { kind: 'explore', exploreName: explore.name },
+        );
+        // As QueryComposer: the reserved parameters, such as date_zoom, are available too
+        const availableParameters = Object.keys(
+            mergeReservedDefinitions(
+                await this.getAvailableParameters(projectUuid, explore),
+            ),
+        );
+        return updateExploreWithDateZoom(
+            explore,
+            metricQuery,
+            warehouseSqlBuilderFromType(settings.type, settings.startOfWeek),
+            availableParameters,
+            dateZoom,
+        ).explore;
+    }
+
     /**
      * Compiles a merge of several metric queries into one warehouse statement.
      *
@@ -10415,6 +10534,8 @@ export class ProjectService
         userAttributeOverrides?: UserAttributeValueMap;
         /** Composer only: names a source of a shared explore by its node title, not its slot. */
         sourceTitleById?: Record<string, string>;
+        /** Composer only: the date zoom each metric source's leg runs with. */
+        dateZoomBySourceId?: Record<string, DateZoom>;
     }): Promise<ApiCompiledMergeQueryResults> {
         const {
             account,
@@ -10436,6 +10557,9 @@ export class ProjectService
                 break;
             case 'composer':
                 authority.binding.assertExecution(account, projectUuid);
+                break;
+            case 'mergedChart':
+                authority.run.assertExecution(account, projectUuid);
                 break;
             case 'request':
                 break;
@@ -10479,11 +10603,20 @@ export class ProjectService
                         return null;
                     }
                 }
-                const explore = await this.getExplore(
+                const savedExplore = await this.getExplore(
                     account,
                     projectUuid,
                     source.metricQuery.exploreName,
                 );
+                const dateZoom = args.dateZoomBySourceId?.[source.id];
+                const explore = dateZoom
+                    ? await this.getDateZoomedExplore(
+                          projectUuid,
+                          savedExplore,
+                          source.metricQuery,
+                          dateZoom,
+                      )
+                    : savedExplore;
                 const itemMap = getItemMap(
                     explore,
                     source.metricQuery.additionalMetrics,
@@ -10606,7 +10739,8 @@ export class ProjectService
         switch (authority.kind) {
             case 'document':
             case 'composer':
-                // Checked as the author at save: a document compiles its merge, a composer chart runs its write check
+            case 'mergedChart':
+                // Checked as the author at save: a document compiles its merge, a chart runs its write check
                 break;
             case 'request':
                 if (mergeSqlTableCalculations.length > 0) {
@@ -10679,6 +10813,7 @@ export class ProjectService
                     account,
                     projectUuid,
                     exploreName: resolvedMetricQuery.exploreName,
+                    dateZoom: args.dateZoomBySourceId?.[source.id],
                     body: {
                         ...resolvedMetricQuery,
                         sorts: [],
@@ -11577,6 +11712,7 @@ export class ProjectService
                 invalidateCache,
                 explore,
                 chartUuid,
+                storedChartSql: true,
             });
 
         return {
@@ -11834,6 +11970,7 @@ export class ProjectService
         explore: validExplore,
         dateZoom,
         chartUuid,
+        storedChartSql = false,
     }: {
         account: Account;
         metricQuery: MetricQuery;
@@ -11846,6 +11983,7 @@ export class ProjectService
         explore?: Explore;
         dateZoom?: DateZoom;
         chartUuid: string | undefined;
+        storedChartSql?: boolean;
     }): Promise<ApiQueryResults> {
         return wrapSentryTransaction(
             'ProjectService.runQueryAndFormatRows',
@@ -11873,6 +12011,7 @@ export class ProjectService
                     explore,
                     dateZoom,
                     chartUuid,
+                    storedChartSql,
                 });
                 span.setAttribute('rows', rows.length);
 
@@ -12166,6 +12305,7 @@ export class ProjectService
         chartUuid,
         parameters,
         userAttributeOverrides,
+        storedChartSql = false,
     }: {
         account: Account;
         metricQuery: MetricQuery;
@@ -12178,6 +12318,8 @@ export class ProjectService
         explore?: Explore;
         dateZoom?: DateZoom;
         chartUuid: string | undefined; // for analytics
+        // A saved chart version the caller may view runs its stored SQL, as saved chart runs do
+        storedChartSql?: boolean;
         parameters?: ParametersValuesMap;
         userAttributeOverrides?: UserAttributeValueMap; // EXPERIMENTAL: used to override user attributes for MCP
     }): Promise<{
@@ -12212,13 +12354,22 @@ export class ProjectService
                         throw new ForbiddenError();
                     }
 
-                    await this.assertCustomSqlAuthorizedForQuery({
-                        account,
-                        projectUuid,
-                        organizationUuid,
-                        exploreName,
-                        metricQuery,
-                    });
+                    if (storedChartSql) {
+                        await this.assertAgentCustomSqlAuthorizedForQuery({
+                            account,
+                            projectUuid,
+                            exploreName,
+                            metricQuery,
+                        });
+                    } else {
+                        await this.assertCustomSqlAuthorizedForQuery({
+                            account,
+                            projectUuid,
+                            organizationUuid,
+                            exploreName,
+                            metricQuery,
+                        });
+                    }
 
                     const { maxLimit, csvCellsLimit } =
                         await resolveOrganizationExportLimits(
@@ -13792,6 +13943,13 @@ export class ProjectService
                             projectUuid,
                             project.organizationUuid,
                             adapter,
+                            ProjectService.isWholeCacheCompile({
+                                multiConnection,
+                                stagedMergedManifest,
+                                exploreNaming,
+                            })
+                                ? (jobUuid ?? null)
+                                : null,
                         );
                         const lightdashProjectConfig =
                             await adapter.getLightdashProjectConfig(
@@ -14089,6 +14247,7 @@ export class ProjectService
         validateAfterCompile: boolean = false,
         syncContentAfterCompile: boolean = false,
         existingJobUuid?: string,
+        incremental: boolean = false,
     ): Promise<{ jobUuid: string }> {
         const { organizationUuid, type } =
             await this.projectModel.getSummary(projectUuid);
@@ -14157,6 +14316,7 @@ export class ProjectService
             isPreview: type === ProjectType.PREVIEW,
             validateAfterCompile,
             syncContentAfterCompile: syncContent,
+            incremental,
             ...connectionTask,
             userUuid: user.userUuid,
         });
@@ -14172,6 +14332,8 @@ export class ProjectService
         requestMethod: RequestMethod,
         jobUuid: string,
         afterCompile?: { stepType: JobStepType; run: () => Promise<void> },
+        /** Saves only what changed since the last compile; null runs the full compile. */
+        compileIncrementally?: () => Promise<IncrementalCompileResult | null>,
     ) {
         if (agentExecutionContext.getStore()?.agentConnectionExecution) {
             try {
@@ -14305,6 +14467,7 @@ export class ProjectService
                     job.jobUuid,
                     JobStepType.COMPILING,
                     async () =>
+                        (await compileIncrementally?.()) ??
                         this.refreshTablesAndProjectConfig(
                             user,
                             projectUuid,
@@ -15449,6 +15612,86 @@ export class ProjectService
                         }),
                 ]);
                 return { ...fields, partitioning, warehouseType };
+            },
+        );
+    }
+
+    /**
+     * The columns of many tables the caller has already been allowed to list,
+     * read a schema at a time where the warehouse can, and table by table for a
+     * bounded number of them where it cannot. Says which tables it read.
+     */
+    async getWarehouseColumns(
+        user: SessionUser,
+        projectUuid: string,
+        queryContext: QueryExecutionContext,
+        tables: WarehouseTableRef[],
+        querySurface?: QuerySurface,
+    ): Promise<{ catalog: WarehouseCatalog; tables: WarehouseTableRef[] }> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        if (
+            this.createAuditedAbility(user).cannot(
+                'manage',
+                subject('SqlRunner', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionDiscovery(user, projectUuid);
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'binding',
+                projectUuid,
+                binding: { kind: 'connection', warehouseConnectionUuid: null },
+            },
+            connectionContextFromUser(
+                { userUuid: user.userUuid, isRegisteredUser: true },
+                {
+                    organizationUuid,
+                    queryContext,
+                    surface:
+                        querySurface === undefined
+                            ? undefined
+                            : connectionSurfaceFromQuerySurface(
+                                  querySurface,
+                                  queryContext,
+                              ),
+                },
+            ),
+            async ({ warehouseClient }) => {
+                if (warehouseClient.getSchemaColumns) {
+                    const schemas = uniqBy(
+                        tables.map(({ database, schema }) => ({
+                            database,
+                            schema,
+                        })),
+                        ({ database, schema }) => `${database}.${schema}`,
+                    );
+                    try {
+                        const catalog =
+                            await warehouseClient.getSchemaColumns(schemas);
+                        // A read that names tables differently from the listing would look like no columns anywhere.
+                        if (
+                            tables.some(
+                                ({ database, schema, table }) =>
+                                    catalog[database]?.[schema]?.[table],
+                            )
+                        ) {
+                            return { catalog, tables };
+                        }
+                    } catch (error) {
+                        this.logger.warn(
+                            `Reading columns by schema failed, reading by table instead: ${getErrorMessage(error)}`,
+                        );
+                    }
+                }
+                const read = tables.slice(0, MAX_TABLES_READ_ONE_BY_ONE);
+                return {
+                    catalog: await warehouseClient.getCatalog(read),
+                    tables: read,
+                };
             },
         );
     }
@@ -17183,12 +17426,99 @@ export class ProjectService
             throw new ForbiddenError();
         }
 
+        const [spaceUuid, dashboardUuid, chartUuid] = await Promise.all([
+            this.filterViewablePaletteContext(context.spaceUuid, (uuid) =>
+                this.canViewSpaceInProject(user, projectUuid, uuid),
+            ),
+            this.filterViewablePaletteContext(context.dashboardUuid, (uuid) =>
+                this.canViewDashboardInProject(user, projectUuid, uuid),
+            ),
+            this.filterViewablePaletteContext(context.chartUuid, (uuid) =>
+                this.canViewChartInProject(user, projectUuid, uuid),
+            ),
+        ]);
+
         return this.savedChartModel.resolveColorPalette({
             projectUuid,
-            spaceUuid: context.spaceUuid,
-            dashboardUuid: context.dashboardUuid,
-            chartUuid: context.chartUuid,
+            spaceUuid,
+            dashboardUuid,
+            chartUuid,
         });
+    }
+
+    // Context the user can't view is dropped, so the palette falls back to the next level.
+    private async filterViewablePaletteContext(
+        uuid: string | undefined,
+        canView: (uuid: string) => Promise<boolean>,
+    ): Promise<string | undefined> {
+        if (uuid === undefined) return undefined;
+        try {
+            return (await canView(uuid)) ? uuid : undefined;
+        } catch (error) {
+            if (error instanceof NotFoundError) return undefined;
+            throw error;
+        }
+    }
+
+    private async canViewSpaceInProject(
+        user: SessionUser,
+        projectUuid: string,
+        spaceUuid: string,
+    ): Promise<boolean> {
+        await this.spaceModel.getSpaceSummary(spaceUuid, { projectUuid });
+        return this.spacePermissionService.can('view', user, spaceUuid);
+    }
+
+    private async canViewDashboardInProject(
+        user: SessionUser,
+        projectUuid: string,
+        dashboardUuid: string,
+    ): Promise<boolean> {
+        const dashboard =
+            await this.dashboardModel.getSummaryByUuid(dashboardUuid);
+        if (dashboard.projectUuid !== projectUuid) return false;
+        const { inheritsFromOrgOrProject, access } =
+            await this.spacePermissionService.resolveAccess(user.userUuid, {
+                type: 'dashboard',
+                dashboardUuid,
+                spaceUuid: dashboard.spaceUuid,
+            });
+        return this.createAuditedAbility(user).can(
+            'view',
+            subject('Dashboard', {
+                organizationUuid: dashboard.organizationUuid,
+                projectUuid,
+                inheritsFromOrgOrProject,
+                access,
+                metadata: { dashboardUuid },
+            }),
+        );
+    }
+
+    private async canViewChartInProject(
+        user: SessionUser,
+        projectUuid: string,
+        chartUuid: string,
+    ): Promise<boolean> {
+        const chart = await this.savedChartModel.getSummary(chartUuid);
+        if (chart.projectUuid !== projectUuid) return false;
+        const { inheritsFromOrgOrProject, access } =
+            await this.spacePermissionService.resolveAccess(user.userUuid, {
+                type: 'chart',
+                chartUuid,
+                dashboardUuid: chart.dashboardUuid,
+                spaceUuid: chart.spaceUuid,
+            });
+        return this.createAuditedAbility(user).can(
+            'view',
+            subject('SavedChart', {
+                organizationUuid: chart.organizationUuid,
+                projectUuid,
+                inheritsFromOrgOrProject,
+                access,
+                metadata: { savedChartUuid: chartUuid },
+            }),
+        );
     }
 
     /** @deprecated Only used by the deprecated project access endpoint; use RolesService.deleteProjectRoleAssignment instead. */

@@ -281,6 +281,10 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                                 userId,
                                 clientId,
                             }),
+                    onMobileAccessDenied: (grant) =>
+                        models
+                            .getMobilePushNotificationModel<MobilePushNotificationModel>()
+                            .deleteInstallationsOfGrant(grant),
                 }),
             linearAppService: ({ models, context, utils }) => {
                 const aiAgentReviewNotificationModel =
@@ -444,6 +448,7 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                     }),
                     savedChartModel: models.getSavedChartModel(),
                     jobModel: models.getJobModel(),
+                    projectCompileLogModel: models.getProjectCompileLogModel(),
                     writebackPreviewService:
                         repository.getWritebackPreviewService<WritebackPreviewService>(),
                     aiWritebackService:
@@ -794,6 +799,7 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                     dashboardModel: models.getDashboardModel(),
                     savedChartService: repository.getSavedChartService(),
                     savedSqlService: repository.getSavedSqlService(),
+                    composerChartService: repository.getComposerChartService(),
                     savedChartModel: models.getSavedChartModel(),
                     coderService: repository.getCoderService(),
                     contentService: repository.getContentService(),
@@ -883,6 +889,7 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                     documentService: repository.getDocumentService(),
                     savedChartService: repository.getSavedChartService(),
                     savedSqlService: repository.getSavedSqlService(),
+                    composerChartService: repository.getComposerChartService(),
                     contentService: repository.getContentService(),
                     aiCreditService:
                         repository.getAiCreditService<AiCreditService>(),
@@ -899,6 +906,8 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                     }),
                     shareService: repository.getShareService(),
                     fileStorageClient: clients.getFileStorageClient(),
+                    uploadsFileStorageClient:
+                        clients.getUploadsFileStorageClient(),
                     downloadFileModel: models.getDownloadFileModel(),
                     slackUnfurlImageModel: models.getSlackUnfurlImageModel(),
                     persistentDownloadFileService:
@@ -983,6 +992,7 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                         repository.getAiAgentService<AiAgentService>(),
                     dashboardService: repository.getDashboardService(),
                     savedChartService: repository.getSavedChartService(),
+                    featureFlagModel: models.getFeatureFlagModel(),
                     orgAiCopilotConfigResolver: new OrgAiCopilotConfigResolver({
                         lightdashConfig: context.lightdashConfig,
                         featureFlagModel: models.getFeatureFlagModel(),
@@ -1016,12 +1026,17 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                         aiModelCatalog,
                     }),
                 }),
-            aiThreadFileService: ({ models, repository }) =>
+            aiThreadFileService: ({ models, repository, clients, context }) =>
                 new AiThreadFileService({
                     aiThreadFileModel:
                         models.getAiThreadFileModel<AiThreadFileModel>(),
                     aiAgentService:
                         repository.getAiAgentService<AiAgentService>(),
+                    featureFlagModel: models.getFeatureFlagModel(),
+                    uploadsFileStorageClient:
+                        clients.getUploadsFileStorageClient(),
+                    durableUploadsConfigured:
+                        context.lightdashConfig.uploads.s3 !== null,
                 }),
             aiAgentSkillService: ({ models, repository, context }) =>
                 new AiAgentSkillService({
@@ -1114,8 +1129,9 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                         repository.getAiAgentService<AiAgentService>(),
                     aiService: repository.getAiService<AiService>(),
                 }),
-            appStateService: ({ models, repository }) =>
+            appStateService: ({ models, repository, context }) =>
                 new AppStateService({
+                    analytics: context.lightdashAnalytics,
                     appStateModel: models.getAppStateModel<AppStateModel>(),
                     appModel: models.getAppModel(),
                     projectModel: models.getProjectModel(),
@@ -1549,6 +1565,7 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                     refreshTokenRotation: models.getRefreshTokenRotation(),
                     aiAccessService: repository.getAiAccessService(),
                     getDocumentService: () => repository.getDocumentService(),
+                    getUnfurlService: () => repository.getUnfurlService(),
                     getComposerChartService: () =>
                         repository.getComposerChartService(),
                     contentDraftModel: models.getContentDraftModel(),

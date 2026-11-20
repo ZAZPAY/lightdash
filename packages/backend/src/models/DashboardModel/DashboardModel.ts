@@ -117,6 +117,11 @@ import {
     softDeleteDashboardComposerCharts,
     toComposerChartTile,
 } from './composerChartTiles';
+import {
+    fromDbHeadingTileConfig,
+    toDbHeadingTileConfig,
+    type DbHeadingTileConfig,
+} from './headingTileConfig';
 import { leftJoinLatestDashboardVersion } from './latestDashboardVersion';
 import Transaction = Knex.Transaction;
 import { dismissOpenContentDrafts } from '../ContentDraftModel';
@@ -491,6 +496,7 @@ export class DashboardModel {
                     dashboard_tile_uuid: uuid,
                     text: properties.text,
                     show_divider: properties.showDivider ?? false,
+                    config: toDbHeadingTileConfig(properties),
                 })),
             );
         }
@@ -1355,6 +1361,7 @@ export class DashboardModel {
                     hide_title: boolean | null;
                     hide_frame: boolean | null;
                     show_divider: boolean | null;
+                    heading_config: DbHeadingTileConfig | null;
                     title: string | null;
                     views_count: string;
                     first_viewed_at: Date | null;
@@ -1420,6 +1427,7 @@ export class DashboardModel {
                 `${DashboardTileMarkdownsTableName}.hide_frame`,
                 `${DashboardTileHeadingsTableName}.text`,
                 `${DashboardTileHeadingsTableName}.show_divider`,
+                `${DashboardTileHeadingsTableName}.config AS heading_config`,
                 `${DashboardTileDataAppsTableName}.app_uuid`,
                 `${DashboardTileComposerChartsTableName}.composer_chart_uuid`,
                 database.raw(`${AppsTableName}.slug AS app_slug`),
@@ -1606,6 +1614,7 @@ export class DashboardModel {
                     content,
                     hide_frame,
                     show_divider,
+                    heading_config,
                     text,
                     belongs_to_dashboard,
                     name,
@@ -1685,6 +1694,7 @@ export class DashboardModel {
                                 properties: {
                                     text: text || '',
                                     showDivider: show_divider ?? false,
+                                    ...fromDbHeadingTileConfig(heading_config),
                                 },
                             };
                         case DashboardTileTypes.DATA_APP:
@@ -2226,6 +2236,17 @@ export class DashboardModel {
         );
     }
 
+    /** Holds the dashboard against new versions and deletion until the transaction ends. */
+    async lockForVersioning(
+        dashboardUuid: string,
+        trx: Knex.Transaction,
+    ): Promise<void> {
+        await trx(DashboardsTableName)
+            .select('dashboard_id')
+            .where('dashboard_uuid', dashboardUuid)
+            .forUpdate();
+    }
+
     async permanentDelete(dashboardUuid: string): Promise<DashboardDAO> {
         const dashboard = await this.getByIdOrSlug(dashboardUuid, {
             deleted: 'any',
@@ -2382,7 +2403,8 @@ export class DashboardModel {
             await this.database.transaction(async (trx) => doWork(trx));
         }
 
-        return this.getByIdOrSlug(dashboardUuid);
+        // In the caller's transaction, which may hold the dashboard locked
+        return this.getByIdOrSlug(dashboardUuid, undefined, tx);
     }
 
     /**
@@ -2937,6 +2959,7 @@ export class DashboardModel {
                     hide_title: boolean | null;
                     hide_frame: boolean | null;
                     show_divider: boolean | null;
+                    heading_config: DbHeadingTileConfig | null;
                     title: string | null;
                     views_count: string;
                     first_viewed_at: Date | null;
@@ -3002,6 +3025,7 @@ export class DashboardModel {
                 `${DashboardTileMarkdownsTableName}.hide_frame`,
                 `${DashboardTileHeadingsTableName}.text`,
                 `${DashboardTileHeadingsTableName}.show_divider`,
+                `${DashboardTileHeadingsTableName}.config AS heading_config`,
                 `${DashboardTileDataAppsTableName}.app_uuid`,
                 `${DashboardTileComposerChartsTableName}.composer_chart_uuid`,
                 this.database.raw(`${AppsTableName}.slug AS app_slug`),
@@ -3169,6 +3193,7 @@ export class DashboardModel {
                     content,
                     hide_frame,
                     show_divider,
+                    heading_config,
                     text,
                     belongs_to_dashboard,
                     name,
@@ -3248,6 +3273,7 @@ export class DashboardModel {
                                 properties: {
                                     text: text || '',
                                     showDivider: show_divider ?? false,
+                                    ...fromDbHeadingTileConfig(heading_config),
                                 },
                             };
                         case DashboardTileTypes.DATA_APP:
