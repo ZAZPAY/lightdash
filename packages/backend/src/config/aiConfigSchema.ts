@@ -11,7 +11,8 @@ export const DEFAULT_VERTEX_MODEL_NAME = 'gemini-3.8-flash';
 export const DEFAULT_DEFAULT_AI_PROVIDER = 'openai';
 export const DEFAULT_OPENROUTER_MODEL_NAME = 'openai/gpt-5.2-2025-12-11';
 export const DEFAULT_BEDROCK_MODEL_NAME = 'claude-sonnet-4-5';
-export const DEFAULT_DEEPSEEK_MODEL_NAME = 'deepseek-v4-flash';
+// DeepSeek's API serves V4.1-Flash-1017 under this name.
+export const DEFAULT_DEEPSEEK_MODEL_NAME = 'deepseek-flash';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 export const DEFAULT_OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';

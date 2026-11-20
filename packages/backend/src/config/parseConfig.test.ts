@@ -2001,13 +2001,13 @@ test('Should parse selectable OpenRouter models from env', () => {
 
 test('Should parse the DeepSeek provider from env', () => {
     process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
-    process.env.DEEPSEEK_AVAILABLE_MODELS = 'deepseek-v4-flash,deepseek-v4-pro';
+    process.env.DEEPSEEK_AVAILABLE_MODELS = 'deepseek-flash,deepseek-v4-pro';
 
     expect(parseConfig().ai.copilot.providers.deepseek).toEqual({
         apiKey: 'test-deepseek-key',
-        modelName: 'deepseek-v4-flash',
+        modelName: 'deepseek-flash',
         baseUrl: 'https://api.deepseek.com',
-        availableModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+        availableModels: ['deepseek-flash', 'deepseek-v4-pro'],
         customHeaders: {},
         supportsStreaming: true,
     });

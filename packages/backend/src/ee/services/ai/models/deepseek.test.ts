@@ -19,9 +19,9 @@ vi.mock('@ai-sdk/deepseek', () => ({
 
 const deepseekConfig = {
     apiKey: 'deepseek-key',
-    modelName: 'deepseek-v4-flash',
+    modelName: 'deepseek-flash',
     baseUrl: 'https://api.deepseek.com',
-    availableModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    availableModels: ['deepseek-flash', 'deepseek-v4-pro'],
     customHeaders: {},
     supportsStreaming: true,
 };
@@ -94,7 +94,7 @@ describe('DeepSeek alongside OpenAI', () => {
                 .filter((m) => m.provider === 'deepseek')
                 .map((m) => [m.name, m.displayName, m.groupLabel]),
         ).toEqual([
-            ['deepseek-v4-flash', 'DeepSeek V4 Flash', 'DeepSeek'],
+            ['deepseek-flash', 'DeepSeek V4.1 Flash', 'DeepSeek'],
             ['deepseek-v4-pro', 'DeepSeek V4 Pro', 'DeepSeek'],
         ]);
     });
@@ -114,17 +114,17 @@ describe('DeepSeek alongside OpenAI', () => {
             modelName: 'caller-controlled-model',
         });
 
-        expect(model.modelId).toBe('deepseek-v4-flash');
+        expect(model.modelId).toBe('deepseek-flash');
     });
 
     test('honors a pinned DeepSeek model name', () => {
         const { model } = getModel(openaiAndDeepseekConfig, {
             provider: 'deepseek',
-            modelName: 'deepseek-flash',
+            modelName: 'deepseek-v4-flash',
             trustPinnedModelName: true,
         });
 
-        expect(model.modelId).toBe('deepseek-flash');
+        expect(model.modelId).toBe('deepseek-v4-flash');
     });
 
     test('reports no compaction support', () => {

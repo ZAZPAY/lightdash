@@ -806,17 +806,13 @@ const DEEPSEEK_MODEL_METADATA: Record<
     string,
     { displayName: string; description: string } | undefined
 > = {
+    'deepseek-flash': {
+        displayName: 'DeepSeek V4.1 Flash',
+        description: 'Fast, cost-effective DeepSeek model for agentic tasks',
+    },
     'deepseek-v4-pro': {
         displayName: 'DeepSeek V4 Pro',
         description: 'Frontier DeepSeek model for complex reasoning and agents',
-    },
-    'deepseek-v4-flash': {
-        displayName: 'DeepSeek V4 Flash',
-        description: 'Fast, cost-effective DeepSeek model for agentic tasks',
-    },
-    'deepseek-flash': {
-        displayName: 'DeepSeek Flash',
-        description: 'Fast, cost-effective DeepSeek model for agentic tasks',
     },
 };
 
