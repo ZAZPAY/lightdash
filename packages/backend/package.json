@@ -59,6 +59,7 @@
         "@ai-sdk/amazon-bedrock": "5.0.114",
         "@ai-sdk/anthropic": "4.0.57",
         "@ai-sdk/azure": "4.0.100",
+        "@ai-sdk/deepseek": "3.0.64",
         "@ai-sdk/google": "4.0.75",
         "@ai-sdk/google-vertex": "5.0.87",
         "@ai-sdk/mcp": "2.0.53",

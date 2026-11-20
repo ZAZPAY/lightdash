@@ -1,5 +1,6 @@
 import { BedrockProviderOptions } from '@ai-sdk/amazon-bedrock';
 import { AnthropicProviderOptions } from '@ai-sdk/anthropic';
+import { DeepSeekLanguageModelOptions } from '@ai-sdk/deepseek';
 import {
     GoogleLanguageModelInteractionsOptions,
     GoogleLanguageModelOptions,
@@ -28,6 +29,7 @@ export type ProviderOptionsMap = {
     openrouter: Record<string, JSONValue>;
     bedrock: BedrockProviderOptions;
     vertex: GoogleLanguageModelOptions;
+    deepseek: DeepSeekLanguageModelOptions;
 };
 
 export type AiModel<P extends AiProvider> = {

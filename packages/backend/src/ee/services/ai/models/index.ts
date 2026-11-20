@@ -19,12 +19,14 @@ import Logger from '../../../../logging/logger';
 import { getAnthropicModel } from './anthropic-claude';
 import { getAzureGpt41Model } from './azure-openai-gpt-4.1';
 import { getBedrockModel } from './bedrock';
+import { getDeepSeekModel } from './deepseek';
 import { getGoogleGeminiModel } from './google-gemini';
 import { getGoogleVertexModel } from './google-vertex';
 import { getOpenaiGptmodel } from './openai-gpt';
 import { getOpenRouterModel } from './openrouter';
 import {
     customGatewayPreset,
+    deepseekPreset,
     keyGrantsModel,
     matchesPreset,
     MODEL_PRESETS,
@@ -175,6 +177,7 @@ export const getAvailableModels = (
         'openrouter',
         'bedrock',
         'vertex',
+        'deepseek',
     ] as const;
     return configuredProviders.flatMap<ModelPreset<SelectableModelProvider>>(
         (provider) => {
@@ -196,6 +199,15 @@ export const getAvailableModels = (
                         ...(providerConfig.availableModels ?? []),
                     ]),
                 ].map(openRouterPreset);
+            }
+
+            if (provider === 'deepseek') {
+                return [
+                    ...new Set([
+                        providerConfig.modelName,
+                        ...(providerConfig.availableModels ?? []),
+                    ]),
+                ].map(deepseekPreset);
             }
 
             const { availableModels, modelName } = providerConfig;
@@ -313,7 +325,9 @@ export const getOrgModelCatalogue = (
 const shippedPresets = (
     provider: SelectableModelProvider,
 ): ModelPreset<SelectableModelProvider>[] =>
-    provider === 'openrouter' || provider === 'vertex'
+    provider === 'openrouter' ||
+    provider === 'vertex' ||
+    provider === 'deepseek'
         ? []
         : MODEL_PRESETS[provider];
 
@@ -660,6 +674,40 @@ export const getModel = (
                 keyManagement,
             );
         }
+        case 'deepseek': {
+            const deepseekConfig = config.providers.deepseek;
+            if (!deepseekConfig) {
+                throw new ParameterError('DeepSeek configuration is required');
+            }
+            const requestedModelName = options?.modelName;
+            const configuredModelNames = new Set([
+                deepseekConfig.modelName,
+                ...(deepseekConfig.availableModels ?? []),
+            ]);
+            const canUseRequestedModel =
+                requestedModelName !== undefined &&
+                (options?.trustPinnedModelName === true ||
+                    configuredModelNames.has(requestedModelName));
+
+            return withKeyManagement(
+                applyStreamingCapability(
+                    getDeepSeekModel(
+                        {
+                            ...deepseekConfig,
+                            modelName: canUseRequestedModel
+                                ? requestedModelName
+                                : deepseekConfig.modelName,
+                        },
+                        {
+                            enableReasoning: options?.enableReasoning,
+                            minimalReasoning: options?.minimalReasoning,
+                        },
+                    ),
+                    deepseekConfig.supportsStreaming,
+                ),
+                keyManagement,
+            );
+        }
         case 'bedrock': {
             const requestedBedrockModel = resolveModelName('bedrock');
             const bedrockModelName = requestedBedrockModel
@@ -739,7 +787,8 @@ export const getCompactionModelMetadata = (
     if (
         provider === 'azure' ||
         provider === 'openrouter' ||
-        provider === 'vertex'
+        provider === 'vertex' ||
+        provider === 'deepseek'
     ) {
         return {
             supportsCompaction: false,

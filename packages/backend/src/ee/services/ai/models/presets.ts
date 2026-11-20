@@ -5,7 +5,8 @@ export type ModelPresetProvider = 'openai' | 'anthropic' | 'google' | 'bedrock';
 export type SelectableModelProvider =
     | ModelPresetProvider
     | 'openrouter'
-    | 'vertex';
+    | 'vertex'
+    | 'deepseek';
 
 export type ReasoningStyle = 'budget' | 'adaptive';
 // How hard a reasoning model should think. 'xhigh' is the top level the
@@ -800,3 +801,40 @@ export function getModelPreset<T extends ModelPresetProvider>(
 }
 
 export type ModelProvider = keyof typeof MODEL_PRESETS;
+
+const DEEPSEEK_MODEL_METADATA: Record<
+    string,
+    { displayName: string; description: string } | undefined
+> = {
+    'deepseek-v4-pro': {
+        displayName: 'DeepSeek V4 Pro',
+        description: 'Frontier DeepSeek model for complex reasoning and agents',
+    },
+    'deepseek-v4-flash': {
+        displayName: 'DeepSeek V4 Flash',
+        description: 'Fast, cost-effective DeepSeek model for agentic tasks',
+    },
+    'deepseek-flash': {
+        displayName: 'DeepSeek Flash',
+        description: 'Fast, cost-effective DeepSeek model for agentic tasks',
+    },
+};
+
+// DeepSeek models are configured per instance (DEEPSEEK_MODEL_NAME and
+// DEEPSEEK_AVAILABLE_MODELS); unknown names are sent to the API verbatim.
+export function deepseekPreset(modelName: string): ModelPreset<'deepseek'> {
+    const metadata = DEEPSEEK_MODEL_METADATA[modelName];
+    return {
+        name: modelName,
+        provider: 'deepseek',
+        modelId: modelName,
+        displayName: metadata?.displayName ?? modelName,
+        description: metadata?.description ?? 'Model served by DeepSeek',
+        groupLabel: 'DeepSeek',
+        custom: true,
+        contextWindowTokens: null,
+        supportsReasoning: true,
+        callOptions: {},
+        providerOptions: undefined,
+    };
+}

@@ -11,6 +11,8 @@ export const DEFAULT_VERTEX_MODEL_NAME = 'gemini-3.8-flash';
 export const DEFAULT_DEFAULT_AI_PROVIDER = 'openai';
 export const DEFAULT_OPENROUTER_MODEL_NAME = 'openai/gpt-5.2-2025-12-11';
 export const DEFAULT_BEDROCK_MODEL_NAME = 'claude-sonnet-4-5';
+export const DEFAULT_DEEPSEEK_MODEL_NAME = 'deepseek-v4-flash';
+export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 export const DEFAULT_OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
 export const DEFAULT_AZURE_EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -37,6 +39,7 @@ export const AI_PROVIDER_KEYS = [
     'vertex',
     'openrouter',
     'bedrock',
+    'deepseek',
 ] as const;
 
 export const aiCopilotConfigSchema = z
@@ -147,6 +150,16 @@ export const aiCopilotConfigSchema = z
                     modelName: z
                         .string()
                         .default(DEFAULT_OPENROUTER_MODEL_NAME),
+                    availableModels: z.array(z.string()).optional(),
+                    customHeaders: customHeadersSchema,
+                    supportsStreaming: supportsStreamingSchema,
+                })
+                .optional(),
+            deepseek: z
+                .object({
+                    apiKey: z.string(),
+                    modelName: z.string().default(DEFAULT_DEEPSEEK_MODEL_NAME),
+                    baseUrl: z.string().default(DEFAULT_DEEPSEEK_BASE_URL),
                     availableModels: z.array(z.string()).optional(),
                     customHeaders: customHeadersSchema,
                     supportsStreaming: supportsStreamingSchema,

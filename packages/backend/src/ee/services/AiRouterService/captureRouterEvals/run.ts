@@ -25,6 +25,7 @@ const KEY_VARIABLES: Record<string, string> = {
     azure: 'AZURE_AI_API_KEY',
     google: 'GEMINI_API_KEY',
     openrouter: 'OPENROUTER_API_KEY',
+    deepseek: 'DEEPSEEK_API_KEY',
 };
 
 const main = async (): Promise<number> => {
