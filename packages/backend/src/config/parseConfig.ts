@@ -50,6 +50,7 @@ import {
     DEFAULT_AI_TOOL_DESCRIPTION_MAX_CHARS,
     DEFAULT_ANTHROPIC_MODEL_NAME,
     DEFAULT_BEDROCK_MODEL_NAME,
+    DEFAULT_DEEPSEEK_MODEL_NAME,
     DEFAULT_DEFAULT_AI_PROVIDER,
     DEFAULT_GOOGLE_MODEL_NAME,
     DEFAULT_OPENAI_EMBEDDING_MODEL,
@@ -1585,6 +1586,24 @@ export const getAiConfig = () => ({
         bedrock: getBedrockConfig(
             getProviderCustomHeaders('BEDROCK_CUSTOM_HEADERS'),
         ),
+        deepseek: process.env.DEEPSEEK_API_KEY
+            ? {
+                  apiKey: process.env.DEEPSEEK_API_KEY,
+                  modelName:
+                      process.env.DEEPSEEK_MODEL_NAME ||
+                      DEFAULT_DEEPSEEK_MODEL_NAME,
+                  baseUrl: process.env.DEEPSEEK_BASE_URL?.trim() || undefined,
+                  availableModels: getArrayFromCommaSeparatedList(
+                      'DEEPSEEK_AVAILABLE_MODELS',
+                  ),
+                  customHeaders: getProviderCustomHeaders(
+                      'DEEPSEEK_CUSTOM_HEADERS',
+                  ),
+                  supportsStreaming: getProviderSupportsStreaming(
+                      'DEEPSEEK_SUPPORTS_STREAMING',
+                  ),
+              }
+            : undefined,
     },
     maxQueryLimit:
         getIntegerFromEnvironmentVariable('AI_COPILOT_MAX_QUERY_LIMIT') ||

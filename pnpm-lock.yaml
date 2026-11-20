@@ -338,6 +338,9 @@ importers:
       '@ai-sdk/azure':
         specifier: 4.0.100
         version: 4.0.100(zod@4.6.7)
+      '@ai-sdk/deepseek':
+        specifier: 3.0.64
+        version: 3.0.64(zod@4.6.7)
       '@ai-sdk/google':
         specifier: 4.0.75
         version: 4.0.75(zod@4.6.7)

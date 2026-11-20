@@ -1999,6 +1999,33 @@ test('Should parse selectable OpenRouter models from env', () => {
     });
 });
 
+test('Should parse the DeepSeek provider from env', () => {
+    process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
+    process.env.DEEPSEEK_AVAILABLE_MODELS = 'deepseek-flash,deepseek-v4-pro';
+
+    expect(parseConfig().ai.copilot.providers.deepseek).toEqual({
+        apiKey: 'test-deepseek-key',
+        modelName: 'deepseek-flash',
+        baseUrl: 'https://api.deepseek.com',
+        availableModels: ['deepseek-flash', 'deepseek-v4-pro'],
+        customHeaders: {},
+        supportsStreaming: true,
+    });
+});
+
+test('Should configure OpenAI and DeepSeek at the same time', () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
+    process.env.DEEPSEEK_MODEL_NAME = 'deepseek-v4-pro';
+
+    const { providers } = parseConfig().ai.copilot;
+    expect(providers.openai).toMatchObject({ apiKey: 'test-openai-key' });
+    expect(providers.deepseek).toMatchObject({
+        apiKey: 'test-deepseek-key',
+        modelName: 'deepseek-v4-pro',
+    });
+});
+
 test('Should pass OpenRouter provider routing slugs through from env', () => {
     process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
     process.env.OPENROUTER_ALLOWED_PROVIDERS = 'deepinfra, baseten';

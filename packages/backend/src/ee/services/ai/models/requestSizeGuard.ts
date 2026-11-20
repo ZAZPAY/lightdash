@@ -17,6 +17,7 @@ export const IMAGE_MODEL_REQUEST_MAX_BYTES = {
     openai: 512_000_000,
     azure: 20_000_000,
     openrouter: 20_000_000,
+    deepseek: 20_000_000,
 } satisfies Record<AiProvider, number>;
 
 export class AiModelRequestTooLargeError extends Error {
