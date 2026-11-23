@@ -34,6 +34,7 @@ import {
     scanHubspotProperties,
 } from './run';
 import { summarizeHubspotTest } from './testSummary';
+import { hubspotUseCases } from './useCases';
 
 const CATALOG = LIVE_INTEGRATION_CATALOG[ApiConnectorType.HUBSPOT];
 const LABEL = CATALOG.messageLabel;
@@ -86,6 +87,34 @@ export const hubspotIntegration = defineLiveIntegration({
     },
     explores: HUBSPOT_EXPLORES,
     plannedModelNames: [],
+    level: {
+        value: 2,
+        description: 'Search filters records but returns no totals.',
+    },
+    auth: {
+        description: 'No vendor review is needed.',
+        testWith: 'test_account',
+        needs: ['gmail', 'phone'],
+        token: true,
+        oauth: 'no_review',
+    },
+    paging: {
+        description:
+            'Search returns up to 200 records a page and stops at 10,000 results.',
+    },
+    rateLimits: {
+        concurrentCalls: 5,
+        callsPerSecond: 4,
+        buckets: [
+            {
+                id: 'hour',
+                label: 'per hour',
+                windowMs: 3_600_000,
+                capacity: 10_000,
+            },
+        ],
+    },
+    useCases: hubspotUseCases,
     validate: () => {},
     checkAuth: ({ type }) => {
         if (type !== 'bearer_token') {
@@ -94,7 +123,8 @@ export const hubspotIntegration = defineLiveIntegration({
             );
         }
     },
-    describeTarget: () => 'HubSpot CRM: deals, contacts and companies',
+    describeTarget: () =>
+        'HubSpot CRM: deals, contacts, companies, tickets and leads',
     parseRequest: jsonRequest(`${LABEL} search`, hubspotRequestSchema),
     compile: ({ explore, metricQuery, now }) =>
         compileHubspotQuery({
@@ -113,7 +143,7 @@ export const hubspotIntegration = defineLiveIntegration({
                 readHubspotProperties(scan.hubspotProperties, definition.name),
             ),
         isInternalField: isInternalHubspotField,
-        // Deals is the first explore; contacts and companies are scanned too
+        // Deals is the first explore; the other objects are scanned too
         models: HUBSPOT_OBJECTS.slice(1),
     },
 });

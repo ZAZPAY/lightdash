@@ -16,22 +16,30 @@ import type {
     LiveExploreDefinition,
     LivePeriodFormat,
 } from './explores/definition';
+import type { LiveIntegrationSpec } from './spec/types';
 
 /**
  * One external API Lightdash queries live: a source's settings, what it may
- * call, its explores, and how a metric query becomes calls and rows. Write
+ * call, its explores, how a metric query becomes calls and rows, and what
+ * its code can't know about the tool (`LiveIntegrationSpec`). Write
  * one with `defineLiveIntegration` and list it in `registry.ts`.
  */
 export type LiveIntegration<
     C extends ApiConnectorType = ApiConnectorType,
     Request = unknown,
-> = {
+> = LiveIntegrationSpec & {
     connector: C;
     label: string;
     /** The shape stored on the connection. */
     settings: z.ZodType<ApiSourceOf<C>>;
     /** The hosts a source may call; several when the API has regions. */
     origins: readonly [string, ...string[]];
+    /**
+     * For APIs on a host of each customer's own (a Salesforce My Domain):
+     * whether a source may call `origin`. `origins` then only names the
+     * shape in errors.
+     */
+    acceptsOrigin?: (origin: string) => boolean;
     /** What a source may call on its origin, whatever its stored connection says. */
     access: (settings: ApiSourceOf<C>) => {
         pathPrefixes: string[];
@@ -39,6 +47,8 @@ export type LiveIntegration<
         headers?: Record<string, string> | null;
     };
     limits: LiveLimits;
+    /** A source's own limits, when its settings set them; omitted, every source gets `limits`. */
+    limitsFor?: (settings: ApiSourceOf<C>) => LiveLimits;
     capabilities: LiveCapabilities;
     /** The first is the wide model; scans and field edits apply to it and to `scan.models`. */
     explores: readonly [LiveExploreDefinition, ...LiveExploreDefinition[]];
@@ -197,8 +207,10 @@ export type LiveConnectionCheck = {
 export type LiveScanResult = {
     ga4Metadata?: unknown;
     posthogProperties?: Record<'event' | 'person', unknown>;
-    /** Attio's attribute list for the source's object, as it returns it. */
+    /** Each standard object's attribute list, by slug, as Attio returns it. */
     attioAttributes?: unknown;
     /** HubSpot's property list for the source's object, as it returns it. */
     hubspotProperties?: unknown;
+    /** Salesforce's describe of the source's object, as it returns it. */
+    salesforceDescribe?: unknown;
 };

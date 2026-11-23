@@ -16587,7 +16587,9 @@
                     "github",
                     "pylon",
                     "attio",
-                    "hubspot"
+                    "hubspot",
+                    "salesforce",
+                    "hydra"
                 ],
                 "type": "string"
             },
@@ -16798,16 +16800,13 @@
             },
             "AttioApiSource": {
                 "properties": {
-                    "object": {
-                        "type": "string",
-                        "description": "The slug of the Attio object the source reads, e.g. companies or deals."
-                    },
                     "connector": {
                         "$ref": "#/components/schemas/ApiConnectorType.ATTIO"
                     }
                 },
-                "required": ["object", "connector"],
-                "type": "object"
+                "required": ["connector"],
+                "type": "object",
+                "description": "The access token picks the Attio workspace, so nothing else is set."
             },
             "ApiConnectorType.HUBSPOT": {
                 "enum": ["hubspot"],
@@ -16822,6 +16821,82 @@
                 "required": ["connector"],
                 "type": "object",
                 "description": "The private app's token picks the HubSpot account, so nothing else is set."
+            },
+            "ApiConnectorType.SALESFORCE": {
+                "enum": ["salesforce"],
+                "type": "string"
+            },
+            "SalesforceApiSource": {
+                "properties": {
+                    "connector": {
+                        "$ref": "#/components/schemas/ApiConnectorType.SALESFORCE"
+                    }
+                },
+                "required": ["connector"],
+                "type": "object",
+                "description": "One sign-in reads every object in SALESFORCE_OBJECTS, so nothing else is set."
+            },
+            "ApiConnectorType.HYDRA": {
+                "enum": ["hydra"],
+                "type": "string"
+            },
+            "HydraApiSource": {
+                "properties": {
+                    "callsPerHour": {
+                        "type": "number",
+                        "format": "double"
+                    },
+                    "callsPerMinute": {
+                        "type": "number",
+                        "format": "double",
+                        "description": "The limits Lightdash keeps the source's calls under."
+                    },
+                    "rowCount": {
+                        "type": "number",
+                        "format": "double",
+                        "description": "Events seeded per sign-in token, over the last 90 days."
+                    },
+                    "failAuth": {
+                        "type": "boolean",
+                        "description": "Every call answers 401, as a revoked sign-in would."
+                    },
+                    "retryAfterSeconds": {
+                        "type": "number",
+                        "format": "double",
+                        "description": "The Retry-After those 429s carry, in seconds."
+                    },
+                    "retryAfterEvery": {
+                        "type": "number",
+                        "format": "double",
+                        "description": "Every Nth call answers 429 with Retry-After; 0 never does."
+                    },
+                    "errorRate": {
+                        "type": "number",
+                        "format": "double",
+                        "description": "Share of calls, 0 to 1, that fail with a 500."
+                    },
+                    "latencyMs": {
+                        "type": "number",
+                        "format": "double",
+                        "description": "Milliseconds each call waits before answering."
+                    },
+                    "connector": {
+                        "$ref": "#/components/schemas/ApiConnectorType.HYDRA"
+                    }
+                },
+                "required": [
+                    "callsPerHour",
+                    "callsPerMinute",
+                    "rowCount",
+                    "failAuth",
+                    "retryAfterSeconds",
+                    "retryAfterEvery",
+                    "errorRate",
+                    "latencyMs",
+                    "connector"
+                ],
+                "type": "object",
+                "description": "Hydra, the test integration: its rows are seeded from the sign-in token,\nand these settings make its fake API slow, fail or rate limit on demand."
             },
             "ExternalConnectionApiSource": {
                 "anyOf": [
@@ -16857,6 +16932,12 @@
                     },
                     {
                         "$ref": "#/components/schemas/HubspotApiSource"
+                    },
+                    {
+                        "$ref": "#/components/schemas/SalesforceApiSource"
+                    },
+                    {
+                        "$ref": "#/components/schemas/HydraApiSource"
                     }
                 ],
                 "description": "Connector settings of a live source; the server fixes its access rules."
@@ -17608,6 +17689,11 @@
                         "type": "number",
                         "format": "double"
                     },
+                    "windowDays": {
+                        "type": "number",
+                        "format": "double",
+                        "description": "How many days back the usage goes: the query history retention window."
+                    },
                     "externalConnectionUuid": {
                         "type": "string"
                     }
@@ -17617,10 +17703,11 @@
                     "responseBytes",
                     "cacheHits",
                     "apiCalls",
+                    "windowDays",
                     "externalConnectionUuid"
                 ],
                 "type": "object",
-                "description": "What a live source has sent its integration across every logged query."
+                "description": "What a live source has sent its integration across the logged queries in the usage window."
             },
             "ApiExternalConnectionApiUsageResponse": {
                 "properties": {
@@ -38300,6 +38387,7 @@
                     "loadProjectContext",
                     "loadSkill",
                     "proposeSemanticLayerChange",
+                    "read",
                     "readAttachments",
                     "readContent",
                     "readPinnedThread",
@@ -38316,7 +38404,9 @@
                     "submitWorkerFindings",
                     "syncDbtProject",
                     "updateUserName",
-                    "visualize"
+                    "verify",
+                    "visualize",
+                    "write"
                 ],
                 "description": "Exclude from T those types that are assignable to U"
             },
@@ -39872,9 +39962,9 @@
                                                                             "type": "string",
                                                                             "enum": [
                                                                                 "stage",
+                                                                                "read",
                                                                                 "compile",
                                                                                 "edit",
-                                                                                "read",
                                                                                 "search"
                                                                             ]
                                                                         }
@@ -43618,6 +43708,14 @@
             },
             "SemanticStudioBranchCompile": {
                 "properties": {
+                    "requestedByAgent": {
+                        "type": "boolean",
+                        "description": "Whether an agent's save asked for it, so a failure can go back to the agent."
+                    },
+                    "compileRequestUuid": {
+                        "type": "string",
+                        "description": "The compile this describes; a newer request replaces it."
+                    },
                     "compiledAt": {
                         "type": "string",
                         "format": "date-time",
@@ -43646,6 +43744,8 @@
                     }
                 },
                 "required": [
+                    "requestedByAgent",
+                    "compileRequestUuid",
                     "compiledAt",
                     "requestedAt",
                     "hasExplores",
@@ -43708,6 +43808,57 @@
             "ApiSemanticStudioCheckoutResponse": {
                 "$ref": "#/components/schemas/ApiSuccess_SemanticStudioCheckout-or-null_",
                 "description": "Null when the person is on what is published."
+            },
+            "SemanticStudioBranchCompileFollowUp": {
+                "properties": {
+                    "prompt": {
+                        "type": "string"
+                    },
+                    "threadUuid": {
+                        "type": "string"
+                    },
+                    "agentUuid": {
+                        "type": "string"
+                    }
+                },
+                "required": ["prompt", "threadUuid", "agentUuid"],
+                "type": "object",
+                "description": "A hidden prompt that sends an agent's failed compile back to it."
+            },
+            "ApiSuccess_SemanticStudioBranchCompileFollowUp-or-null_": {
+                "properties": {
+                    "results": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/SemanticStudioBranchCompileFollowUp"
+                            }
+                        ],
+                        "nullable": true
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["ok"],
+                        "nullable": false
+                    }
+                },
+                "required": ["results", "status"],
+                "type": "object"
+            },
+            "ApiSemanticStudioBranchCompileFollowUpResponse": {
+                "$ref": "#/components/schemas/ApiSuccess_SemanticStudioBranchCompileFollowUp-or-null_"
+            },
+            "SemanticStudioBranchCompileFollowUpBody": {
+                "properties": {
+                    "threadUuid": {
+                        "type": "string",
+                        "description": "The Studio chat asking; only the chat of the checked-out change gets the follow-up."
+                    },
+                    "compileRequestUuid": {
+                        "type": "string"
+                    }
+                },
+                "required": ["threadUuid", "compileRequestUuid"],
+                "type": "object"
             },
             "MergePullRequestResult": {
                 "properties": {
@@ -81282,7 +81433,7 @@
     },
     "info": {
         "title": "Lightdash API",
-        "version": "3.357.2",
+        "version": "3.374.1",
         "description": "Open API documentation for all public Lightdash API endpoints. # Authentication Authenticate using the Authorization header with either 'ApiKey <personal-access-token>' or 'Bearer <service-account-token>'. Create a Personal Access Token by following this guide: https://docs.lightdash.com/references/personal_tokens Self-hosted provisioning can use the admin token configured with LD_SETUP_SERVICE_ACCOUNT_TOKEN to create scoped service accounts through the Service Accounts API.\n",
         "license": {
             "name": "MIT"
@@ -95880,6 +96031,57 @@
                 ]
             }
         },
+        "/api/v1/projects/{projectUuid}/semantic-studio/checkout/compile/follow-up": {
+            "post": {
+                "operationId": "claimSemanticStudioCompileFollowUp",
+                "responses": {
+                    "200": {
+                        "description": "Success",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiSemanticStudioBranchCompileFollowUpResponse"
+                                }
+                            }
+                        }
+                    },
+                    "default": {
+                        "description": "Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiErrorPayload"
+                                }
+                            }
+                        }
+                    }
+                },
+                "description": "Claims the hidden prompt that sends a failed compile of the agent's last save back to the agent; null when there is none to send.",
+                "summary": "Claim a Semantic Studio compile follow-up",
+                "tags": ["Semantic Studio"],
+                "security": [],
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "projectUuid",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/components/schemas/UUID"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SemanticStudioBranchCompileFollowUpBody"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/projects/{projectUuid}/semantic-studio/checkout/publish": {
             "post": {
                 "operationId": "publishSemanticStudioCheckout",
@@ -108744,7 +108946,7 @@
                         }
                     }
                 },
-                "description": "Get chart version history from last 30 days",
+                "description": "Get all stored versions of a chart, oldest first",
                 "summary": "Get chart version history",
                 "tags": ["Charts"],
                 "security": [],
