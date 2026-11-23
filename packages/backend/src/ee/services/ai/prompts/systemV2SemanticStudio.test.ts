@@ -34,7 +34,9 @@ describe('getSemanticStudioSystemPrompt', () => {
             dbt: {
                 saves: false,
                 codeMode: false,
+                projectMap: null,
                 sections: ['## Repository context\nroot hint'],
+                builder: false,
             },
         });
         expect(prompt).toContain('```diff');
@@ -47,7 +49,13 @@ describe('getSemanticStudioSystemPrompt', () => {
     it('has a dbt project check real values before suggesting, with one sampled query', () => {
         const prompt = getSemanticStudioSystemPrompt({
             ...base,
-            dbt: { saves: false, codeMode: false, sections: [] },
+            dbt: {
+                saves: false,
+                codeMode: false,
+                projectMap: null,
+                sections: [],
+                builder: false,
+            },
         });
         expect(prompt).toContain('## Warehouse');
         expect(prompt).toContain("This project's warehouse is postgres.");
@@ -59,7 +67,13 @@ describe('getSemanticStudioSystemPrompt', () => {
         const prompt = getSemanticStudioSystemPrompt({
             ...base,
             warehouse: null,
-            dbt: { saves: false, codeMode: false, sections: [] },
+            dbt: {
+                saves: false,
+                codeMode: false,
+                projectMap: null,
+                sections: [],
+                builder: false,
+            },
         });
         expect(prompt).not.toContain('## Warehouse');
         expect(prompt).not.toContain('runSql');
@@ -68,7 +82,13 @@ describe('getSemanticStudioSystemPrompt', () => {
     it('saves a requested change to the draft in the same turn', () => {
         const prompt = getSemanticStudioSystemPrompt({
             ...base,
-            dbt: { saves: true, codeMode: false, sections: [] },
+            dbt: {
+                saves: true,
+                codeMode: false,
+                projectMap: null,
+                sections: [],
+                builder: false,
+            },
         });
         expect(prompt).toContain('editDbtProject');
         expect(prompt).toContain('in the draft');
@@ -77,12 +97,67 @@ describe('getSemanticStudioSystemPrompt', () => {
         expect(prompt).not.toContain('yaml.set');
     });
 
+    it('has a dbt project rely on its layout instead of surveying the repository', () => {
+        const dbt = {
+            saves: true,
+            codeMode: true,
+            sections: [],
+            builder: false,
+        };
+        const mapped = getSemanticStudioSystemPrompt({
+            ...base,
+            dbt: { ...dbt, projectMap: 'dbt project shop' },
+        });
+        expect(mapped).toContain('## Project layout\n\ndbt project shop');
+        expect(mapped).toContain('rather than surveying the repository');
+        expect(mapped).toContain('in the same step');
+
+        const unmapped = getSemanticStudioSystemPrompt({
+            ...base,
+            dbt: { ...dbt, projectMap: null },
+        });
+        expect(unmapped).not.toContain('## Project layout');
+        expect(unmapped).toContain('how the project lays out its files');
+        expect(unmapped).toContain('in the same step');
+    });
+
     it('saves with a script when code mode is on', () => {
         const prompt = getSemanticStudioSystemPrompt({
             ...base,
-            dbt: { saves: true, codeMode: true, sections: [] },
+            dbt: {
+                saves: true,
+                codeMode: true,
+                projectMap: null,
+                sections: [],
+                builder: false,
+            },
         });
         expect(prompt).toContain('with a script that makes it');
         expect(prompt).toContain('yaml.set');
+    });
+
+    it('has the builder save with write and name its lookups as functions inside read', () => {
+        const prompt = getSemanticStudioSystemPrompt({
+            ...base,
+            warehouse: { type: 'duckdb', schema: 'main' },
+            dbt: {
+                saves: true,
+                codeMode: true,
+                projectMap: null,
+                sections: [],
+                builder: true,
+            },
+        });
+        expect(prompt).toContain('layer.impact in read');
+        expect(prompt).toContain('warehouse.columns in read');
+        expect(prompt).toContain('Save with write');
+        expect(prompt).toContain('numerator cast to a decimal');
+        [
+            'editDbtProject',
+            'exploreRepo',
+            'analyzeFieldImpact',
+            'listChanges',
+            'grepWarehouseColumns',
+        ].forEach((tool) => expect(prompt).not.toContain(tool));
     });
 });

@@ -16,7 +16,12 @@ import {
     getItemId,
     getLiveSourceCacheTtlSeconds,
     getLiveSourceErrorOrigin,
+    getSalesforceDescribePath,
+    getSalesforceEnvironment,
+    getSalesforceTokenUrl,
     isJwtUser,
+    isSalesforceEnvironment,
+    isSalesforceInstanceOrigin,
     isValidLiveSourceCacheTtlSeconds,
     LIVE_SOURCE_AI_HINT_MAX_LENGTH,
     LIVE_SOURCE_CACHE_TTL_MAX_SECONDS,
@@ -25,6 +30,7 @@ import {
     NotFoundError,
     ParameterError,
     POSTHOG_REGION_ORIGINS,
+    SALESFORCE_OBJECTS,
     TimeoutError,
     TooManyRequestsError,
     UnexpectedServerError,
@@ -56,6 +62,8 @@ import {
     type QuerySourceSchemaTable,
     type ReattachableLiveSource,
     type RegisteredAccount,
+    type SalesforceEnvironment,
+    type SalesforceObject,
     type UpdateExternalConnection,
 } from '@lightdash/common';
 import { groupBy, isEqual, sortBy, uniqBy } from 'es-toolkit/compat';
@@ -108,7 +116,7 @@ import {
     toFailedScan,
     toPostHogSchemaTable,
 } from '../../../services/QuerySourceService/live/integrations/postHog/scan';
-import { getLiveSourceQueryErrorCode } from '../../../services/QuerySourceService/live/query/outcome';
+import { refuseLiveQuery } from '../../../services/QuerySourceService/live/query/refuse';
 import { runLiveRequest } from '../../../services/QuerySourceService/live/query/run';
 import { getLiveIntegration } from '../../../services/QuerySourceService/live/registry';
 import { getLiveSourceTestCheck } from '../../../services/QuerySourceService/live/testCheck';
@@ -158,6 +166,7 @@ import {
     type GoogleConnectorType,
 } from './googleOAuth';
 import { type GoogleServiceAccountTokenProvider } from './GoogleServiceAccountTokenProvider';
+import { fetchFromHydra } from './hydraFetch';
 import {
     buildLinkedInAdsAuthorizeUrl,
     getLinkedInAdsOAuthRedirectUri,
@@ -190,6 +199,10 @@ import {
     serializeRequestBody,
     validateCustomHeaders,
 } from './proxyValidation';
+import {
+    buildSalesforceAuthorizeUrl,
+    getSalesforceOAuthRedirectUri,
+} from './salesforceOAuth';
 
 type ExternalConnectionServiceArguments = {
     allowedPrivateHostCidrs: AllowedPrivateHostCidrs;
@@ -219,7 +232,10 @@ type ExternalConnectionServiceArguments = {
         | 'getApiSourceFieldIds'
     >;
     encryptionUtil: Pick<EncryptionUtil, 'encrypt' | 'decrypt'>;
-    lightdashConfig: Pick<LightdashConfig, 'siteUrl' | 'liveSources' | 'auth'>;
+    lightdashConfig: Pick<
+        LightdashConfig,
+        'siteUrl' | 'liveSources' | 'auth' | 'scheduler'
+    >;
 };
 
 export type PostHogRegion = keyof typeof POSTHOG_REGION_ORIGINS;
@@ -250,10 +266,27 @@ export type PostHogOAuthSession = {
 export type LinkedInAdsOAuthSession = {
     projectUuid: string;
     name: string;
+    explorePrefix?: string;
     adAccountId: string;
     connectionUuid: string | null;
     clientId: string;
     redirectUri: string;
+};
+
+/** What the Salesforce sign-in callback needs from the request that started it. */
+export type SalesforceOAuthSession = {
+    projectUuid: string;
+    name: string;
+    explorePrefix?: string;
+    connectionUuid: string | null;
+    clientId: string;
+    redirectUri: string;
+    codeVerifier: string;
+    /**
+     * Which login host the sign-in started on; the code is exchanged there too.
+     * Missing on sessions started before a deploy that added it.
+     */
+    environment?: SalesforceEnvironment;
 };
 
 /** What the Google sign-in callback needs from the request that started it. */
@@ -282,6 +315,9 @@ const GOOGLE_API_TIMEOUT_MS = 10_000;
 const GOOGLE_API_RESPONSE_MAX_BYTES = 1024 * 1024;
 const LINKEDIN_ACCOUNT_CHECK_TIMEOUT_MS = 10_000;
 const LINKEDIN_ACCOUNT_CHECK_MAX_BYTES = 1024 * 1024;
+const SALESFORCE_OBJECT_CHECK_TIMEOUT_MS = 10_000;
+// A describe lists every field with its picklist values
+const SALESFORCE_OBJECT_CHECK_MAX_BYTES = 10 * 1024 * 1024;
 
 export class ExternalConnectionService extends BaseService {
     private readonly allowedPrivateHostCidrs: AllowedPrivateHostCidrs;
@@ -306,7 +342,7 @@ export class ExternalConnectionService extends BaseService {
 
     private readonly lightdashConfig: Pick<
         LightdashConfig,
-        'siteUrl' | 'liveSources' | 'auth'
+        'siteUrl' | 'liveSources' | 'auth' | 'scheduler'
     >;
 
     private readonly encryptionUtil: Pick<
@@ -1214,7 +1250,10 @@ export class ExternalConnectionService extends BaseService {
         );
     }
 
-    /** What each live source in the project has sent its integration. */
+    /**
+     * What each live source in the project has sent its integration, over the
+     * query history retention window that the call log is cleaned to.
+     */
     async getApiSourceUsage(
         account: RegisteredAccount,
         projectUuid: string,
@@ -1227,7 +1266,14 @@ export class ExternalConnectionService extends BaseService {
             throw new NotFoundError('Project not found');
         }
         this.assertCanManage(account, projectUuid, organizationUuid);
-        return this.externalConnectionModel.getApiSourceUsage(projectUuid);
+        const windowDays =
+            this.lightdashConfig.scheduler.queryHistory.cleanup.retentionDays;
+        const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+        const usage = await this.externalConnectionModel.getApiSourceUsage(
+            projectUuid,
+            since,
+        );
+        return usage.map((row) => ({ ...row, windowDays }));
     }
 
     /**
@@ -2260,7 +2306,7 @@ export class ExternalConnectionService extends BaseService {
                     );
                 }
                 // The query text stays out of analytics; it can hold filter values.
-                const errorCode = getLiveSourceQueryErrorCode(call.outcome);
+                const { errorCode } = call;
                 this.analytics.trackAccount(account, {
                     event: 'live_source.query_finished',
                     properties: {
@@ -2435,7 +2481,8 @@ export class ExternalConnectionService extends BaseService {
         const connection = withApiSourceAccessRules(storedConnection);
         let callsThisQuery = 0;
         const integration = getLiveIntegration(apiSource.connector);
-        const { label, limits } = integration;
+        const { label } = integration;
+        const limits = integration.limitsFor?.(apiSource) ?? integration.limits;
         const usage: LiveCallUsage = {
             apiCalls: 0,
             responseBytes: 0,
@@ -2487,7 +2534,8 @@ export class ExternalConnectionService extends BaseService {
         const send: LiveTransport = async (request) => {
             callsThisQuery += 1;
             if (isPerQuery && callsThisQuery > limits.callsPerQuery) {
-                throw new ParameterError(
+                throw refuseLiveQuery(
+                    'live_source.refused.call_budget',
                     `This query needs more than ${limits.callsPerQuery} ${label} API calls. Narrow it with filters or a shorter time range.`,
                 );
             }
@@ -2526,6 +2574,10 @@ export class ExternalConnectionService extends BaseService {
         const linkedInAds = this.lightdashConfig.liveSources.linkedinAds;
         if (clientId === linkedInAds.oauthClientId) {
             return linkedInAds.oauthClientSecret ?? null;
+        }
+        const { salesforce } = this.lightdashConfig.liveSources;
+        if (clientId === salesforce.oauthClientId) {
+            return salesforce.oauthClientSecret ?? null;
         }
         const google = this.getGoogleClient();
         return google && clientId === google.clientId
@@ -2931,6 +2983,7 @@ export class ExternalConnectionService extends BaseService {
         projectUuid: string,
         request: {
             name: string;
+            explorePrefix?: string;
             adAccountId: string;
             connectionUuid: string | null;
         },
@@ -2991,6 +3044,7 @@ export class ExternalConnectionService extends BaseService {
             session: {
                 projectUuid,
                 name,
+                explorePrefix: request.explorePrefix,
                 adAccountId,
                 connectionUuid,
                 clientId: oauthClientId,
@@ -3073,6 +3127,9 @@ export class ExternalConnectionService extends BaseService {
 
         const config = withApiSourceAccessRules<CreateExternalConnection>({
             name: session.name,
+            ...(session.explorePrefix
+                ? { explorePrefix: session.explorePrefix }
+                : {}),
             type: 'oauth_authorization_code',
             origin: LINKEDIN_ADS_ORIGIN,
             secret: serializeStoredOAuthTokens(grant.tokens),
@@ -3080,6 +3137,260 @@ export class ExternalConnectionService extends BaseService {
                 connector: ApiConnectorType.LINKEDIN_ADS,
                 adAccountId,
             },
+            oauthTokenUrl: client.tokenUrl,
+            oauthClientId: client.clientId,
+            oauthClientAuthMethod: null,
+            oauthScopes: null,
+            apiKeyName: null,
+            apiKeyLocation: null,
+            allowedPathPrefixes: [],
+            allowedMethods: [],
+            allowedContentTypes: [],
+            allowBrowserImages: false,
+            allowDataAppBuilderLinking: false,
+            forwardUserIdentity: false,
+            instructions: null,
+        });
+        return this.saveSignedInConnection(account, {
+            projectUuid,
+            organizationUuid,
+            connectionUuid: session.connectionUuid,
+            config,
+        });
+    }
+
+    /** Refuses a Salesforce reconnect of another kind of source or to another org. */
+    private static assertSameSalesforceSource(
+        existing: ExternalConnection,
+        granted: { origin: string | null },
+    ) {
+        if (existing.apiSource?.connector !== ApiConnectorType.SALESFORCE) {
+            throw new ParameterError(
+                `Live data source "${existing.name}" isn't a Salesforce source`,
+            );
+        }
+        if (granted.origin !== null && existing.origin !== granted.origin) {
+            throw new ParameterError(
+                `Sign in to the same Salesforce org to reconnect "${existing.name}" (${existing.origin})`,
+            );
+        }
+    }
+
+    /** Starts the Salesforce sign-in that creates a source, or reconnects one. */
+    async startSalesforceOAuth(
+        account: RegisteredAccount,
+        projectUuid: string,
+        request: {
+            name: string;
+            explorePrefix?: string;
+            connectionUuid: string | null;
+            /** Ignored on reconnect, which keeps the source's own login host. */
+            environment?: string;
+        },
+    ): Promise<{
+        authorizeUrl: string;
+        state: string;
+        session: SalesforceOAuthSession;
+    }> {
+        const { oauthClientId, oauthClientSecret } =
+            this.lightdashConfig.liveSources.salesforce;
+        if (!oauthClientId || !oauthClientSecret) {
+            throw new MissingConfigError(
+                'Signing in to Salesforce is not configured on this server. Set SALESFORCE_OAUTH_CLIENT_ID and SALESFORCE_OAUTH_CLIENT_SECRET.',
+            );
+        }
+        await this.assertCanManageLiveSources(account, projectUuid);
+        const name = request.name.trim();
+        if (!name) {
+            throw new ParameterError('Name is required');
+        }
+        const { connectionUuid } = request;
+        let environment: SalesforceEnvironment;
+        if (connectionUuid) {
+            const existing = await this.getOwnedConnection(
+                account,
+                projectUuid,
+                connectionUuid,
+            );
+            ExternalConnectionService.assertSameSalesforceSource(existing, {
+                origin: null,
+            });
+            environment =
+                getSalesforceEnvironment(existing.oauthTokenUrl ?? null) ??
+                'production';
+        } else if (request.environment === undefined) {
+            environment = 'production';
+        } else if (isSalesforceEnvironment(request.environment)) {
+            environment = request.environment;
+        } else {
+            throw new ParameterError(
+                'Salesforce environment must be production or sandbox',
+            );
+        }
+
+        const state = randomBytes(24).toString('base64url');
+        const codeVerifier = randomBytes(32).toString('base64url');
+        const redirectUri = getSalesforceOAuthRedirectUri(
+            this.lightdashConfig.siteUrl,
+        );
+        return {
+            authorizeUrl: buildSalesforceAuthorizeUrl({
+                clientId: oauthClientId,
+                redirectUri,
+                state,
+                codeChallenge: createHash('sha256')
+                    .update(codeVerifier)
+                    .digest('base64url'),
+                environment,
+            }),
+            state,
+            session: {
+                projectUuid,
+                name,
+                explorePrefix: request.explorePrefix,
+                connectionUuid,
+                clientId: oauthClientId,
+                redirectUri,
+                codeVerifier,
+                environment,
+            },
+        };
+    }
+
+    /** Whether the signed-in user can read an object's describe. */
+    private async canReadSalesforceObject(
+        instanceOrigin: string,
+        object: SalesforceObject,
+        accessToken: string,
+    ): Promise<boolean> {
+        const response = await secureFetch(
+            `${instanceOrigin}${getSalesforceDescribePath(object)}`,
+            {
+                method: 'GET',
+                headers: { Authorization: `Bearer ${accessToken}` },
+                timeoutMs: SALESFORCE_OBJECT_CHECK_TIMEOUT_MS,
+                maxResponseBytes: SALESFORCE_OBJECT_CHECK_MAX_BYTES,
+                allowedContentTypes: ['application/json'],
+                allowedPrivateHostCidrs: this.allowedPrivateHostCidrs,
+            },
+        );
+        if (response.status < 200 || response.status >= 300) {
+            this.logger.warn(
+                `Salesforce ${object} check returned ${response.status}`,
+            );
+            return false;
+        }
+        return true;
+    }
+
+    /** Refuses a sign-in whose user can read none of the objects a source reads. */
+    private async assertCanReadSalesforceObjects(
+        instanceOrigin: string,
+        accessToken: string,
+    ) {
+        const readable = await Promise.all(
+            SALESFORCE_OBJECTS.map((object) =>
+                this.canReadSalesforceObject(
+                    instanceOrigin,
+                    object,
+                    accessToken,
+                ),
+            ),
+        );
+        if (!readable.some(Boolean)) {
+            throw new WarehouseConnectionError(
+                `This Salesforce user can't read ${SALESFORCE_OBJECTS.join(
+                    ', ',
+                )}. Sign in with a user who has the "API Enabled" permission and read access to them.`,
+            );
+        }
+    }
+
+    /** Exchanges the sign-in code and stores the tokens on a new or reconnected source. */
+    async completeSalesforceOAuth(
+        account: RegisteredAccount,
+        session: SalesforceOAuthSession,
+        code: string,
+    ): Promise<ExternalConnection> {
+        const { projectUuid } = session;
+        const organizationUuid =
+            await this.externalConnectionModel.getProjectOrganizationUuid(
+                projectUuid,
+            );
+        if (!organizationUuid) {
+            throw new NotFoundError('Project not found');
+        }
+        this.assertCanManage(account, projectUuid, organizationUuid);
+        await this.assertLiveSourcesEnabled(account);
+
+        const client: OAuthAuthorizationCodeClientConfig = {
+            // Sessions started before this field existed have none: production
+            tokenUrl: getSalesforceTokenUrl(
+                session.environment ?? 'production',
+            ),
+            clientId: session.clientId,
+            clientSecret: this.getOAuthClientSecret(session.clientId),
+        };
+        let grant: Awaited<
+            ReturnType<OAuthAuthorizationCodeTokenClient['exchangeCode']>
+        >;
+        try {
+            grant = await this.oauthAuthorizationCodeTokenClient.exchangeCode(
+                client,
+                {
+                    code,
+                    redirectUri: session.redirectUri,
+                    codeVerifier: session.codeVerifier,
+                },
+            );
+        } catch (error) {
+            this.logger.warn(
+                `Salesforce sign-in failed: ${getErrorMessage(error)}`,
+            );
+            throw new WarehouseConnectionError(
+                'Salesforce did not accept the sign-in. Try connecting again.',
+            );
+        }
+        // The org's own API host comes with the token, and every call goes there
+        const instanceUrl = grant.response.instance_url;
+        const origin =
+            typeof instanceUrl === 'string'
+                ? instanceUrl.replace(/\/+$/, '').toLowerCase()
+                : '';
+        if (!isSalesforceInstanceOrigin(origin)) {
+            throw new WarehouseConnectionError(
+                'Salesforce signed in without a My Domain URL Lightdash can call. Check the org has My Domain deployed.',
+            );
+        }
+        if (!grant.tokens.refreshToken) {
+            throw new WarehouseConnectionError(
+                'Salesforce did not grant a refresh token. Add the "Perform requests at any time (refresh_token, offline_access)" scope to the Connected App.',
+            );
+        }
+        if (session.connectionUuid) {
+            ExternalConnectionService.assertSameSalesforceSource(
+                await this.getOwnedConnection(
+                    account,
+                    projectUuid,
+                    session.connectionUuid,
+                ),
+                { origin },
+            );
+        }
+        await this.assertCanReadSalesforceObjects(
+            origin,
+            grant.tokens.accessToken,
+        );
+
+        const config = withApiSourceAccessRules<CreateExternalConnection>({
+            name: session.name,
+            ...(session.explorePrefix
+                ? { explorePrefix: session.explorePrefix }
+                : {}),
+            type: 'oauth_authorization_code',
+            origin,
+            secret: serializeStoredOAuthTokens(grant.tokens),
+            apiSource: { connector: ApiConnectorType.SALESFORCE },
             oauthTokenUrl: client.tokenUrl,
             oauthClientId: client.clientId,
             oauthClientAuthMethod: null,
@@ -3839,17 +4150,31 @@ export class ExternalConnectionService extends BaseService {
             headers['Content-Type'] = 'application/json';
         }
 
-        // Delegate to the SSRF-hardened fetch.
+        // Delegate to the SSRF-hardened fetch. Hydra, the test integration,
+        // answers in-process and never reaches the network.
+        const { apiSource } = connection;
         const fetchResource = () =>
-            secureFetch(url, {
-                method: req.method,
-                body,
-                headers,
-                timeoutMs: connection.timeoutMs,
-                maxResponseBytes: connection.responseMaxBytes,
-                allowedContentTypes: connection.allowedContentTypes,
-                allowedPrivateHostCidrs: this.allowedPrivateHostCidrs,
-            });
+            apiSource?.connector === ApiConnectorType.HYDRA
+                ? fetchFromHydra({
+                      connectionUuid: connection.externalConnectionUuid,
+                      settings: apiSource,
+                      secret,
+                      timeoutMs: connection.timeoutMs,
+                      request: {
+                          method: req.method === 'GET' ? 'GET' : 'POST',
+                          path: validatedPath,
+                          body: req.body,
+                      },
+                  })
+                : secureFetch(url, {
+                      method: req.method,
+                      body,
+                      headers,
+                      timeoutMs: connection.timeoutMs,
+                      maxResponseBytes: connection.responseMaxBytes,
+                      allowedContentTypes: connection.allowedContentTypes,
+                      allowedPrivateHostCidrs: this.allowedPrivateHostCidrs,
+                  });
 
         let fetched;
         try {

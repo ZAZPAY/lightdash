@@ -430,8 +430,9 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                     spacePermissionService:
                         repository.getSpacePermissionService(),
                 }),
-            semanticStudioService: ({ models, repository, clients }) =>
+            semanticStudioService: ({ models, repository, clients, context }) =>
                 new SemanticStudioService({
+                    analytics: context.lightdashAnalytics,
                     schedulerClient:
                         clients.getSchedulerClient() as CommercialSchedulerClient,
                     featureFlagModel: models.getFeatureFlagModel(),
@@ -1927,6 +1928,8 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
         ],
         schedulerWorkerFactory: (context) =>
             new CommercialSchedulerWorker({
+                apiSourceCallLog:
+                    context.models.getExternalConnectionModel<ExternalConnectionModel>(),
                 analyticsProjectService:
                     context.serviceRepository.getAnalyticsProjectService<AnalyticsProjectService>(),
                 getAgentConnectionGrantService: () =>

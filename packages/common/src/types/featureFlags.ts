@@ -217,13 +217,6 @@ export enum FeatureFlags {
     SemanticStudioEditing = 'semantic-studio-editing',
 
     /**
-     * Undo and redo for the chart being built in the Explorer: the header
-     * buttons and their keyboard shortcuts. Off by default; resolves per user
-     * or organization. It gates the browser only, there is no backend action.
-     */
-    ExplorerUndoRedo = 'explorer-undo-redo',
-
-    /**
      * Configurable retention for AI agent threads. Off by default; enabled
      * per-org on demand for enterprise customers.
      */
@@ -275,21 +268,11 @@ export enum FeatureFlags {
      */
     AthenaWebIdentityAuth = 'athena-web-identity-auth',
     /**
-     * Organization-scoped: the Mobile page under Your settings, with links to
-     * install and sign in to the mobile apps. Off by default.
-     */
-    MobileSettings = 'mobile-settings',
-    /**
      * Organization-scoped: the Billing page under Organization settings, which
      * opens the customer billing portal. Cloud and development modes only.
      * Off by default.
      */
     BillingPortal = 'billing-portal',
-    /**
-     * Organization-scoped: the sign-in step on the Mobile page and its
-     * endpoints. Off by default until an app release supports QR sign-in.
-     */
-    MobileQrSignIn = 'mobile-qr-sign-in',
     /**
      * Organization-scoped, on by default: the organization can use the mobile
      * apps. An organization override set to off denies every mobile sign-in

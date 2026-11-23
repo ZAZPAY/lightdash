@@ -281,6 +281,8 @@ import { ProjectHomepageController } from './../ee/controllers/projectHomepageCo
 // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
 import { ReleaseHighlightsController } from './../ee/controllers/releaseHighlightsController';
 // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+import { SalesforceOAuthController } from './../ee/controllers/salesforceOAuthController';
+// WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
 import { SchedulerAiAugmentationController } from './../ee/controllers/schedulerAiAugmentationController';
 // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
 import { ScimGroupController } from './../ee/controllers/scimGroupController';
@@ -16148,6 +16150,8 @@ const models: TsoaRoute.Models = {
             'pylon',
             'attio',
             'hubspot',
+            'salesforce',
+            'hydra',
         ],
     },
     // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
@@ -16386,7 +16390,6 @@ const models: TsoaRoute.Models = {
         type: {
             dataType: 'nestedObjectLiteral',
             nestedProperties: {
-                object: { dataType: 'string', required: true },
                 connector: { ref: 'ApiConnectorType.ATTIO', required: true },
             },
             validators: {},
@@ -16409,6 +16412,49 @@ const models: TsoaRoute.Models = {
         },
     },
     // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    'ApiConnectorType.SALESFORCE': {
+        dataType: 'refEnum',
+        enums: ['salesforce'],
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    SalesforceApiSource: {
+        dataType: 'refAlias',
+        type: {
+            dataType: 'nestedObjectLiteral',
+            nestedProperties: {
+                connector: {
+                    ref: 'ApiConnectorType.SALESFORCE',
+                    required: true,
+                },
+            },
+            validators: {},
+        },
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    'ApiConnectorType.HYDRA': {
+        dataType: 'refEnum',
+        enums: ['hydra'],
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    HydraApiSource: {
+        dataType: 'refAlias',
+        type: {
+            dataType: 'nestedObjectLiteral',
+            nestedProperties: {
+                callsPerHour: { dataType: 'double', required: true },
+                callsPerMinute: { dataType: 'double', required: true },
+                rowCount: { dataType: 'double', required: true },
+                failAuth: { dataType: 'boolean', required: true },
+                retryAfterSeconds: { dataType: 'double', required: true },
+                retryAfterEvery: { dataType: 'double', required: true },
+                errorRate: { dataType: 'double', required: true },
+                latencyMs: { dataType: 'double', required: true },
+                connector: { ref: 'ApiConnectorType.HYDRA', required: true },
+            },
+            validators: {},
+        },
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
     ExternalConnectionApiSource: {
         dataType: 'refAlias',
         type: {
@@ -16425,6 +16471,8 @@ const models: TsoaRoute.Models = {
                 { ref: 'PylonApiSource' },
                 { ref: 'AttioApiSource' },
                 { ref: 'HubspotApiSource' },
+                { ref: 'SalesforceApiSource' },
+                { ref: 'HydraApiSource' },
             ],
             validators: {},
         },
@@ -17105,6 +17153,7 @@ const models: TsoaRoute.Models = {
                 responseBytes: { dataType: 'double', required: true },
                 cacheHits: { dataType: 'double', required: true },
                 apiCalls: { dataType: 'double', required: true },
+                windowDays: { dataType: 'double', required: true },
                 externalConnectionUuid: { dataType: 'string', required: true },
             },
             validators: {},
@@ -36480,6 +36529,7 @@ const models: TsoaRoute.Models = {
                 { dataType: 'enum', enums: ['loadProjectContext'] },
                 { dataType: 'enum', enums: ['loadSkill'] },
                 { dataType: 'enum', enums: ['proposeSemanticLayerChange'] },
+                { dataType: 'enum', enums: ['read'] },
                 { dataType: 'enum', enums: ['readAttachments'] },
                 { dataType: 'enum', enums: ['readContent'] },
                 { dataType: 'enum', enums: ['readPinnedThread'] },
@@ -36496,7 +36546,9 @@ const models: TsoaRoute.Models = {
                 { dataType: 'enum', enums: ['submitWorkerFindings'] },
                 { dataType: 'enum', enums: ['syncDbtProject'] },
                 { dataType: 'enum', enums: ['updateUserName'] },
+                { dataType: 'enum', enums: ['verify'] },
                 { dataType: 'enum', enums: ['visualize'] },
+                { dataType: 'enum', enums: ['write'] },
             ],
             validators: {},
         },
@@ -42577,6 +42629,13 @@ const models: TsoaRoute.Models = {
                                                                                                 dataType:
                                                                                                     'enum',
                                                                                                 enums: [
+                                                                                                    'read',
+                                                                                                ],
+                                                                                            },
+                                                                                            {
+                                                                                                dataType:
+                                                                                                    'enum',
+                                                                                                enums: [
                                                                                                     'compile',
                                                                                                 ],
                                                                                             },
@@ -42585,13 +42644,6 @@ const models: TsoaRoute.Models = {
                                                                                                     'enum',
                                                                                                 enums: [
                                                                                                     'edit',
-                                                                                                ],
-                                                                                            },
-                                                                                            {
-                                                                                                dataType:
-                                                                                                    'enum',
-                                                                                                enums: [
-                                                                                                    'read',
                                                                                                 ],
                                                                                             },
                                                                                             {
@@ -48729,6 +48781,8 @@ const models: TsoaRoute.Models = {
         type: {
             dataType: 'nestedObjectLiteral',
             nestedProperties: {
+                requestedByAgent: { dataType: 'boolean', required: true },
+                compileRequestUuid: { dataType: 'string', required: true },
                 compiledAt: {
                     dataType: 'union',
                     subSchemas: [
@@ -48808,6 +48862,58 @@ const models: TsoaRoute.Models = {
         dataType: 'refAlias',
         type: {
             ref: 'ApiSuccess_SemanticStudioCheckout-or-null_',
+            validators: {},
+        },
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    SemanticStudioBranchCompileFollowUp: {
+        dataType: 'refAlias',
+        type: {
+            dataType: 'nestedObjectLiteral',
+            nestedProperties: {
+                prompt: { dataType: 'string', required: true },
+                threadUuid: { dataType: 'string', required: true },
+                agentUuid: { dataType: 'string', required: true },
+            },
+            validators: {},
+        },
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    'ApiSuccess_SemanticStudioBranchCompileFollowUp-or-null_': {
+        dataType: 'refAlias',
+        type: {
+            dataType: 'nestedObjectLiteral',
+            nestedProperties: {
+                results: {
+                    dataType: 'union',
+                    subSchemas: [
+                        { ref: 'SemanticStudioBranchCompileFollowUp' },
+                        { dataType: 'enum', enums: [null] },
+                    ],
+                    required: true,
+                },
+                status: { dataType: 'enum', enums: ['ok'], required: true },
+            },
+            validators: {},
+        },
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    ApiSemanticStudioBranchCompileFollowUpResponse: {
+        dataType: 'refAlias',
+        type: {
+            ref: 'ApiSuccess_SemanticStudioBranchCompileFollowUp-or-null_',
+            validators: {},
+        },
+    },
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    SemanticStudioBranchCompileFollowUpBody: {
+        dataType: 'refAlias',
+        type: {
+            dataType: 'nestedObjectLiteral',
+            nestedProperties: {
+                threadUuid: { dataType: 'string', required: true },
+                compileRequestUuid: { dataType: 'string', required: true },
+            },
             validators: {},
         },
     },
@@ -93068,6 +93174,138 @@ export function RegisterRoutes(app: Router) {
         },
     );
     // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    const argsSalesforceOAuthController_startSalesforceOAuth: Record<
+        string,
+        TsoaRoute.ParameterSchema
+    > = {
+        req: { in: 'request', name: 'req', required: true, dataType: 'object' },
+        projectUuid: {
+            in: 'path',
+            name: 'projectUuid',
+            required: true,
+            dataType: 'string',
+        },
+        name: { in: 'query', name: 'name', required: true, dataType: 'string' },
+        connectionUuid: {
+            in: 'query',
+            name: 'connectionUuid',
+            dataType: 'string',
+        },
+        returnTo: { in: 'query', name: 'returnTo', dataType: 'string' },
+        environment: { in: 'query', name: 'environment', dataType: 'string' },
+        explorePrefix: {
+            in: 'query',
+            name: 'explorePrefix',
+            dataType: 'string',
+        },
+    };
+    app.get(
+        '/api/v1/ee/projects/:projectUuid/live-sources/salesforce/oauth/start',
+        ...fetchMiddlewares<RequestHandler>(SalesforceOAuthController),
+        ...fetchMiddlewares<RequestHandler>(
+            SalesforceOAuthController.prototype.startSalesforceOAuth,
+        ),
+
+        async function SalesforceOAuthController_startSalesforceOAuth(
+            request: ExRequest,
+            response: ExResponse,
+            next: any,
+        ) {
+            // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+
+            let validatedArgs: any[] = [];
+            try {
+                validatedArgs = templateService.getValidatedArgs({
+                    args: argsSalesforceOAuthController_startSalesforceOAuth,
+                    request,
+                    response,
+                });
+
+                const container: IocContainer =
+                    typeof iocContainer === 'function'
+                        ? (iocContainer as IocContainerFactory)(request)
+                        : iocContainer;
+
+                const controller: any =
+                    await container.get<SalesforceOAuthController>(
+                        SalesforceOAuthController,
+                    );
+                if (typeof controller['setStatus'] === 'function') {
+                    controller.setStatus(undefined);
+                }
+
+                await templateService.apiHandler({
+                    methodName: 'startSalesforceOAuth',
+                    controller,
+                    response,
+                    next,
+                    validatedArgs,
+                    successStatus: 302,
+                });
+            } catch (err) {
+                return next(err);
+            }
+        },
+    );
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    const argsSalesforceOAuthController_salesforceOAuthCallback: Record<
+        string,
+        TsoaRoute.ParameterSchema
+    > = {
+        req: { in: 'request', name: 'req', required: true, dataType: 'object' },
+        code: { in: 'query', name: 'code', dataType: 'string' },
+        state: { in: 'query', name: 'state', dataType: 'string' },
+        error: { in: 'query', name: 'error', dataType: 'string' },
+    };
+    app.get(
+        '/api/v1/ee/salesforce/oauth/callback',
+        ...fetchMiddlewares<RequestHandler>(SalesforceOAuthController),
+        ...fetchMiddlewares<RequestHandler>(
+            SalesforceOAuthController.prototype.salesforceOAuthCallback,
+        ),
+
+        async function SalesforceOAuthController_salesforceOAuthCallback(
+            request: ExRequest,
+            response: ExResponse,
+            next: any,
+        ) {
+            // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+
+            let validatedArgs: any[] = [];
+            try {
+                validatedArgs = templateService.getValidatedArgs({
+                    args: argsSalesforceOAuthController_salesforceOAuthCallback,
+                    request,
+                    response,
+                });
+
+                const container: IocContainer =
+                    typeof iocContainer === 'function'
+                        ? (iocContainer as IocContainerFactory)(request)
+                        : iocContainer;
+
+                const controller: any =
+                    await container.get<SalesforceOAuthController>(
+                        SalesforceOAuthController,
+                    );
+                if (typeof controller['setStatus'] === 'function') {
+                    controller.setStatus(undefined);
+                }
+
+                await templateService.apiHandler({
+                    methodName: 'salesforceOAuthCallback',
+                    controller,
+                    response,
+                    next,
+                    validatedArgs,
+                    successStatus: 302,
+                });
+            } catch (err) {
+                return next(err);
+            }
+        },
+    );
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
     const argsReleaseHighlightsController_getReleaseHighlights: Record<
         string,
         TsoaRoute.ParameterSchema
@@ -95429,6 +95667,11 @@ export function RegisterRoutes(app: Router) {
             dataType: 'string',
         },
         returnTo: { in: 'query', name: 'returnTo', dataType: 'string' },
+        explorePrefix: {
+            in: 'query',
+            name: 'explorePrefix',
+            dataType: 'string',
+        },
     };
     app.get(
         '/api/v1/ee/projects/:projectUuid/live-sources/linkedin/oauth/start',
@@ -115943,6 +116186,73 @@ export function RegisterRoutes(app: Router) {
 
                 await templateService.apiHandler({
                     methodName: 'compileCheckout',
+                    controller,
+                    response,
+                    next,
+                    validatedArgs,
+                    successStatus: 200,
+                });
+            } catch (err) {
+                return next(err);
+            }
+        },
+    );
+    // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+    const argsSemanticStudioController_claimCompileFollowUp: Record<
+        string,
+        TsoaRoute.ParameterSchema
+    > = {
+        req: { in: 'request', name: 'req', required: true, dataType: 'object' },
+        projectUuid: {
+            in: 'path',
+            name: 'projectUuid',
+            required: true,
+            ref: 'UUID',
+        },
+        body: {
+            in: 'body',
+            name: 'body',
+            required: true,
+            ref: 'SemanticStudioBranchCompileFollowUpBody',
+        },
+    };
+    app.post(
+        '/api/v1/projects/:projectUuid/semantic-studio/checkout/compile/follow-up',
+        ...fetchMiddlewares<RequestHandler>(SemanticStudioController),
+        ...fetchMiddlewares<RequestHandler>(
+            SemanticStudioController.prototype.claimCompileFollowUp,
+        ),
+
+        async function SemanticStudioController_claimCompileFollowUp(
+            request: ExRequest,
+            response: ExResponse,
+            next: any,
+        ) {
+            // WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+
+            let validatedArgs: any[] = [];
+            try {
+                validatedArgs = templateService.getValidatedArgs({
+                    args: argsSemanticStudioController_claimCompileFollowUp,
+                    request,
+                    response,
+                });
+
+                const container: IocContainer =
+                    typeof iocContainer === 'function'
+                        ? (iocContainer as IocContainerFactory)(request)
+                        : iocContainer;
+
+                const controller: any =
+                    await container.get<SemanticStudioController>(
+                        SemanticStudioController,
+                    );
+                if (typeof controller['setStatus'] === 'function') {
+                    controller.setStatus(undefined);
+                }
+
+                await templateService.apiHandler({
+                    methodName: 'claimCompileFollowUp',
                     controller,
                     response,
                     next,
