@@ -72,8 +72,9 @@ export type LiveRateLimitBucket = {
 };
 
 /**
- * One connection's rate limits, as data. Not enforced yet: the limiter
- * still reads `limits` on the integration definition.
+ * One integration's rate limits, as data. The rate-limit gate charges every
+ * bucket on every call, spaces calls by `callsPerSecond`, and caps calls in
+ * flight at `concurrentCalls`.
  */
 export type LiveRateLimits = {
     /** Calls one connection may have in flight at once. */
@@ -83,6 +84,8 @@ export type LiveRateLimits = {
     buckets: readonly LiveRateLimitBucket[];
     /** Only for something a reader must know that the numbers can't say. */
     note?: string;
+    /** Shown to admins with the limits they can lower; unlike `note`, written for customers. */
+    cardNote?: string;
 };
 
 /**

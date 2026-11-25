@@ -25,6 +25,9 @@
 }
 
 .settingsTitle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
     padding-left: 2px;
     font-size: 12px;
     font-weight: 500;
@@ -41,8 +44,22 @@
     color: var(--mantine-color-dimmed);
 }
 
-.testOutcomeIcon {
-    flex: none;
+.testOutcome {
+    display: inline-flex;
+    animation: testOutcomeIn 200ms ease-out;
+}
+
+@keyframes testOutcomeIn {
+    from {
+        opacity: 0;
+        transform: translateY(2px);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .testOutcome {
+        animation: none;
+    }
 }
 
 .settingsCode {

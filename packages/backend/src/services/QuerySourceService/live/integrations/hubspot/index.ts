@@ -1,9 +1,11 @@
 import {
     ApiConnectorType,
+    getHubspotPipelinesPath,
     getHubspotPropertiesPath,
     getHubspotSearchPath,
     HUBSPOT_OBJECTS,
     HUBSPOT_ORIGIN,
+    HUBSPOT_PIPELINE_OBJECTS,
     LIVE_INTEGRATION_CATALOG,
     ParameterError,
     TimeFrames,
@@ -45,19 +47,17 @@ export const hubspotIntegration = defineLiveIntegration({
     settings: CATALOG.settings,
     origins: [HUBSPOT_ORIGIN],
     access: () => ({
-        pathPrefixes: HUBSPOT_OBJECTS.flatMap((object) => [
-            getHubspotPropertiesPath(object),
-            getHubspotSearchPath(object),
-        ]),
+        pathPrefixes: [
+            ...HUBSPOT_OBJECTS.flatMap((object) => [
+                getHubspotPropertiesPath(object),
+                getHubspotSearchPath(object),
+            ]),
+            ...HUBSPOT_PIPELINE_OBJECTS.map(getHubspotPipelinesPath),
+        ],
         // Records are searched with POST, properties read with GET
         methods: ['GET', 'POST'],
     }),
-    // HubSpot allows about 5 searches a second per account, and private
-    // apps 100 to 190 calls per 10 seconds by plan.
     limits: {
-        concurrentCalls: 2,
-        callsPerMinute: 240,
-        callsPerHour: 10_000,
         callsPerQuery: HUBSPOT_MAX_PAGES,
         timeoutMs: 30_000,
         maxRows: HUBSPOT_MAX_ROWS,
@@ -102,6 +102,8 @@ export const hubspotIntegration = defineLiveIntegration({
         description:
             'Search returns up to 200 records a page and stops at 10,000 results.',
     },
+    // HubSpot allows about 5 searches a second per account, and private
+    // apps 100 to 190 calls per 10 seconds by plan.
     rateLimits: {
         concurrentCalls: 5,
         callsPerSecond: 4,
@@ -124,7 +126,7 @@ export const hubspotIntegration = defineLiveIntegration({
         }
     },
     describeTarget: () =>
-        'HubSpot CRM: deals, contacts, companies, tickets and leads',
+        'HubSpot CRM: deals, contacts, companies, tickets and leads, plus deal and ticket pipeline stages',
     parseRequest: jsonRequest(`${LABEL} search`, hubspotRequestSchema),
     compile: ({ explore, metricQuery, now }) =>
         compileHubspotQuery({

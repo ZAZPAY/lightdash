@@ -6,6 +6,7 @@ import {
     type ExternalConnectionApiSource,
 } from '../ee/externalConnections/types';
 import { ApiConnectorType } from '../types/querySources';
+import { HYDRA_SETTINGS_SCHEMA } from './hydraLiveSource';
 
 /** How an admin connects a source, which decides the dialog it opens. */
 export type LiveSourceSetupKind =
@@ -13,7 +14,9 @@ export type LiveSourceSetupKind =
     | 'posthog'
     | 'token'
     | 'linkedin_ads'
-    | 'salesforce';
+    | 'salesforce'
+    | 'amplitude'
+    | 'mixpanel';
 
 type LiveIntegrationCatalogFields<C extends ApiConnectorType> = {
     /** Stable id, sent with analytics events. */
@@ -219,6 +222,33 @@ export const LIVE_INTEGRATION_CATALOG: {
         }),
         getTarget: () => 'Salesforce org',
     },
+    [ApiConnectorType.AMPLITUDE]: {
+        id: 'amplitude',
+        label: 'Amplitude',
+        defaultName: 'Amplitude',
+        messageLabel: 'Amplitude',
+        agentLabel: 'Amplitude',
+        description: 'Events, active users, funnels, retention and sessions',
+        setup: 'amplitude',
+        settings: z.object({
+            connector: z.literal(ApiConnectorType.AMPLITUDE),
+        }),
+        getTarget: () => 'Amplitude project',
+    },
+    [ApiConnectorType.MIXPANEL]: {
+        id: 'mixpanel',
+        label: 'Mixpanel',
+        defaultName: 'Mixpanel',
+        messageLabel: 'Mixpanel',
+        agentLabel: 'Mixpanel',
+        description: 'Events, saved funnels and retention',
+        setup: 'mixpanel',
+        settings: z.object({
+            connector: z.literal(ApiConnectorType.MIXPANEL),
+            projectId: z.string(),
+        }),
+        getTarget: ({ projectId }) => `Project ${projectId}`,
+    },
     [ApiConnectorType.HYDRA]: {
         id: 'hydra',
         label: 'Hydra',
@@ -227,17 +257,7 @@ export const LIVE_INTEGRATION_CATALOG: {
         agentLabel: 'Hydra',
         description: 'Test integration with seeded events and users',
         setup: 'token',
-        settings: z.object({
-            connector: z.literal(ApiConnectorType.HYDRA),
-            latencyMs: z.number().int().min(0).max(120_000),
-            errorRate: z.number().min(0).max(1),
-            retryAfterEvery: z.number().int().min(0),
-            retryAfterSeconds: z.number().int().min(0).max(3_600),
-            failAuth: z.boolean(),
-            rowCount: z.number().int().min(0).max(100_000),
-            callsPerMinute: z.number().int().min(1),
-            callsPerHour: z.number().int().min(1),
-        }),
+        settings: HYDRA_SETTINGS_SCHEMA,
         getTarget: () => 'Hydra test data',
     },
 };
@@ -281,11 +301,6 @@ export const REQUESTABLE_LIVE_INTEGRATIONS = [
         id: 'stripe',
         label: 'Stripe',
         description: 'Payments, subscriptions and revenue',
-    },
-    {
-        id: 'mixpanel',
-        label: 'Mixpanel',
-        description: 'Product events, funnels and retention',
     },
     {
         id: 'jira',
