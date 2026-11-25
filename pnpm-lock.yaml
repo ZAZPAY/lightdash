@@ -4040,9 +4040,9 @@ packages:
   '@hapi/wreck@18.1.0':
     resolution: {integrity: sha512-0z6ZRCmFEfV/MQqkQomJ7sl/hyxvcZM7LtuVqN3vdAO4vM9eBbowl0kaqQj9EJJQab+3Uuh1GxbGIBFy4NfJ4w==}
 
-  '@hono/node-server@1.19.9':
-    resolution: {integrity: sha512-vHL6w3ecZsky+8P5MD+eFfaGTyCeOHUIFYMGpQGbrBTSmNNoxv0if69rEZ5giu36weC5saFuznL411gRX7bJDw==}
-    engines: {node: '>=18.14.1'}
+  '@hono/node-server@2.1.11':
+    resolution: {integrity: sha512-KzKz9vl4vvr1vgLHamj+g5uonbrj5NwAdO3yzOS6cd2HjALVeOgTgeZOyAzNxejbkfOOPIcvuf/Tg8l1pEFLog==}
+    engines: {node: '>=20'}
     peerDependencies:
       hono: 4.13.11
 
@@ -19514,7 +19514,7 @@ snapshots:
       '@hapi/bourne': 3.0.0
       '@hapi/hoek': 11.0.7
 
-  '@hono/node-server@1.19.9(hono@4.13.11)':
+  '@hono/node-server@2.1.11(hono@4.13.11)':
     dependencies:
       hono: 4.13.11
 
@@ -19854,7 +19854,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.0(patch_hash=8ddd650062d401c1833a672fa7fffbbbb228101bbc01e6b2603c86fa93996377)(@cfworker/json-schema@4.1.1)(supports-color@5.5.0)(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 1.19.9(hono@4.13.11)
+      '@hono/node-server': 2.1.11(hono@4.13.11)
       ajv: 8.18.0
       ajv-formats: 3.0.1(ajv@8.18.0)
       content-type: 1.0.5
@@ -19878,7 +19878,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.0(patch_hash=8ddd650062d401c1833a672fa7fffbbbb228101bbc01e6b2603c86fa93996377)(@cfworker/json-schema@4.1.1)(supports-color@9.1.0)(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 1.19.9(hono@4.13.11)
+      '@hono/node-server': 2.1.11(hono@4.13.11)
       ajv: 8.18.0
       ajv-formats: 3.0.1(ajv@8.18.0)
       content-type: 1.0.5
