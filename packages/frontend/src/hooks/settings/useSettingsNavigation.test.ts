@@ -39,7 +39,7 @@ const settingsContext = (
     isAiOrganizationSettingsLoading: false,
     dataAppsFlag: undefined,
     isDataAppsFlagLoading: false,
-    isApiQuerySourcesEnabled: false,
+    isLiveSourcesAvailable: false,
     isChartStudioAvailable: false,
     isResultsCacheAvailable: false,
     embeddingEnabled: undefined,
@@ -496,16 +496,18 @@ describe('Project connections settings navigation', () => {
                         name: 'Project',
                     } as Project,
                     user: {
-                        ability: new Ability([
-                            {
-                                action: 'manage',
-                                subject: 'ExternalConnection',
-                                conditions: {
-                                    organizationUuid: 'org',
-                                    projectUuid: 'project',
-                                },
-                            },
-                        ]),
+                        ability: new Ability(
+                            ['ExternalConnection', 'LiveSource'].map(
+                                (subject) => ({
+                                    action: 'manage',
+                                    subject,
+                                    conditions: {
+                                        organizationUuid: 'org',
+                                        projectUuid: 'project',
+                                    },
+                                }),
+                            ),
+                        ),
                     } as SettingsContext['user'],
                     projectSettingsAccess: {
                         type: 'full',
@@ -521,7 +523,7 @@ describe('Project connections settings navigation', () => {
         projectItems(overrides).map(({ label }) => label);
 
     it('links Live data sources to the Semantic Layer page, marked as moved', () => {
-        const item = projectItems({ isApiQuerySourcesEnabled: true }).find(
+        const item = projectItems({ isLiveSourcesAvailable: true }).find(
             ({ label }) => label === 'Live data sources',
         );
         expect(item).toMatchObject({
@@ -563,10 +565,35 @@ describe('Project connections settings navigation', () => {
     });
 
     it('shows Live data sources without Data app connections when only live sources are enabled', () => {
-        const labels = projectLabels({ isApiQuerySourcesEnabled: true });
+        const labels = projectLabels({ isLiveSourcesAvailable: true });
         expect(labels).toContain('Live data sources');
         expect(labels).not.toContain('Data app connections');
     });
+
+    it.each([
+        ['ExternalConnection', false],
+        ['LiveSource', true],
+    ])(
+        'shows Live data sources to someone who manages only %s: %s',
+        (subject, shown) => {
+            const labels = projectLabels({
+                isLiveSourcesAvailable: true,
+                user: {
+                    ability: new Ability([
+                        {
+                            action: 'manage',
+                            subject,
+                            conditions: {
+                                organizationUuid: 'org',
+                                projectUuid: 'project',
+                            },
+                        },
+                    ]),
+                } as SettingsContext['user'],
+            });
+            expect(labels.includes('Live data sources')).toBe(shown);
+        },
+    );
 
     it('shows Data app connections without Live data sources when only data apps are enabled', () => {
         const labels = projectLabels({

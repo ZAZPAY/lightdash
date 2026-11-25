@@ -42,7 +42,6 @@ import type {
     ApiAiAgentThreadSummaryListResponse,
     ApiAiAgentThreadWorkstreamsResponse,
     ApiAiAgentUserMemoriesResponse,
-    ApiAiAgentVerifiedArtifactsResponse,
     ApiAiCreditDailyUsageResponse,
     ApiAiCreditUsageResponse,
     ApiAiGenerateChartMetadataResponse,
@@ -67,7 +66,6 @@ import type {
     ApiAppendInstructionResponse,
     ApiAppImageUploadResponse,
     ApiAppThumbnailUrlResponse,
-    ApiCaptureRouteResponse,
     ApiCaptureTranscriptResponse,
     ApiCloneAiAgentThreadShareResponse,
     ApiCreateEvaluationResponse,
@@ -95,6 +93,8 @@ import type {
     ApiInstallRegistryChartTypeResponse,
     ApiListDataAppVizsResponse,
     ApiListRegistryChartTypesResponse,
+    ApiLiveSourceAccessResponse,
+    ApiLiveSourceContentUsageResponse,
     ApiLiveSourceFieldsResponse,
     ApiManagedAgentActionResponse,
     ApiManagedAgentRunResponse,
@@ -125,6 +125,7 @@ import type {
     EmbedUrl,
     ExternalConnection,
     ExternalConnectionLinkedApps,
+    ExternalConnectionRateLimitUsage,
     ExternalConnectionSample,
     ExternalFetchResponse,
     ManagedAgentRuntimeInfo,
@@ -490,6 +491,7 @@ import {
     type ApiSemanticLayerDraftResponse,
     type ApiSemanticLayerDraftStateResponse,
     type ApiSemanticLayerDraftUsageResponse,
+    type ApiSemanticLayerOthersDraftModelResponse,
     type ApiSemanticStudioBranchCompileFollowUpResponse,
     type ApiSemanticStudioCheckoutResponse,
     type ApiSemanticStudioSourceFileResponse,
@@ -927,7 +929,7 @@ export type HealthState = {
         isAmbientAiEnabled: boolean;
         threadDumpEnabled: boolean;
         fastDecisionsEnabled: boolean;
-        /** Instance can turn recorded speech into text (Voice Design). */
+        /** Instance can turn recorded speech into text (Design Mode). */
         voiceTranscriptionAvailable: boolean;
     };
     echarts6: {
@@ -1744,7 +1746,9 @@ type ApiResults =
     | ApiVirtualViewAsCodeUpsertResponse['results']
     | ApiExternalConnectionAsCodeListResponse['results']
     | ApiExternalConnectionAsCodeUpsertResponse['results']
+    | ApiLiveSourceContentUsageResponse['results']
     | ApiLiveSourceFieldsResponse['results']
+    | ApiLiveSourceAccessResponse['results']
     | ApiExplorePrefixCheckResponse['results']
     | ApiReattachableLiveSourcesResponse['results']
     | ApiSpaceAsCodeListResponse['results']
@@ -1832,7 +1836,6 @@ type ApiResults =
     | ApiAiAgentEvaluationRunResponse['results']
     | ApiAiAgentEvaluationRunSummaryListResponse['results']
     | ApiAiAgentEvaluationRunResultsResponse['results']
-    | ApiAiAgentVerifiedArtifactsResponse['results']
     | ApiCreateEvaluationResponse['results']
     | ApiAgentSuggestionsResponse['results']
     | ApiAppendInstructionResponse['results']
@@ -1849,7 +1852,6 @@ type ApiResults =
     | ApiAiReviewNotificationSettingsResponse['results']
     | ApiAiRouterResponse['results']
     | ApiAiRouterRouteResponse['results']
-    | ApiCaptureRouteResponse['results']
     | ApiAiRouterInstructionResponse['results']
     | ApiAiRouterDecisionCommitResponse['results']
     | ApiAiRouterDecisionListResponse['results']
@@ -1920,6 +1922,7 @@ type ApiResults =
     | ExternalConnection
     | ExternalConnection[]
     | ExternalConnectionLinkedApps
+    | ExternalConnectionRateLimitUsage
     | ExternalConnectionSample
     | ExternalConnectionSample[]
     | AppExternalConnectionLink
@@ -1937,6 +1940,7 @@ type ApiResults =
     | ApiAiProviderCredentialCreatedResponse['results']
     | ApiProjectAiCredentialResponse['results']
     | ApiSemanticLayerDraftResponse['results']
+    | ApiSemanticLayerOthersDraftModelResponse['results']
     | ApiSemanticLayerDraftModelSaveResponse['results']
     | ApiSemanticLayerDraftedModelsResponse['results']
     | ApiSemanticLayerDraftStateResponse['results']
